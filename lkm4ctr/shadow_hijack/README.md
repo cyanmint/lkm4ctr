@@ -12,7 +12,7 @@ prototypes) that this subsystem implements and every caller includes.
 
 Earlier revisions kept this logic as `static inline` helpers directly in
 `shadow_hook.h`, so each module got its own private copy compiled in and no
-shared `.ko` was required. Now that five different modules hook syscalls,
+shared `.ko` was required. Now that multiple subsystems hook syscalls,
 that duplication was wasteful and, more importantly, made the recursion guard
 (see below) fragile. The implementation now lives in exactly one place —
 this subsystem — and `shadow_hook.h` is a purely declarative ABI header shared
@@ -56,8 +56,8 @@ address lies within the module that *owns* the hook
 (`within_module(caller_pc, hook->owner)`). In the merged build
 `THIS_MODULE` resolves to the unified `lkm4ctr.ko`, which is exactly what
 we want: the pass-through call is always made from code inside that same
-module (e.g. `shadow_sysvipc`'s
-`svipc_hook_msgget()` calling `real_sys_msgget()`), never from code inside
+module (e.g. `vendor_kernel`'s
+`vns_sys_msgget()` calling `real_sys_msgget()`), never from code inside
 some unrelated external module. `struct shadow_hook::owner` is therefore
 populated with the caller's `THIS_MODULE` by the `SHADOW_HOOK()` initialiser
 macro (see `shadow_hook.h`), and both backends here check

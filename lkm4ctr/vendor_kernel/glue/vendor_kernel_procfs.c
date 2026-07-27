@@ -112,8 +112,8 @@ static unsigned long vns_procfs_arg3(const struct pt_regs *regs) { return regs->
 #error "vendor_kernel: unsupported architecture"
 #endif
 
-/* Bare "self"/"thread-self"/numeric-pid path component, matching
- * shadow_ns_component_is_pid_dir()'s definition of a valid procfs pid dir. */
+/* Bare "self"/"thread-self"/numeric-pid path component used for procfs pid
+ * path parsing in the namespace-fallback helpers below. */
 static bool vns_component_is_pid_dir(const char *s)
 {
 	if (!*s)
@@ -152,10 +152,9 @@ static bool vns_dfd_is_procfs(int dfd)
 /*
  * vns_resolve_ns_pid() - resolve the "self"/"thread-self"/numeric path
  * component immediately preceding "/ns/{ipc,pid}" to the real (host) pid it
- * names. Numeric components are taken to already be real pids: unlike
- * shadow_ns, vendor_kernel's vendored PID namespace still installs the real
- * task->nsproxy, so no separate vpid<->rpid translation table is needed
- * here.
+ * names. Numeric components are taken to already be real pids: vendor_kernel's
+ * vendored PID namespace installs the real task->nsproxy directly, so no
+ * separate vpid<->rpid translation table is needed here.
  */
 static pid_t vns_resolve_ns_pid(const char *comp)
 {
@@ -393,20 +392,18 @@ static long vendor_kernel_hook_readlink(const struct pt_regs *regs)
 
 /*
  * /proc/<pid>/setgroups fabrication on kernels genuinely missing
- * CONFIG_USER_NS -- mirrors shadow_ns_procfs.c's identical fabrication
- * almost verbatim (see that file's header comment for the full rationale:
- * fs/proc/base.c only wires up the "setgroups" per-pid dentry
+ * CONFIG_USER_NS: fs/proc/base.c only wires up the "setgroups" per-pid dentry
  * "#ifdef CONFIG_USER_NS", so modern runc/containerd's unconditional
  * open()/openat2() sanity-check of "self/setgroups" as part of its "is this
  * really an unrestricted procfs" probe fails with plain -ENOENT and aborts
  * container creation with "unsafe procfs detected", independent of whether
- * the container itself asked for a new user namespace).
+ * the container itself asked for a new user namespace.
  *
- * Just like shadow_ns, the fabricated descriptor stores a simple one-way
- * "allow" -> "deny" latch on its own private inode (via
- * anon_inode_getfd_secure(), resolved through shadow_hook_resolve() for the
- * same CONFIG_TRIM_UNUSED_KSYMS reasons as shadow_ns_procfs.c), rather than
- * being wired to vendor_kernel's own real per-task user_namespace
+ * The fabricated descriptor stores a simple one-way "allow" -> "deny" latch
+ * on its own private inode (via anon_inode_getfd_secure(), resolved through
+ * shadow_hook_resolve() for the same CONFIG_TRIM_UNUSED_KSYMS reasons as the
+ * rest of this file), rather than being wired to vendor_kernel's own real
+ * per-task user_namespace
  * (kernel/user_namespace.c's vns_proc_setgroups_show()/_write(), reachable
  * via current_cred()->user_ns) -- reproducing the exact allow/deny/
  * gid-map-set interactions real setgroups(7) has with a specific
@@ -484,9 +481,8 @@ static long vns_setgroups_create_fd(void)
 	/*
 	 * anon_inode_getfd_secure() (not the plain, shared-singleton-inode
 	 * anon_inode_getfd()) is required here so the magic-link reopen
-	 * above succeeds -- see shadow_ns_procfs.c's shadow_ns_setgroups_create_fd()
-	 * for the full explanation of both that and why the symbol must be
-	 * resolved via shadow_hook_resolve() rather than called directly.
+	 * above succeeds, and the symbol still needs to be resolved via
+	 * shadow_hook_resolve() rather than called directly.
 	 */
 	anon_inode_getfd_secure_fn = (vns_anon_inode_getfd_secure_fn)
 		shadow_hook_resolve("anon_inode_getfd_secure");

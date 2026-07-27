@@ -1,9 +1,9 @@
 # shadow_hook — shared syscall hijacking ABI
 
 `shadow_hook.h` is a small, purely declarative header that defines the ABI
-shared by every syscall-hooking module in the `lkm4ctr` family
-(`shadow_ns`, `shadow_sysvipc`, `shadow_mqueue`,
-`shadow_cgdevices`; see `../README.md` for the umbrella overview). It is what
+shared by every syscall-hooking subsystem in the `lkm4ctr` family
+(`vendor_kernel` and `shadow_cgdevices`; see `../README.md` for the umbrella
+overview). It is what
 turns those modules from an ioctl API that a *patched* container runtime must
 opt into, into a **transparent MITM layer**: a stock, unpatched
 `containerd`/`runc`/`dockerd` calls the real syscalls (`unshare(2)`,
@@ -74,7 +74,7 @@ static struct shadow_hook unshare_hook =
 
 static struct shadow_hook *all_hooks[] = { &unshare_hook, NULL };
 
-/* module_init: */ shadow_hook_install_all(all_hooks, "shadow_ns");
+/* module_init: */ shadow_hook_install_all(all_hooks, "vendor_kernel");
 /* module_exit: */ shadow_hook_remove_all(all_hooks);
 ```
 
@@ -83,8 +83,9 @@ static struct shadow_hook *all_hooks[] = { &unshare_hook, NULL };
 * A hook redirects *entry* to a syscall wrapper; it cannot fabricate struct
   layout support (e.g. `task_struct::nsproxy`) that was never compiled into
   `vmlinux`. Each module still only provides the level of behaviour documented
-  in its own README (e.g. `shadow_ns` provides fully functional UTS/PID/USER
-  isolation, IPC/NET remain bookkeeping-only) — `shadow_hook` only removes
+  in its own README (e.g. `vendor_kernel` provides the real vendored
+  UTS/PID/USER/IPC/mqueue paths but still documents NET/MNT/CGROUP caveats) —
+  `shadow_hook` only removes
   the *userspace patch* requirement to reach that behaviour, it does not
   upgrade the underlying simulation fidelity.
 * If a kernel is built *with* the corresponding native subsystem

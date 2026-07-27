@@ -185,11 +185,9 @@ unsigned long flags,
 	 * would fire, in vns_task_exit_cleanup() (kernel/nsproxy.c), the same
 	 * do_exit() exit-safety kprobe this module already installs -- see
 	 * that function's comment, and vns_zap_pid_ns_processes() below, for
-	 * the shadow_ns-style reduced-scope cascade (SIGKILL everyone else in
-	 * the namespace, then stop admitting new members; orphan
-	 * reparenting/reaping is left to the host's own genuine parent chain,
-	 * exactly like shadow_ns's documented zap_pid_ns_processes()
-	 * fallback in shadow_ns/shadow_ns_pid.c).
+	 * the reduced-scope cascade used here (SIGKILL everyone else in the
+	 * namespace, then stop admitting new members; orphan
+	 * reparenting/reaping is left to the host's own genuine parent chain).
 	 */
 	if (!(flags & CLONE_NEWPID))
 		return vns_get_pid_ns(old_ns); /* [BUILD-COMPAT] */
@@ -243,11 +241,9 @@ void vns_zap_pid_ns_processes(struct pid_namespace *pid_ns) /* [RENAME] */
 	 * vns_task_exit_cleanup()'s do_exit() kprobe pre_handler (atomic
 	 * context; see the comment there). Only the safe, non-blocking half
 	 * of the real cascade is reproduced here -- SIGKILL every other task
-	 * this namespace's idr still tracks -- exactly like shadow_ns's own
-	 * reduced-scope zap fallback (shadow_ns/shadow_ns_pid.c: "SIGKILL
-	 * everyone else in the namespace, then stop admitting new members").
+	 * this namespace's idr still tracks, then stop admitting new members.
 	 * Orphan reparenting/reaping is deliberately left to the host's own
-	 * genuine parent chain, same documented limitation as shadow_ns.
+	 * genuine parent chain.
 	 */
 	rcu_read_lock();
 	read_lock(&tasklist_lock);

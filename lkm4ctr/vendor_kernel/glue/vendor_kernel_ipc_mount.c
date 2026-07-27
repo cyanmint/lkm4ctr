@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * vendor_kernel_ipc_mount.c - proactive "/dev/mqueue" mount at module load
- * time, mirroring shadow_mqueue's own "Proactive /dev/mqueue creation" (see
- * ../../shadow_mqueue/README.md and shadow_mqueue/shadow_mqueue_mount.c).
+ * time.
  *
  * This is NEW code (not vendored from kernel-common).
  *
@@ -11,10 +10,7 @@
  * mqueue_fs_type in ipc/mqueue.c), so an unmodified runc/containerd/dockerd's
  * own mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC,
  * ...) call succeeds by finding it through the normal get_fs_type("mqueue")
- * lookup - no mount(2) hook is needed for that path, unlike shadow_mqueue
- * (which never registers a filesystem type under the real "mqueue" name at
- * all, see shadow_mqueue/README.md's "Architecture" section, and so has to
- * hook mount(2) itself to retry as tmpfs).
+ * lookup - no mount(2) hook is needed for that path.
  *
  * But that only helps a *container's* mount(2) call. lkm4ctr.ko is typically
  * insmod'd late (e.g. as a KernelSU/Magisk post-fs-data module), well after
@@ -22,8 +18,7 @@
  * ran on the host and silently failed with -ENODEV (init never retries a
  * failed boot-time mount). That leaves /dev/mqueue nonexistent, or an empty,
  * never-mounted directory, for the rest of boot on the *host* mount
- * namespace - exactly the scenario shadow_mqueue's proactive mount was
- * written to fix. So vendor_kernel does the same thing here: create
+ * namespace. So vendor_kernel fixes it here: create
  * /dev/mqueue (if missing) and mount it directly, without waiting for any
  * mount(2) call that may never come.
  *
@@ -56,8 +51,7 @@
 /*
  * vfs_mkdir()'s signature has changed twice upstream: it gained a
  * struct user_namespace * first parameter in v5.12, replaced by a
- * struct mnt_idmap * in v6.3. Same version split used by shadow_mqueue's own
- * copy of this shim (shadow_mqueue/shadow_mqueue_mount.c).
+ * struct mnt_idmap * in v6.3.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 typedef int (*vns_mq_vfs_mkdir_fn)(struct mnt_idmap *, struct inode *,
@@ -90,8 +84,8 @@ typedef void (*vns_mq_path_put_fn)(const struct path *);
  * Tries our own real "mqueue" filesystem type first (registered by
  * ipc/mqueue.c's vns_mqueue_fs_init(), see mqueue_fs_type there), which is
  * what makes the mounted /dev/mqueue an actually working POSIX mqueue rather
- * than shadow_mqueue's tmpfs stand-in. Falls back to tmpfs, same as
- * shadow_mqueue, only in the unexpected case that mount fails (e.g. the
+ * than a plain tmpfs stand-in. Falls back to tmpfs only in the unexpected
+ * case that mount fails (e.g. the
  * "mqueue" name was already taken by the real kernel's own builtin
  * CONFIG_POSIX_MQUEUE=y filesystem and *that* mount somehow still fails here)
  * so /dev/mqueue is left as a working mountpoint either way.

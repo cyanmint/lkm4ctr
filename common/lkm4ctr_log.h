@@ -15,7 +15,7 @@
  *
  *   1. Always appends the formatted message to a small fixed-capacity,
  *      spinlock-protected circular buffer (lkm4ctr_log.c), tagged with the
- *      calling subsystem's name (e.g. "shadow_ns", "safe_unload"). This
+ *      calling subsystem's name (e.g. "vendor_kernel", "safe_unload"). This
  *      buffer is what the lkm4ctr diagfs (lkm4ctr_diagfs.c)'s per-module
  *      `log` files and the top-level `safe_unload` file render on read().
  *      Because logging can happen from a kprobe pre_handler (atomic

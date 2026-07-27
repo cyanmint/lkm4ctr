@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * shadow_hook - tiny ftrace/kprobe-based function hijacking ABI shared by the
- * shadow_ns / shadow_sysvipc / shadow_mqueue / shadow_cgdevices subsystems.
+ * shadow_hijack / vendor_kernel / shadow_cgdevices subsystems.
  *
  * Motivation
  * ----------

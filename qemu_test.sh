@@ -133,9 +133,8 @@ lkm4ctr_init_2() {
 	# vendor_kernel's ipc/mqueue.c now registers its POSIX mqueue filesystem
 	# type under the real name "mqueue" (see mqueue_fs_type in
 	# lkm4ctr/vendor_kernel/ipc/mqueue.c), and vns_ipc_default_init() (via
-	# glue/vendor_kernel_ipc_mount.c's vns_mqueue_dev_ensure(), mirroring
-	# shadow_mqueue's own proactive /dev/mqueue creation) already mounts a
-	# real, working /dev/mqueue at module load time (insmod). An unmodified
+	# glue/vendor_kernel_ipc_mount.c's vns_mqueue_dev_ensure()) already
+	# mounts a real, working /dev/mqueue at module load time (insmod). An unmodified
 	# runc/containerd's own mount("mqueue", "/dev/mqueue", "mqueue", ...)
 	# during container init now
 	# finds and uses that real filesystem directly, so no manual /dev/mqueue

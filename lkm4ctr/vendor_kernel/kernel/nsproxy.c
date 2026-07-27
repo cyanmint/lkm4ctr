@@ -901,8 +901,8 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 		 * find_child_reaper() takes its "reaper != father" fast path
 		 * moments later in this same do_exit() call instead of ever
 		 * reaching the broken stub. See vns_zap_pid_ns_processes()
-		 * (kernel/pid_namespace.c) for the shadow_ns-style
-		 * reduced-scope cascade this runs.
+		 * (kernel/pid_namespace.c) for the reduced-scope cascade
+		 * this runs.
 		 */
 		if (pid_ns && pid_ns != &init_pid_ns &&
 		    pid_ns->child_reaper == tsk) {
