@@ -299,11 +299,23 @@ static int ovl_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return err;
 }
 
+/*
+ * lkm4ctr [BUILD-COMPAT]: generic_delete_inode() is not linked directly
+ * (see glue/vendor_kernel_ovl_vfs_compat_6_6.h) -- its entire body is
+ * `return 1;` (fs/inode.c), so it is just reimplemented locally rather
+ * than resolved via kallsyms merely to be used as this constant
+ * initializer value.
+ */
+static int ovl_generic_delete_inode(struct inode *inode)
+{
+	return 1;
+}
+
 static const struct super_operations ovl_super_operations = {
 	.alloc_inode	= ovl_alloc_inode,
 	.free_inode	= ovl_free_inode,
 	.destroy_inode	= ovl_destroy_inode,
-	.drop_inode	= generic_delete_inode,
+	.drop_inode	= ovl_generic_delete_inode,
 	.put_super	= ovl_put_super,
 	.sync_fs	= ovl_sync_fs,
 	.statfs		= ovl_statfs,
@@ -1591,6 +1603,17 @@ static void ovl_inode_init_once(void *foo)
 int vns_ovl_init(void)
 {
 	int err;
+
+	/*
+	 * [BUILD-COMPAT] resolve every VFS-internal helper this vendored
+	 * overlayfs needs but that may not be EXPORT_SYMBOL()'d on the
+	 * running kernel (see glue/vendor_kernel_ovl_vfs_compat_6_6.h). Must
+	 * happen before anything below (or any later fs_context mount/file
+	 * operation) can call through to them.
+	 */
+	err = vns_ovl_vfs_compat_6_6_resolve();
+	if (err)
+		return err;
 
 	ovl_inode_cachep = kmem_cache_create("ovl_inode",
 					     sizeof(struct ovl_inode), 0,

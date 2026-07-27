@@ -6,12 +6,30 @@
 
 #include <linux/kernel.h>
 #include <linux/uuid.h>
+#include <linux/cred.h>
 #include <linux/fs.h>
+#include <linux/mount.h>
+#include <linux/xattr.h>
+#include <linux/security.h>
 #include <linux/fsverity.h>
 #include <linux/namei.h>
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/exportfs.h>
+#include <linux/splice.h>
+#include <linux/errseq.h>
+#include <linux/fileattr.h>
 #include "ovl_entry.h"
+/*
+ * lkm4ctr [BUILD-COMPAT]: the extra Linux headers included above (beyond
+ * upstream's plain <linux/kernel.h>/<linux/uuid.h>/<linux/fs.h>/
+ * <linux/fsverity.h>/<linux/namei.h>) are needed so every symbol in
+ * glue/vendor_kernel_ovl_vfs_compat_6_12.h's
+ * VNS_OVL_VFS_COMPAT_6_12_LIST() has a visible declaration for typeof() to
+ * use, regardless of which .c file in this directory ends up including this
+ * header. See glue/vendor_kernel_ovl_vfs_compat_6_12.h.
+ */
+#include "../../glue/vendor_kernel_ovl_vfs_compat_6_12.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) "overlayfs: " fmt
@@ -385,7 +403,17 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 static inline int ovl_do_whiteout(struct ovl_fs *ofs,
 				  struct inode *dir, struct dentry *dentry)
 {
-	int err = vfs_whiteout(ovl_upper_mnt_idmap(ofs), dir, dentry);
+	/*
+	 * lkm4ctr [BUILD-COMPAT]: not the running kernel's own
+	 * vfs_whiteout() (<linux/fs.h>): that helper is static inline and its
+	 * body is preprocessed before
+	 * glue/vendor_kernel_ovl_vfs_compat_6_12.h's #define vfs_mknod takes
+	 * effect, so using it directly would reintroduce a hard reference to
+	 * the real vfs_mknod() symbol. Reimplement its one-line body through
+	 * the resolved vfs_mknod() instead.
+	 */
+	int err = vfs_mknod(ovl_upper_mnt_idmap(ofs), dir, dentry,
+			    S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV);
 	pr_debug("whiteout(%pd2) = %i\n", dentry, err);
 	return err;
 }

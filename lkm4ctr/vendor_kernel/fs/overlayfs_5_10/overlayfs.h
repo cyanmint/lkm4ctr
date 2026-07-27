@@ -7,7 +7,28 @@
 #include <linux/kernel.h>
 #include <linux/uuid.h>
 #include <linux/fs.h>
+#include <linux/namei.h>
+#include <linux/mount.h>
+#include <linux/xattr.h>
+#include <linux/security.h>
+#include <linux/cred.h>
+#include <linux/posix_acl.h>
+#include <linux/posix_acl_xattr.h>
+#include <linux/exportfs.h>
+#include <linux/splice.h>
+#include <linux/dcache.h>
+#include <linux/uio.h>
+#include <linux/errseq.h>
 #include "ovl_entry.h"
+/*
+ * lkm4ctr [BUILD-COMPAT]: the extra Linux headers included above (beyond
+ * upstream's plain <linux/kernel.h>/<linux/uuid.h>/<linux/fs.h>) are needed
+ * so every symbol in glue/vendor_kernel_ovl_vfs_compat_5_10.h's
+ * VNS_OVL_VFS_COMPAT_5_10_LIST() has a visible declaration for typeof() to
+ * use, regardless of which .c file in this directory includes this header.
+ * See glue/vendor_kernel_ovl_vfs_compat_5_10.h.
+ */
+#include "../../glue/vendor_kernel_ovl_vfs_compat_5_10.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) "overlayfs: " fmt
@@ -226,7 +247,15 @@ static inline int ovl_do_rename(struct inode *olddir, struct dentry *olddentry,
 
 static inline int ovl_do_whiteout(struct inode *dir, struct dentry *dentry)
 {
-	int err = vfs_whiteout(dir, dentry);
+	/*
+	 * lkm4ctr [BUILD-COMPAT]: not the running kernel's own
+	 * vfs_whiteout() (<linux/fs.h>): that helper is compiled inline
+	 * there, before glue/vendor_kernel_ovl_vfs_compat_5_10.h's
+	 * #define vfs_mknod takes effect, so calling it here would still
+	 * hard-link against the real vfs_mknod() symbol. Reimplement its
+	 * one-line body directly through the already-resolved vfs_mknod().
+	 */
+	int err = vfs_mknod(dir, dentry, S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV);
 	pr_debug("whiteout(%pd2) = %i\n", dentry, err);
 	return err;
 }

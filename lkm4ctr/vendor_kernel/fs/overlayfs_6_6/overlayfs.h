@@ -9,9 +9,33 @@
 #include <linux/fs.h>
 #include <linux/fsverity.h>
 #include <linux/namei.h>
+#include <linux/cred.h>
+#include <linux/xattr.h>
+#include <linux/security.h>
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/exportfs.h>
+#include <linux/splice.h>
+#include <linux/dcache.h>
+#include <linux/uio.h>
+#include <linux/errseq.h>
+#include <linux/fileattr.h>
 #include "ovl_entry.h"
+/*
+ * lkm4ctr [BUILD-COMPAT]: the extra Linux headers included above (beyond
+ * upstream's plain <linux/kernel.h>/<linux/uuid.h>/<linux/fs.h>/
+ * <linux/fsverity.h>/<linux/namei.h>/<linux/posix_acl.h>/
+ * <linux/posix_acl_xattr.h>) are needed so every symbol in
+ * glue/vendor_kernel_ovl_vfs_compat_6_6.h's
+ * VNS_OVL_VFS_COMPAT_6_6_LIST() has a visible declaration for typeof() to
+ * use, regardless of which .c file in this directory ends up including this
+ * header (they do not all otherwise pull in
+ * <linux/cred.h>/<linux/xattr.h>/<linux/security.h>/<linux/exportfs.h>/
+ * <linux/splice.h>/<linux/dcache.h>/<linux/uio.h>/<linux/errseq.h>/
+ * <linux/fileattr.h> themselves). See
+ * glue/vendor_kernel_ovl_vfs_compat_6_6.h.
+ */
+#include "../../glue/vendor_kernel_ovl_vfs_compat_6_6.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) "overlayfs: " fmt

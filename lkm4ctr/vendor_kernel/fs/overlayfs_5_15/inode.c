@@ -492,7 +492,13 @@ struct posix_acl *ovl_get_acl(struct inode *inode, int type, bool rcu)
 		return get_cached_acl_rcu(realinode, type);
 
 	old_cred = ovl_override_creds(inode->i_sb);
-	acl = get_acl(realinode, type);
+	/*
+	 * lkm4ctr [BUILD-COMPAT]: get_acl() is resolved via
+	 * shadow_hook_resolve() rather than #define'd to a bare name,
+	 * since this kernel's own struct inode_operations field is also
+	 * named get_acl -- see glue/vendor_kernel_ovl_vfs_compat_5_15.h.
+	 */
+	acl = vns_ovl_vfsc_5_15_get_acl(realinode, type);
 	ovl_revert_creds(inode->i_sb, old_cred);
 
 	return acl;
@@ -699,9 +705,21 @@ static const struct inode_operations ovl_special_inode_operations = {
 	.update_time	= ovl_update_time,
 };
 
+/*
+ * lkm4ctr [BUILD-COMPAT]: noop_direct_IO() is not linked directly (see
+ * glue/vendor_kernel_ovl_vfs_compat_5_15.h) -- its entire body is
+ * `return -EINVAL;` (fs/libfs.c), so it is just reimplemented locally
+ * rather than resolved via kallsyms merely to be used as this constant
+ * initializer value.
+ */
+static ssize_t ovl_noop_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+{
+	return -EINVAL;
+}
+
 static const struct address_space_operations ovl_aops = {
 	/* For O_DIRECT dentry_open() checks f_mapping->a_ops->direct_IO */
-	.direct_IO		= noop_direct_IO,
+	.direct_IO		= ovl_noop_direct_IO,
 };
 
 /*

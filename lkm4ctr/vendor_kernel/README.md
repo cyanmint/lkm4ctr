@@ -312,6 +312,31 @@ minimal edits applied independently in each era's `super.c` (and, for the
   new `vns_ovl_kill_sb()` wrapper around `kill_anon_super()`) and is
   surfaced through vendor_kernel's diagfs status
   (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
+- **All 5 eras** (`[5.10, 5.15)`, `[5.15, 6.1)`, `[6.1, 6.3)`, `[6.6, 6.7)`
+  and `[6.12, 6.13)`) resolve the subset of direct VFS/security/exportfs/
+  fileattr helpers they each call, or use as function-pointer values, by
+  name at module load time via kallsyms
+  (`glue/vendor_kernel_ovl_vfs_compat_5_10.{h,c}`,
+  `glue/vendor_kernel_ovl_vfs_compat_5_15.{h,c}`,
+  `glue/vendor_kernel_ovl_vfs_compat.{h,c}`,
+  `glue/vendor_kernel_ovl_vfs_compat_6_6.{h,c}` and
+  `glue/vendor_kernel_ovl_vfs_compat_6_12.{h,c}`), instead of linking against
+  them directly at `vns_ovl_init()` time. This avoids `CONFIG_TRIM_UNUSED_KSYMS`/
+  GKI allow-list "Unknown symbol ... (err -2)" `insmod` failures on kernels
+  that trim those helpers out of the module symbol table despite the
+  underlying functions still existing in vmlinux; each era only resolves the
+  exact subset of helpers its own vendored sources actually reference (the
+  set differs slightly per era as the upstream VFS API evolved). The few
+  compile-time-only initializer helpers (`generic_delete_inode()`,
+  `noop_direct_IO()`) are reimplemented as tiny local wrappers instead of
+  being resolved, since `struct inode_operations`/`struct
+  file_operations` initializers require compile-time constants, not runtime
+  function pointers; `get_acl()` (5.10/5.15/6.1 eras) is resolved but called
+  through its function pointer explicitly rather than blanket-`#define`'d,
+  since it collides with the identically-named `struct
+  inode_operations.get_acl` field; and the 5.10 era's inline
+  `vfs_whiteout()` helper is reimplemented through the already-resolved
+  `vfs_mknod()`.
 - Every era's `super.c` carries `MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);`
   (present verbatim in the `5.10`/`5.15`/`6.6` upstream sources already; added
   here to the `6.1` and `6.12` eras, whose upstream snapshots at the time
@@ -374,6 +399,7 @@ avoided.
 - `glue/vendor_kernel_ipc_syscalls.c` - SysV IPC + POSIX mqueue syscall hooks; module-owned default `ipc_namespace` init/exit
 - `glue/vendor_kernel_ipc_compat.c` - resolves/stubs the non-exported mm/vfs/netlink/audit/security/ucounts symbols the vendored `ipc/*.c` pull in
 - `glue/vendor_kernel_overlay.c` - vendored overlayfs lifecycle + `get_fs_type("overlay")` hook (see "Vendored overlayfs" above)
+- `glue/vendor_kernel_ovl_vfs_compat*.{c,h}` - kallsyms-based VFS helper resolution for the overlayfs eras whose upstream snapshots call non-exported/trimmed helpers directly
 - `glue/vendor_kernel_diag.c` - diagfs renderer
 - `include/uapi/vendor_kernel.h` - minimal UAPI marker header
 
