@@ -747,7 +747,7 @@ const struct file_operations ovl_file_operations = {
 	.remap_file_range	= ovl_remap_file_range,
 };
 
-int __init ovl_aio_request_cache_init(void)
+int ovl_aio_request_cache_init(void)
 {
 	ovl_aio_request_cachep = kmem_cache_create("ovl_aio_req",
 						   sizeof(struct ovl_aio_req),
