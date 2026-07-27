@@ -1614,6 +1614,25 @@ struct fileattr {
 	bool	fsx_valid:1;
 };
 
+/* FS_COMMON_FL/FS_XFLAG_COMMON themselves (as opposed to struct fileattr)
+ * are also only defined by <linux/fileattr.h> from 5.13 onward, but
+ * overlayfs's ovl_copy_fileattr() (copy_up.c) references them in
+ * BUILD_BUG_ON() checks unconditionally, so they must still resolve to
+ * *something* even though the surrounding function is otherwise dead code
+ * on this tier (see the vfs_fileattr_get/_set stubs above). The individual
+ * FS_*_FL/FS_XFLAG_* bit values they're built from are all plain uapi
+ * <linux/fs.h> macros already available on 5.10, so just reproduce the
+ * upstream v5.13 fileattr.h composition here. */
+#define FS_COMMON_FL \
+	(FS_SYNC_FL | FS_IMMUTABLE_FL | FS_APPEND_FL | \
+	 FS_NODUMP_FL | FS_NOATIME_FL | FS_DAX_FL | \
+	 FS_PROJINHERIT_FL)
+
+#define FS_XFLAG_COMMON \
+	(FS_XFLAG_SYNC | FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND | \
+	 FS_XFLAG_NODUMP | FS_XFLAG_NOATIME | FS_XFLAG_DAX | \
+	 FS_XFLAG_PROJINHERIT)
+
 static inline int vfs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 {
 	return -EOPNOTSUPP;
