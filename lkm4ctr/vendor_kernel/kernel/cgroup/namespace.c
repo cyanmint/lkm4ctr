@@ -129,5 +129,5 @@ void vns_cgroup_default_init(void) /* [BUILD-COMPAT] */
 	 * shared by every task that never unshare(CLONE_NEWCGROUP)'d (same
 	 * pattern as vns_init_nsproxy.count, kernel/nsproxy.c).
 	 */
-	vns_init_count(&vns_default_cgroup_ns.ns.count, 0x40000000);
+	vns_cgroupns_init_ref(&vns_default_cgroup_ns, 0x40000000);
 }

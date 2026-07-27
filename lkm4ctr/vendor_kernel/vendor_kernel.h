@@ -154,6 +154,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
 #define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->count, (lock))
+#define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
 #else
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
@@ -168,6 +169,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->ns.count, (lock))
+#define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define VNS_TIME_REF_INIT .ns.count = REFCOUNT_INIT(1),
 #endif
 
