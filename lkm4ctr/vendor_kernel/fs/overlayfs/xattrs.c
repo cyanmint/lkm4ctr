@@ -198,6 +198,71 @@ static char *ovl_xattr_escape_name(const char *prefix, const char *name)
 	return escaped;
 }
 
+/*
+ * lkm4ctr [BUILD-COMPAT]: struct xattr_handler's ->get()/->set() member
+ * signatures differ on VNS_OVL_TIER_OLD (<5.12): ->get() takes a trailing
+ * `int flags` argument that MID/NEW tiers dropped, and ->set() has no
+ * idmap/mnt_userns argument at all (idmapped mounts don't exist yet, see
+ * the VNS_OVL_TIER_OLD note near ovl_mnt_idmap() in
+ * vendor_kernel_ovl_vfs_compat.h). Verified against
+ * include/linux/xattr.h on android12-5.10/android13-5.10 (OLD) vs.
+ * android14-6.1 (MID) and android16-6.12 (NEW).
+ */
+#if VNS_OVL_TIER_OLD
+static int ovl_own_xattr_get(const struct xattr_handler *handler,
+			     struct dentry *dentry, struct inode *inode,
+			     const char *name, void *buffer, size_t size,
+			     int flags)
+{
+	char *escaped;
+	int r;
+
+	escaped = ovl_xattr_escape_name(handler->prefix, name);
+	if (IS_ERR(escaped))
+		return PTR_ERR(escaped);
+
+	r = ovl_xattr_get(dentry, inode, escaped, buffer, size);
+
+	kfree(escaped);
+
+	return r;
+}
+
+static int ovl_own_xattr_set(const struct xattr_handler *handler,
+			     struct dentry *dentry, struct inode *inode,
+			     const char *name, const void *value,
+			     size_t size, int flags)
+{
+	char *escaped;
+	int r;
+
+	escaped = ovl_xattr_escape_name(handler->prefix, name);
+	if (IS_ERR(escaped))
+		return PTR_ERR(escaped);
+
+	r = ovl_xattr_set(dentry, inode, escaped, value, size, flags);
+
+	kfree(escaped);
+
+	return r;
+}
+
+static int ovl_other_xattr_get(const struct xattr_handler *handler,
+			       struct dentry *dentry, struct inode *inode,
+			       const char *name, void *buffer, size_t size,
+			       int flags)
+{
+	return ovl_xattr_get(dentry, inode, name, buffer, size);
+}
+
+static int ovl_other_xattr_set(const struct xattr_handler *handler,
+			       struct dentry *dentry, struct inode *inode,
+			       const char *name, const void *value,
+			       size_t size, int flags)
+{
+	return ovl_xattr_set(dentry, inode, name, value, size, flags);
+}
+#else /* !VNS_OVL_TIER_OLD */
 static int ovl_own_xattr_get(const struct xattr_handler *handler,
 			     struct dentry *dentry, struct inode *inode,
 			     const char *name, void *buffer, size_t size)
@@ -251,6 +316,7 @@ static int ovl_other_xattr_set(const struct xattr_handler *handler,
 {
 	return ovl_xattr_set(dentry, inode, name, value, size, flags);
 }
+#endif /* VNS_OVL_TIER_OLD */
 
 static const struct xattr_handler ovl_own_trusted_xattr_handler = {
 	.prefix	= OVL_XATTR_TRUSTED_PREFIX,
