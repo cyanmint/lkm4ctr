@@ -9,11 +9,13 @@
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from a
  * kernel in the [6.1, 6.3) VFS API era (idmap arguments typed as
  * struct user_namespace *, vfs_tmpfile_open(), alloc_inode_sb(),
- * vfs_set_acl_prepare() all present; struct mnt_idmap not yet introduced).
+ * vfs_set_acl_prepare() all present; struct mnt_idmap not yet introduced,
+ * mnt_user_ns() is used to obtain the idmap from a struct vfsmount *).
  * On kernels outside that range the calls below do not match the running
  * kernel's VFS prototypes at all (pre-6.1: no idmap parameters, no
  * vfs_tmpfile_open()/alloc_inode_sb()/vfs_set_acl_prepare(); 6.3+: idmap
- * arguments are struct mnt_idmap * instead). Rather than risk incorrect
+ * arguments are struct mnt_idmap * instead and mnt_user_ns() is removed in
+ * favor of mnt_idmap()). Rather than risk incorrect
  * behavior from an unverifiable cross-version port, this file's content is
  * excluded entirely outside its native range; glue/vendor_kernel_overlay.c
  * detects the same range and gracefully skips installing the vendored
