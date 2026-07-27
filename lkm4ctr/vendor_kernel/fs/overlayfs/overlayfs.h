@@ -8,7 +8,27 @@
 #include <linux/uuid.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
+#include <linux/xattr.h>
+#include <linux/security.h>
+#include <linux/posix_acl.h>
+#include <linux/posix_acl_xattr.h>
+#include <linux/exportfs.h>
+#include <linux/splice.h>
+#include <linux/errseq.h>
+#include <linux/fileattr.h>
 #include "ovl_entry.h"
+/*
+ * lkm4ctr [BUILD-COMPAT]: the extra Linux headers included above (beyond
+ * upstream's plain <linux/kernel.h>/<linux/uuid.h>/<linux/fs.h>/
+ * <linux/namei.h>) are needed so every symbol in
+ * glue/vendor_kernel_ovl_vfs_compat.h's VNS_OVL_VFS_COMPAT_LIST() has a
+ * visible declaration for typeof() to use, regardless of which .c file in
+ * this directory ends up including this header (they don't all otherwise
+ * pull in <linux/xattr.h>/<linux/security.h>/<linux/posix_acl.h>/
+ * <linux/exportfs.h>/<linux/splice.h>/<linux/errseq.h> themselves). See
+ * glue/vendor_kernel_ovl_vfs_compat.h.
+ */
+#include "../../glue/vendor_kernel_ovl_vfs_compat.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) "overlayfs: " fmt
@@ -305,7 +325,22 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 static inline int ovl_do_whiteout(struct ovl_fs *ofs,
 				  struct inode *dir, struct dentry *dentry)
 {
-	int err = vfs_whiteout(ovl_upper_mnt_userns(ofs), dir, dentry);
+	/*
+	 * lkm4ctr [BUILD-COMPAT]: not the running kernel's own
+	 * vfs_whiteout() (<linux/fs.h>): that helper is `static inline`
+	 * (never EXPORT_SYMBOL()'d/kallsyms-resolvable as its own symbol)
+	 * and its body -- compiled inline right here, at a point in
+	 * <linux/fs.h> that necessarily comes before
+	 * glue/vendor_kernel_ovl_vfs_compat.h's #define vfs_mknod takes
+	 * effect -- calls the *real*, possibly-unexported vfs_mknod()
+	 * directly, which would reintroduce exactly the "Unknown symbol
+	 * vfs_mknod" insmod failure this file exists to avoid. vfs_mknod
+	 * is already resolved above, so just reimplement vfs_whiteout()'s
+	 * one-line body (S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV) through it
+	 * directly instead.
+	 */
+	int err = vfs_mknod(ovl_upper_mnt_userns(ofs), dir, dentry,
+			     S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV);
 	pr_debug("whiteout(%pd2) = %i\n", dentry, err);
 	return err;
 }

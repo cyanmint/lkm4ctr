@@ -92,6 +92,7 @@ lkm4ctr-objs := \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_procfs.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
+	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
 	vendor_kernel/glue/vendor_kernel_diag.o \
 	vendor_kernel/glue/vendor_kernel_compat.o
 
