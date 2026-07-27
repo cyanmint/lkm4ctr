@@ -23,6 +23,7 @@
 #include <linux/uio.h>
 #include <linux/errseq.h>
 #include <linux/fileattr.h>
+#include <linux/mm.h>
 
 #include "../../../common/shadow_hook.h"
 #include "../../../common/lkm4ctr_log.h"
@@ -91,6 +92,13 @@
 #undef vfs_dedupe_file_range_one
 #undef vfs_clone_file_range
 
+#undef errseq_check
+#undef lookup_positive_unlocked
+#undef ns_capable_noaudit
+#undef vfs_fadvise
+#undef vfs_tmpfile
+#undef vma_set_file
+
 #define VNS_OVL_VFS_COMPAT_5_15_LIST(X) \
 	X(mount_nodev) \
 	X(prepare_creds) \
@@ -149,7 +157,13 @@
 	X(open_with_fake_path) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(errseq_check) \
+	X(lookup_positive_unlocked) \
+	X(ns_capable_noaudit) \
+	X(vfs_fadvise) \
+	X(vfs_tmpfile) \
+	X(vma_set_file)
 
 #define VNS_OVL_VFSC_5_15_DEFINE(name) typeof(name) *vns_ovl_vfsc_5_15_##name;
 VNS_OVL_VFS_COMPAT_5_15_LIST(VNS_OVL_VFSC_5_15_DEFINE)

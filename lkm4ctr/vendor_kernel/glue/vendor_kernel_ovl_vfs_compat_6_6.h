@@ -121,12 +121,26 @@
 	X(vfs_fallocate) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(backing_file_open) \
+	X(fsverity_get_digest) \
+	X(kernel_file_open) \
+	X(kernel_tmpfile_open) \
+	X(vfs_parse_monolithic_sep) \
+	X(vfs_remove_acl) \
+	X(vfs_set_acl)
 
 #define VNS_OVL_VFSC_6_6_DECLARE(name) \
 	extern typeof(name) *vns_ovl_vfsc_6_6_##name;
 VNS_OVL_VFS_COMPAT_6_6_LIST(VNS_OVL_VFSC_6_6_DECLARE)
 #undef VNS_OVL_VFSC_6_6_DECLARE
+#define backing_file_open (*vns_ovl_vfsc_6_6_backing_file_open)
+#define fsverity_get_digest (*vns_ovl_vfsc_6_6_fsverity_get_digest)
+#define kernel_file_open (*vns_ovl_vfsc_6_6_kernel_file_open)
+#define kernel_tmpfile_open (*vns_ovl_vfsc_6_6_kernel_tmpfile_open)
+#define vfs_parse_monolithic_sep (*vns_ovl_vfsc_6_6_vfs_parse_monolithic_sep)
+#define vfs_remove_acl (*vns_ovl_vfsc_6_6_vfs_remove_acl)
+#define vfs_set_acl (*vns_ovl_vfsc_6_6_vfs_set_acl)
 
 #define prepare_creds (*vns_ovl_vfsc_6_6_prepare_creds)
 #define errseq_sample (*vns_ovl_vfsc_6_6_errseq_sample)

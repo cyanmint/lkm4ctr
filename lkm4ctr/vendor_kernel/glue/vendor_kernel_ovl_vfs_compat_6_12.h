@@ -85,7 +85,12 @@
 	X(kernel_tmpfile_open) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(backing_file_mmap) \
+	X(backing_file_read_iter) \
+	X(backing_file_write_iter) \
+	X(backing_file_splice_read) \
+	X(backing_file_splice_write)
 
 /*
  * Pass 1: declare the resolved function pointers while every name in
@@ -94,6 +99,11 @@
 #define VNS_OVL_VFSC_6_12_DECLARE(name) extern typeof(name) *vns_ovl_vfsc_6_12_##name;
 VNS_OVL_VFS_COMPAT_6_12_LIST(VNS_OVL_VFSC_6_12_DECLARE)
 #undef VNS_OVL_VFSC_6_12_DECLARE
+#define backing_file_mmap (*vns_ovl_vfsc_6_12_backing_file_mmap)
+#define backing_file_read_iter (*vns_ovl_vfsc_6_12_backing_file_read_iter)
+#define backing_file_write_iter (*vns_ovl_vfsc_6_12_backing_file_write_iter)
+#define backing_file_splice_read (*vns_ovl_vfsc_6_12_backing_file_splice_read)
+#define backing_file_splice_write (*vns_ovl_vfsc_6_12_backing_file_splice_write)
 
 /*
  * Pass 2: redirect every bare use of each name (call expression or

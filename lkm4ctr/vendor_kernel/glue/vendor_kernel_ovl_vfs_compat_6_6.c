@@ -22,6 +22,8 @@
 #include <linux/uio.h>
 #include <linux/errseq.h>
 #include <linux/fileattr.h>
+#include <linux/fsverity.h>
+#include <linux/fs_context.h>
 
 #include "../../../common/shadow_hook.h"
 #include "../../../common/lkm4ctr_log.h"
@@ -92,6 +94,14 @@
 #undef vfs_dedupe_file_range_one
 #undef vfs_clone_file_range
 
+#undef backing_file_open
+#undef fsverity_get_digest
+#undef kernel_file_open
+#undef kernel_tmpfile_open
+#undef vfs_parse_monolithic_sep
+#undef vfs_remove_acl
+#undef vfs_set_acl
+
 #define VNS_OVL_VFS_COMPAT_6_6_LIST(X) \
 	X(prepare_creds) \
 	X(errseq_sample) \
@@ -152,7 +162,14 @@
 	X(vfs_fallocate) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(backing_file_open) \
+	X(fsverity_get_digest) \
+	X(kernel_file_open) \
+	X(kernel_tmpfile_open) \
+	X(vfs_parse_monolithic_sep) \
+	X(vfs_remove_acl) \
+	X(vfs_set_acl)
 
 #define VNS_OVL_VFSC_6_6_DEFINE(name) typeof(name) *vns_ovl_vfsc_6_6_##name;
 VNS_OVL_VFS_COMPAT_6_6_LIST(VNS_OVL_VFSC_6_6_DEFINE)

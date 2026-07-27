@@ -24,6 +24,7 @@
 #include <linux/splice.h>
 #include <linux/uio.h>
 #include <linux/xattr.h>
+#include <linux/backing-file.h>
 
 #include "../../../common/shadow_hook.h"
 #include "../../../common/lkm4ctr_log.h"
@@ -91,6 +92,12 @@
 #undef vfs_dedupe_file_range_one
 #undef vfs_clone_file_range
 
+#undef backing_file_mmap
+#undef backing_file_read_iter
+#undef backing_file_write_iter
+#undef backing_file_splice_read
+#undef backing_file_splice_write
+
 #define VNS_OVL_VFS_COMPAT_6_12_LIST(X) \
 	X(prepare_creds) \
 	X(errseq_sample) \
@@ -148,7 +155,12 @@
 	X(kernel_tmpfile_open) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(backing_file_mmap) \
+	X(backing_file_read_iter) \
+	X(backing_file_write_iter) \
+	X(backing_file_splice_read) \
+	X(backing_file_splice_write)
 
 #define VNS_OVL_VFSC_6_12_DEFINE(name) typeof(name) *vns_ovl_vfsc_6_12_##name;
 VNS_OVL_VFS_COMPAT_6_12_LIST(VNS_OVL_VFSC_6_12_DEFINE)

@@ -128,7 +128,13 @@
 	X(open_with_fake_path) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(errseq_check) \
+	X(lookup_positive_unlocked) \
+	X(ns_capable_noaudit) \
+	X(vfs_fadvise) \
+	X(vfs_tmpfile) \
+	X(vma_set_file)
 
 /*
  * Pass 1: declare the resolved function pointers while every name in
@@ -139,6 +145,12 @@
 	extern typeof(name) *vns_ovl_vfsc_5_15_##name;
 VNS_OVL_VFS_COMPAT_5_15_LIST(VNS_OVL_VFSC_5_15_DECLARE)
 #undef VNS_OVL_VFSC_5_15_DECLARE
+#define errseq_check (*vns_ovl_vfsc_5_15_errseq_check)
+#define lookup_positive_unlocked (*vns_ovl_vfsc_5_15_lookup_positive_unlocked)
+#define ns_capable_noaudit (*vns_ovl_vfsc_5_15_ns_capable_noaudit)
+#define vfs_fadvise (*vns_ovl_vfsc_5_15_vfs_fadvise)
+#define vfs_tmpfile (*vns_ovl_vfsc_5_15_vfs_tmpfile)
+#define vma_set_file (*vns_ovl_vfsc_5_15_vma_set_file)
 
 /*
  * Pass 2: redirect every bare use of each name (call expression or

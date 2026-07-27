@@ -247,14 +247,22 @@ static void do_shm_rmid(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp)
 		shm_destroy(ns, shp);
 }
 
-#ifdef CONFIG_IPC_NS
+/*
+ * [BUILD-COMPAT] upstream wraps this in "#ifdef CONFIG_IPC_NS"; vendor_kernel
+ * exists precisely to run on kernels where CONFIG_SYSVIPC/CONFIG_IPC_NS are
+ * *not* set, so that guard would compile this definition out entirely,
+ * leaving vns_free_ipc_ns()'s unconditional call to shm_exit_ns() (renamed
+ * vns_shm_exit_ns) dangling as an unresolved symbol at insmod time. Removed
+ * so this subsystem is self-contained regardless of the host kernel's
+ * CONFIG_IPC_NS setting, matching nsproxy.c/pid_namespace.c/
+ * user_namespace.c.
+ */
 void shm_exit_ns(struct ipc_namespace *ns)
 {
 	free_ipcs(ns, &shm_ids(ns), do_shm_rmid);
 	idr_destroy(&ns->ids[IPC_SHM_IDS].ipcs_idr);
 	rhashtable_destroy(&ns->ids[IPC_SHM_IDS].key_ht);
 }
-#endif
 
 #ifndef MODULE
 static int __init ipc_ns_init(void)

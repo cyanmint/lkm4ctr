@@ -54,6 +54,15 @@ MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Overlay filesystem");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
+/*
+ * [BUILD-COMPAT] many of the plain inode/dentry helpers overlayfs calls
+ * (set_nlink(), clear_inode(), ihold(), notify_change(), d_splice_alias(),
+ * iget5_locked(), ...) are EXPORT_SYMBOL_NS()'d under this namespace on
+ * production GKI kernels, producing "module uses symbol ... from namespace
+ * VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver, but does not
+ * import it" / "Unknown symbol ... (err -22)" at insmod without this.
+ */
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
 
 struct ovl_dir_cache;

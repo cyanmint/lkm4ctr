@@ -109,7 +109,18 @@
 	X(open_with_fake_path) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(d_invalidate) \
+	X(errseq_check) \
+	X(iterate_dir) \
+	X(lookup_positive_unlocked) \
+	X(override_creds) \
+	X(revert_creds) \
+	X(security_file_ioctl) \
+	X(vfs_fadvise) \
+	X(vfs_ioctl) \
+	X(vfs_setpos) \
+	X(down_write_killable)
 
 /*
  * Pass 1: declare the resolved function pointers while every name in
@@ -119,6 +130,17 @@
 #define VNS_OVL_VFSC_5_10_DECLARE(name) extern typeof(name) *vns_ovl_vfsc_5_10_##name;
 VNS_OVL_VFS_COMPAT_5_10_LIST(VNS_OVL_VFSC_5_10_DECLARE)
 #undef VNS_OVL_VFSC_5_10_DECLARE
+#define down_write_killable (*vns_ovl_vfsc_5_10_down_write_killable)
+#define d_invalidate (*vns_ovl_vfsc_5_10_d_invalidate)
+#define errseq_check (*vns_ovl_vfsc_5_10_errseq_check)
+#define iterate_dir (*vns_ovl_vfsc_5_10_iterate_dir)
+#define lookup_positive_unlocked (*vns_ovl_vfsc_5_10_lookup_positive_unlocked)
+#define override_creds (*vns_ovl_vfsc_5_10_override_creds)
+#define revert_creds (*vns_ovl_vfsc_5_10_revert_creds)
+#define security_file_ioctl (*vns_ovl_vfsc_5_10_security_file_ioctl)
+#define vfs_fadvise (*vns_ovl_vfsc_5_10_vfs_fadvise)
+#define vfs_ioctl (*vns_ovl_vfsc_5_10_vfs_ioctl)
+#define vfs_setpos (*vns_ovl_vfsc_5_10_vfs_setpos)
 
 /*
  * Pass 2: redirect every bare use of each name (call expression or

@@ -380,6 +380,18 @@ EXPORT_SYMBOL_GPL(shadow_hook_registry_set_active);
  * using the kernel's own symbol table walker; we immediately unregister the
  * (never armed for our purposes) kprobe and reuse the resolved address.
  * Returns 0 if not found.
+ *
+ * Note: this only works if register_kprobe()/unregister_kprobe() themselves
+ * are available -- i.e. CONFIG_KPROBES=y in the target kernel. Since these
+ * are the very primitives this resolver is built on, an "Unknown symbol
+ * register_kprobe"/"unregister_kprobe" error at insmod cannot be worked
+ * around by resolving them the same way (a bootstrapping/chicken-and-egg
+ * problem). CONFIG_KPROBES is effectively mandatory for any real Android
+ * GKI kernel (ftrace/perfetto tracing infrastructure depends on it), so
+ * this indicates the target kernel's own config lacks CONFIG_KPROBES
+ * (e.g. a minimal test kernel), not a normal GKI KMI symbol-list-trimming
+ * issue -- there is no supported fix for that case short of enabling
+ * CONFIG_KPROBES in the target kernel build.
  */
 unsigned long shadow_hook_resolve(const char *name)
 {

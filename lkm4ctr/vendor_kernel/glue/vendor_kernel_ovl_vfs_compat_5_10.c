@@ -23,6 +23,7 @@
 #include <linux/dcache.h>
 #include <linux/uio.h>
 #include <linux/errseq.h>
+#include <linux/rwsem.h>
 
 #include "../../../common/shadow_hook.h"
 #include "../../../common/lkm4ctr_log.h"
@@ -93,6 +94,19 @@
 #undef vfs_dedupe_file_range_one
 #undef vfs_clone_file_range
 
+#undef d_invalidate
+#undef errseq_check
+#undef iterate_dir
+#undef lookup_positive_unlocked
+#undef override_creds
+#undef revert_creds
+#undef security_file_ioctl
+#undef vfs_fadvise
+#undef vfs_ioctl
+#undef vfs_setpos
+
+#undef down_write_killable
+
 #define VNS_OVL_VFS_COMPAT_5_10_LIST(X) \
 	X(mount_nodev) \
 	X(prepare_creds) \
@@ -153,7 +167,18 @@
 	X(open_with_fake_path) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
-	X(vfs_clone_file_range)
+	X(vfs_clone_file_range) \
+	X(d_invalidate) \
+	X(errseq_check) \
+	X(iterate_dir) \
+	X(lookup_positive_unlocked) \
+	X(override_creds) \
+	X(revert_creds) \
+	X(security_file_ioctl) \
+	X(vfs_fadvise) \
+	X(vfs_ioctl) \
+	X(vfs_setpos) \
+	X(down_write_killable)
 
 #define VNS_OVL_VFSC_5_10_DEFINE(name) typeof(name) *vns_ovl_vfsc_5_10_##name;
 VNS_OVL_VFS_COMPAT_5_10_LIST(VNS_OVL_VFSC_5_10_DEFINE)

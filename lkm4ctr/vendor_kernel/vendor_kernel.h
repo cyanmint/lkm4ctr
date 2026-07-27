@@ -136,6 +136,26 @@ static inline void vns_count_inc(void *count, bool is_refcount)
 #define vns_get_count(ptr) \
 	vns_count_inc((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
 
+/*
+ * [BUILD-COMPAT] refcount_dec_and_lock() itself is not always exported /
+ * present in a given GKI KMI's trimmed symbol table ("Unknown symbol
+ * refcount_dec_and_lock (err -2)" observed at insmod on some KMIs), but its
+ * upstream implementation (lib/refcount.c) is trivially reproducible from
+ * ordinary always-available inline primitives (refcount_dec_and_test(),
+ * spin_lock()/spin_unlock()) without needing to resolve the real symbol at
+ * all. This is a faithful reimplementation of refcount_dec_and_lock(),
+ * intentionally not calling the real kernel symbol by name.
+ */
+static inline bool vns_refcount_dec_and_lock(refcount_t *r, spinlock_t *lock)
+{
+	spin_lock(lock);
+	if (!refcount_dec_and_test(r)) {
+		spin_unlock(lock);
+		return false;
+	}
+	return true;
+}
+
 static inline void vns_zero_stashed(struct ns_common *ns)
 {
 	memset(&ns->stashed, 0, sizeof(ns->stashed));
@@ -153,7 +173,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
-#define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->count, (lock))
+#define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
 #else
@@ -168,7 +188,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
-#define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->ns.count, (lock))
+#define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->ns.count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define VNS_TIME_REF_INIT .ns.count = REFCOUNT_INIT(1),
 #endif
@@ -426,6 +446,11 @@ int vns_commit_creds(struct cred *new);
 bool vns_file_ns_capable(const struct file *file, struct user_namespace *ns,
 			 int cap);
 void __noreturn vns_do_exit(long error_code);
+pid_t vns_pid_nr_ns(struct pid *pid, struct pid_namespace *ns);
+#ifdef CONFIG_KEYS
+void vns_key_put(struct key *key);
+#endif
+void vns_kill_litter_super(struct super_block *sb);
 void vns_sem_init_ns(struct ipc_namespace *ns);
 void vns_sem_exit_ns(struct ipc_namespace *ns);
 void vns_shm_init_ns(struct ipc_namespace *ns);
@@ -506,6 +531,11 @@ bool vns_is_file_shm_hugepages(struct file *file);
 #define commit_creds vns_commit_creds
 #define file_ns_capable vns_file_ns_capable
 #define do_exit vns_do_exit
+#define pid_nr_ns vns_pid_nr_ns
+#ifdef CONFIG_KEYS
+#define key_put vns_key_put
+#endif
+#define kill_litter_super vns_kill_litter_super
 #define msg_exit_ns vns_msg_exit_ns
 #define shm_destroy_orphaned vns_shm_destroy_orphaned
 #define exit_shm vns_exit_shm
