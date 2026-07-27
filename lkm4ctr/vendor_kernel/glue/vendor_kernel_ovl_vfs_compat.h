@@ -1138,7 +1138,7 @@ static inline void d_mark_tmpfile(struct file *file, struct inode *inode)
 
 /* str_on_off() renders a bool as "on"/"off". Upstream mainline only gained
  * it at 6.6 (in the new <linux/string_choices.h>), but android14-6.1
- * back-ported the same helper straight into its existing
+ * backported the same helper straight into its existing
  * include/linux/string_helpers.h (verified against
  * android.googlesource.com's include/linux/string_helpers.h and
  * include/linux/string_choices.h across all seven KMIs: android12/13-5.10
