@@ -37,6 +37,7 @@
 #include <linux/user_namespace.h>
 #include <linux/slab.h>
 #include <linux/sched/wake_q.h>
+#include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/user.h>
 
@@ -1828,6 +1829,22 @@ void vns_mqueue_fs_exit(void)
 	}
 	retire_mq_sysctls(&init_ipc_ns);
 	if (mqueue_inode_cachep) {
+		/*
+		 * kern_unmount() above tears down the superblock and evicts
+		 * its inodes, but generic VFS inode teardown (destroy_inode(),
+		 * fs/inode.c) frees each inode via call_rcu() (mqueue_free_inode()
+		 * runs from that RCU callback, see .free_inode above) rather
+		 * than synchronously. Without waiting out that grace period
+		 * first, kmem_cache_destroy() below can run while RCU-deferred
+		 * frees are still pending, which trips slub's "Objects
+		 * remaining in mqueue_inode_cache on __kmem_cache_shutdown()"
+		 * BUG splat (and, if it goes unnoticed, is a straightforward
+		 * use-after-free/UAF once the RCU callback runs against the
+		 * now-destroyed cache). Every real in-tree fs with an RCU-freed
+		 * inode cache serializes its module-exit path against this the
+		 * same way.
+		 */
+		rcu_barrier();
 		kmem_cache_destroy(mqueue_inode_cachep);
 		mqueue_inode_cachep = NULL;
 	}
