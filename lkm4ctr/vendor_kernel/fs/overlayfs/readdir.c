@@ -273,7 +273,7 @@ static void ovl_cache_put(struct ovl_dir_file *od, struct inode *inode)
 	}
 }
 
-static bool ovl_fill_merge(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_merge(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
@@ -563,7 +563,7 @@ fail:
 	goto out;
 }
 
-static bool ovl_fill_plain(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_plain(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
@@ -684,7 +684,7 @@ struct ovl_readdir_translate {
 	bool xinowarn;
 };
 
-static bool ovl_fill_real(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_real(struct dir_context *ctx, const char *name,
 			   int namelen, loff_t offset, u64 ino,
 			   unsigned int d_type)
 {
@@ -1066,7 +1066,7 @@ void ovl_cleanup_whiteouts(struct ovl_fs *ofs, struct dentry *upper,
 	inode_unlock(upper->d_inode);
 }
 
-static bool ovl_check_d_type(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_check_d_type(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {

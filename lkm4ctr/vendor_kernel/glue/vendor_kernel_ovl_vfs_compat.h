@@ -246,20 +246,58 @@ int rw_verify_area(int, struct file *, const loff_t *, size_t);
  * [BUILD-COMPAT] uuid_to_fsid() (<linux/statfs.h>) does not exist on
  * android12-5.10/android13-5.10 (verified against
  * android.googlesource.com include/linux/statfs.h: present starting at
- * android13-5.15). Reimplement its "fold 16-byte uuid to 64-bit fsid" body
- * verbatim from the >=5.15 header.
+ * android13-5.15). u64_to_fsid() already exists on 5.10 -- reimplement only
+ * uuid_to_fsid()'s body verbatim from the >=5.15 header, which calls the
+ * already-present u64_to_fsid().
  */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
-static inline __kernel_fsid_t u64_to_fsid(u64 v)
-{
-	return (__kernel_fsid_t){.val = {(u32)v, (u32)(v >> 32)}};
-}
-
 static inline __kernel_fsid_t uuid_to_fsid(__u8 *uuid)
 {
 	return u64_to_fsid(le64_to_cpup((void *)uuid) ^
 			    le64_to_cpup((void *)(uuid + sizeof(u64))));
 }
+#endif
+
+/*
+ * [BUILD-COMPAT] is_idmapped_mnt() (<linux/fs.h>) and
+ * generic_fill_statx_attr() (<linux/fs.h>) do not exist on
+ * android12-5.10/android13-5.10 (verified against
+ * android.googlesource.com include/linux/fs.h: both present starting at
+ * android13-5.15). Neither kernel has idmapped mount support at all, so
+ * is_idmapped_mnt() can simply always report false. generic_fill_statx_attr()
+ * is reimplemented from its >=5.15 body, minus the
+ * `stat->attributes_mask |= KSTAT_ATTR_VFS_FLAGS` line since
+ * KSTAT_ATTR_VFS_FLAGS itself does not exist on 5.10 either (only the older
+ * KSTAT_ATTR_FS_IOC_FLAGS does).
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+static inline bool is_idmapped_mnt(const struct vfsmount *mnt)
+{
+	return false;
+}
+
+static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *stat)
+{
+	if (inode->i_flags & S_IMMUTABLE)
+		stat->attributes |= STATX_ATTR_IMMUTABLE;
+	if (inode->i_flags & S_APPEND)
+		stat->attributes |= STATX_ATTR_APPEND;
+}
+#endif
+
+/*
+ * [BUILD-COMPAT] filldir_t (the struct dir_context ->actor callback type)
+ * returns bool as of 6.1; before that (OLD tier, and MID tier below 6.1,
+ * i.e. the 5.15-shaped branches) it returned int. The vendored readdir.c's
+ * ovl_fill_merge()/ovl_fill_plain()/ovl_fill_real()/ovl_check_d_type() are
+ * declared to match the 6.12 baseline (bool); use this macro for their
+ * return type instead so they match whichever filldir_t the running kernel
+ * expects. `return true;`/`return false;` remain valid for either type.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#define VNS_OVL_FILLDIR_T int
+#else
+#define VNS_OVL_FILLDIR_T bool
 #endif
 
 #if VNS_OVL_TIER_NEW
@@ -794,6 +832,20 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
 #define inode_permission(idmap, inode, mask) \
 	(*vns_ovl_vfsc_inode_permission)((inode), (mask))
+/*
+ * [BUILD-COMPAT] setattr_prepare()/generic_permission() are plain, always
+ * exported/linkable symbols on VNS_OVL_TIER_OLD (<5.12) -- they simply
+ * don't take a `struct mnt_idmap *` yet (verified against
+ * android.googlesource.com include/linux/fs.h). Unlike the vfs_* helpers
+ * above they don't need vns_ovl_vfsc_* pointer resolution, just an
+ * idmap-dropping wrapper macro. The macro name reappearing in its own
+ * replacement list is intentionally not re-expanded by the preprocessor, so
+ * this forwards straight to the real symbol.
+ */
+#define setattr_prepare(idmap, dentry, attr) \
+	setattr_prepare((dentry), (attr))
+#define generic_permission(idmap, inode, mask) \
+	generic_permission((inode), (mask))
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
 #define vfs_ioctl (*vns_ovl_vfsc_vfs_ioctl)
@@ -931,6 +983,23 @@ static inline struct file *vfs_tmpfile_open(struct mnt_idmap *idmap,
 }
 #endif
 
+/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([5.10, 6.6)). Same
+ * (idmap, parentpath, mode, open_flag, cred) shape; on MID `idmap` is the
+ * aliased struct user_namespace *, and on OLD (5.10, no idmapped mounts) the
+ * vfs_tmpfile_open() shim above simply ignores it. Defined here (before
+ * backing_tmpfile_open() below, which calls it) since it is a plain
+ * static-inline function, not a macro -- unlike macros, its definition must
+ * precede any call site. */
+#if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
+static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
+					       const struct path *parentpath,
+					       umode_t mode, int open_flag,
+					       const struct cred *cred)
+{
+	return vfs_tmpfile_open(idmap, parentpath, mode, open_flag, cred);
+}
+#endif
+
 /* backing_file_open()/backing_tmpfile_open() (6.6+): open a real file while
  * presenting the overlay's own (fake) path to the VFS/LSM layer instead of
  * the real (underlying) one. Pre-6.6 overlayfs achieved the same effect for
@@ -959,15 +1028,28 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
 						const struct path *real_parentpath,
 						umode_t mode, const struct cred *cred)
 {
-	return vfs_tmpfile_open(ovl_mnt_idmap(real_parentpath->mnt), real_parentpath,
-				mode, flags, cred);
+	/* kernel_tmpfile_open() is real (declared in <linux/fs.h>, already
+	 * included) on android15-6.6+ (NEW tier); on MID/OLD tiers it is the
+	 * static-inline shim defined just above. */
+	return kernel_tmpfile_open(ovl_mnt_idmap(real_parentpath->mnt), real_parentpath,
+				   mode, flags, cred);
 }
 #endif
 
 /* d_mark_tmpfile() is the 6.7 rename of the older d_tmpfile() (not 6.6 --
- * see "vfs: rename d_tmpfile to d_mark_tmpfile", merged for v6.7); both take
- * the same (struct file *, struct inode *) pair. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
+ * see "vfs: rename d_tmpfile to d_mark_tmpfile", merged for v6.7). Both take
+ * a (struct file *, struct inode *) pair from 6.1 onward, matching the call
+ * site in fs/overlayfs/dir.c (which always passes the tmpfile as a struct
+ * file *, per the unified 6.12-shaped source). Before 6.1 (OLD tier, and MID
+ * tier below 6.1, i.e. the 5.15-shaped branches), d_tmpfile() instead took
+ * the tmpfile's struct dentry * directly -- wrap it to accept the same
+ * struct file * the call site passes. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+static inline void d_mark_tmpfile(struct file *file, struct inode *inode)
+{
+	d_tmpfile(file->f_path.dentry, inode);
+}
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 #define d_mark_tmpfile d_tmpfile
 #endif
 
@@ -1098,20 +1180,6 @@ static inline int vns_ovl_fsverity_get_digest(struct inode *inode, u8 *digest,
 #if VNS_OVL_TIER_MID
 #define old_mnt_idmap old_mnt_userns
 #define new_mnt_idmap new_mnt_userns
-#endif
-
-/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([5.10, 6.6)). Same
- * (idmap, parentpath, mode, open_flag, cred) shape; on MID `idmap` is the
- * aliased struct user_namespace *, and on OLD (5.10, no idmapped mounts) the
- * vfs_tmpfile_open() shim above simply ignores it. */
-#if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
-static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
-					       const struct path *parentpath,
-					       umode_t mode, int open_flag,
-					       const struct cred *cred)
-{
-	return vfs_tmpfile_open(idmap, parentpath, mode, open_flag, cred);
-}
 #endif
 #endif /* MID || OLD */
 

@@ -723,6 +723,7 @@ out:
 }
 
 /* Convert inode protection flags to fileattr flags */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 static void ovl_fileattr_prot_flags(struct inode *inode, struct fileattr *fa)
 {
 	BUILD_BUG_ON(OVL_PROT_FS_FLAGS_MASK & ~FS_COMMON_FL);
@@ -737,6 +738,7 @@ static void ovl_fileattr_prot_flags(struct inode *inode, struct fileattr *fa)
 		fa->fsx_xflags |= FS_XFLAG_IMMUTABLE;
 	}
 }
+#endif /* >= 5.13 */
 
 int ovl_real_fileattr_get(const struct path *realpath, struct fileattr *fa)
 {
@@ -752,6 +754,16 @@ int ovl_real_fileattr_get(const struct path *realpath, struct fileattr *fa)
 	return err;
 }
 
+/*
+ * [BUILD-COMPAT] struct fileattr/FS_COMMON_FL/FS_XFLAG_COMMON (used by
+ * ovl_fileattr_prot_flags() above) do not exist before 5.13 -- see the
+ * <linux/fileattr.h> compat note in vendor_kernel_ovl_vfs_compat.h. The
+ * ->fileattr_get/->fileattr_set inode_operations fields are already
+ * version-gated at their assignment sites; gate this function too so it
+ * is not compiled (and does not reference FS_COMMON_FL/FS_XFLAG_COMMON) on
+ * VNS_OVL_TIER_OLD.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 int ovl_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -768,11 +780,12 @@ int ovl_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 
 	return err;
 }
+#endif /* >= 5.13 */
 
 static const struct inode_operations ovl_file_inode_operations = {
-	.setattr	= ovl_setattr,
-	.permission	= ovl_permission,
-	.getattr	= ovl_getattr,
+	.setattr	= OVL_SETATTR_OP,
+	.permission	= OVL_PERMISSION_OP,
+	.getattr	= OVL_GETATTR_OP,
 	.listxattr	= ovl_listxattr,
 	OVL_IOPS_ACL_FIELDS
 	.update_time	= ovl_update_time,
@@ -784,17 +797,17 @@ static const struct inode_operations ovl_file_inode_operations = {
 };
 
 static const struct inode_operations ovl_symlink_inode_operations = {
-	.setattr	= ovl_setattr,
+	.setattr	= OVL_SETATTR_OP,
 	.get_link	= ovl_get_link,
-	.getattr	= ovl_getattr,
+	.getattr	= OVL_GETATTR_OP,
 	.listxattr	= ovl_listxattr,
 	.update_time	= ovl_update_time,
 };
 
 static const struct inode_operations ovl_special_inode_operations = {
-	.setattr	= ovl_setattr,
-	.permission	= ovl_permission,
-	.getattr	= ovl_getattr,
+	.setattr	= OVL_SETATTR_OP,
+	.permission	= OVL_PERMISSION_OP,
+	.getattr	= OVL_GETATTR_OP,
 	.listxattr	= ovl_listxattr,
 	OVL_IOPS_ACL_FIELDS
 	.update_time	= ovl_update_time,

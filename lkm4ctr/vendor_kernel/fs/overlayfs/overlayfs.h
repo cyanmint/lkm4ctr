@@ -1030,3 +1030,36 @@ int ovl_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 int ovl_getattr(struct mnt_idmap *idmap, const struct path *path,
 		struct kstat *stat, u32 request_mask, unsigned int flags);
 ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size);
+
+/*
+ * [BUILD-COMPAT] The inode_operations ->setattr/->permission/->getattr slots
+ * take an idmap on >=5.12 kernels but not on VNS_OVL_TIER_OLD (<5.12, no
+ * idmapped mounts at all). ovl_setattr()/ovl_permission()/ovl_getattr()
+ * above are written to the >=5.12 (idmap-first) shape and already ignore
+ * their idmap argument internally in favour of &nop_mnt_idmap where needed
+ * (see inode.c) -- wrap them with the OLD-tier (no-idmap) signature instead
+ * of forking their bodies, and use OVL_SETATTR_OP/OVL_PERMISSION_OP/
+ * OVL_GETATTR_OP in the inode_operations initialisers below and in inode.c.
+ */
+#if VNS_OVL_TIER_OLD
+static inline int ovl_setattr_compat(struct dentry *dentry, struct iattr *attr)
+{
+	return ovl_setattr(&nop_mnt_idmap, dentry, attr);
+}
+static inline int ovl_permission_compat(struct inode *inode, int mask)
+{
+	return ovl_permission(&nop_mnt_idmap, inode, mask);
+}
+static inline int ovl_getattr_compat(const struct path *path, struct kstat *stat,
+				     u32 request_mask, unsigned int flags)
+{
+	return ovl_getattr(&nop_mnt_idmap, path, stat, request_mask, flags);
+}
+#define OVL_SETATTR_OP ovl_setattr_compat
+#define OVL_PERMISSION_OP ovl_permission_compat
+#define OVL_GETATTR_OP ovl_getattr_compat
+#else
+#define OVL_SETATTR_OP ovl_setattr
+#define OVL_PERMISSION_OP ovl_permission
+#define OVL_GETATTR_OP ovl_getattr
+#endif

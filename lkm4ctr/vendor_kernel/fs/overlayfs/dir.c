@@ -718,6 +718,45 @@ static int ovl_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	return ovl_create_object(dentry, S_IFLNK, 0, link);
 }
 
+/*
+ * [BUILD-COMPAT] The inode_operations ->create/->mkdir/->mknod/->symlink
+ * slots take an idmap on >=5.12 kernels but not on VNS_OVL_TIER_OLD (<5.12).
+ * ovl_create()/ovl_mkdir()/ovl_mknod()/ovl_symlink() above already ignore
+ * their idmap argument, so wrap them with the OLD-tier (no-idmap) signature
+ * instead of forking their bodies.
+ */
+#if VNS_OVL_TIER_OLD
+static int ovl_create_compat(struct inode *dir, struct dentry *dentry,
+			     umode_t mode, bool excl)
+{
+	return ovl_create(&nop_mnt_idmap, dir, dentry, mode, excl);
+}
+static int ovl_mkdir_compat(struct inode *dir, struct dentry *dentry,
+			    umode_t mode)
+{
+	return ovl_mkdir(&nop_mnt_idmap, dir, dentry, mode);
+}
+static int ovl_mknod_compat(struct inode *dir, struct dentry *dentry,
+			    umode_t mode, dev_t rdev)
+{
+	return ovl_mknod(&nop_mnt_idmap, dir, dentry, mode, rdev);
+}
+static int ovl_symlink_compat(struct inode *dir, struct dentry *dentry,
+			      const char *link)
+{
+	return ovl_symlink(&nop_mnt_idmap, dir, dentry, link);
+}
+#define OVL_CREATE_OP ovl_create_compat
+#define OVL_MKDIR_OP ovl_mkdir_compat
+#define OVL_MKNOD_OP ovl_mknod_compat
+#define OVL_SYMLINK_OP ovl_symlink_compat
+#else
+#define OVL_CREATE_OP ovl_create
+#define OVL_MKDIR_OP ovl_mkdir
+#define OVL_MKNOD_OP ovl_mknod
+#define OVL_SYMLINK_OP ovl_symlink
+#endif
+
 static int ovl_set_link_redirect(struct dentry *dentry)
 {
 	const struct cred *old_cred;
@@ -1326,6 +1365,39 @@ out:
 	return err;
 }
 
+/*
+ * [BUILD-COMPAT] The inode_operations ->rename slot takes an idmap on
+ * >=5.12 kernels but not on VNS_OVL_TIER_OLD (<5.12). ovl_rename() above
+ * already ignores its idmap argument, so wrap it with the OLD-tier
+ * (no-idmap) signature instead of forking its body.
+ */
+#if VNS_OVL_TIER_OLD
+static int ovl_rename_compat(struct inode *olddir, struct dentry *old,
+			     struct inode *newdir, struct dentry *new,
+			     unsigned int flags)
+{
+	return ovl_rename(&nop_mnt_idmap, olddir, old, newdir, new, flags);
+}
+#define OVL_RENAME_OP ovl_rename_compat
+#else
+#define OVL_RENAME_OP ovl_rename
+#endif
+
+/*
+ * [BUILD-COMPAT] O_TMPFILE support for overlayfs (ovl_tmpfile()/
+ * ovl_create_tmpfile(), and the .tmpfile inode_operations field below) is a
+ * >=6.1 addition: real upstream overlayfs never implemented it on 5.15 or
+ * 5.10 kernels either (verified: neither android14-5.15's nor
+ * android14-6.1's real fs/overlayfs/dir.c define ovl_tmpfile at all -- 6.1
+ * only gained a real ->tmpfile field with the (idmap, dir, struct file *,
+ * mode) shape our vendored dir.c already assumes). Below 6.1 the
+ * inode_operations ->tmpfile field itself is (idmap, dir, struct dentry *,
+ * mode) -- a fundamentally different, dentry-based tmpfile creation
+ * protocol our unified backing_tmpfile_open()-based implementation doesn't
+ * speak. Match upstream reality: simply don't advertise tmpfile support
+ * below 6.1, same as the real kernel of that era.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
 			      struct inode *inode, umode_t mode)
 {
@@ -1419,26 +1491,31 @@ drop_write:
 	ovl_drop_write(dentry);
 	return err;
 }
+#endif /* >= 6.1 */
 
 const struct inode_operations ovl_dir_inode_operations = {
 	.lookup		= ovl_lookup,
-	.mkdir		= ovl_mkdir,
-	.symlink	= ovl_symlink,
+	.mkdir		= OVL_MKDIR_OP,
+	.symlink	= OVL_SYMLINK_OP,
 	.unlink		= ovl_unlink,
 	.rmdir		= ovl_rmdir,
-	.rename		= ovl_rename,
+	.rename		= OVL_RENAME_OP,
 	.link		= ovl_link,
-	.setattr	= ovl_setattr,
-	.create		= ovl_create,
-	.mknod		= ovl_mknod,
-	.permission	= ovl_permission,
-	.getattr	= ovl_getattr,
+	.setattr	= OVL_SETATTR_OP,
+	.create		= OVL_CREATE_OP,
+	.mknod		= OVL_MKNOD_OP,
+	.permission	= OVL_PERMISSION_OP,
+	.getattr	= OVL_GETATTR_OP,
 	.listxattr	= ovl_listxattr,
 	OVL_IOPS_ACL_FIELDS
 	.update_time	= ovl_update_time,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 	.fileattr_get	= ovl_fileattr_get,
 	.fileattr_set	= ovl_fileattr_set,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	.tmpfile	= ovl_tmpfile,
+#endif
 };
 
 #endif /* LINUX_VERSION_CODE in [KERNEL_VERSION(6, 12, 0), KERNEL_VERSION(6, 13, 0)) */
