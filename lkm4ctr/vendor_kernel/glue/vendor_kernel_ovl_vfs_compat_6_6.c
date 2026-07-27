@@ -170,8 +170,8 @@ int vns_ovl_vfs_compat_6_6_resolve(void)
 				    #name); \
 			return -ENOENT; \
 		} \
-	} while (0)
-	VNS_OVL_VFS_COMPAT_6_6_LIST(VNS_OVL_VFSC_6_6_RESOLVE);
+	} while (0);
+	VNS_OVL_VFS_COMPAT_6_6_LIST(VNS_OVL_VFSC_6_6_RESOLVE)
 #undef VNS_OVL_VFSC_6_6_RESOLVE
 	return 0;
 }
