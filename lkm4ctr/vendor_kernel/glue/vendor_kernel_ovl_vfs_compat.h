@@ -121,6 +121,18 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
 
+/* generic_file_splice_read() was removed at 6.6 in favour of
+ * filemap_splice_read() (same (file *, loff_t *, pipe_inode_info *, size_t,
+ * unsigned int) signature) -- verified against android.googlesource.com's
+ * include/linux/fs.h: android14-6.1 still declares generic_file_splice_read,
+ * android15-6.6 only declares filemap_splice_read. This only matters for the
+ * [6.6, 6.8) window, where VNS_OVL_HAVE_BACKING_FILE_RW is still false (so
+ * ovl_splice_read() falls back to calling generic_file_splice_read()
+ * directly) but the old symbol no longer exists. */
+#if !VNS_OVL_HAVE_BACKING_FILE_RW && LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define generic_file_splice_read filemap_splice_read
+#endif
+
 /* <linux/backing-file.h> declares backing_file_read_iter()/write_iter()/...
  * (>=6.9) and is what VNS_OVL_VFS_COMPAT_LIST_BF's typeof()-based resolution
  * below needs in scope. Include it here (once, centrally) rather than relying
@@ -877,12 +889,20 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define override_creds (*vns_ovl_vfsc_override_creds)
 #define revert_creds (*vns_ovl_vfsc_revert_creds)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
-#define inode_permission(idmap, inode, mask) \
-	(*vns_ovl_vfsc_inode_permission)((inode), (mask))
 /*
- * [BUILD-COMPAT] setattr_prepare()/generic_permission() are plain, always
- * exported/linkable symbols on VNS_OVL_TIER_OLD (<5.12) -- they simply
- * don't take a `struct mnt_idmap *` yet (verified against
+ * The `(void)(idmap)` keeps the idmap argument "used" from the preprocessor's
+ * point of view: at call sites (e.g. ovl_path_open() in fs/overlayfs/util.c)
+ * that first compute the idmap into a local variable and then pass it here,
+ * simply dropping the macro parameter (as the other idmap-dropping macros in
+ * this file do) would leave that variable looking unreferenced to the
+ * compiler post-preprocessing, tripping -Werror=unused-variable.
+ */
+#define inode_permission(idmap, inode, mask) \
+	((void)(idmap), (*vns_ovl_vfsc_inode_permission)((inode), (mask)))
+/*
+ * [BUILD-COMPAT] setattr_prepare()/generic_permission()/inode_init_owner()
+ * are plain, always exported/linkable symbols on VNS_OVL_TIER_OLD (<5.12) --
+ * they simply don't take a `struct mnt_idmap *` yet (verified against
  * android.googlesource.com include/linux/fs.h). Unlike the vfs_* helpers
  * above they don't need vns_ovl_vfsc_* pointer resolution, just an
  * idmap-dropping wrapper macro. The macro name reappearing in its own
@@ -893,6 +913,8 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 	setattr_prepare((dentry), (attr))
 #define generic_permission(idmap, inode, mask) \
 	generic_permission((inode), (mask))
+#define inode_init_owner(idmap, inode, dir, mode) \
+	inode_init_owner((inode), (dir), (mode))
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
 #define vfs_ioctl (*vns_ovl_vfsc_vfs_ioctl)
@@ -1114,11 +1136,37 @@ static inline void d_mark_tmpfile(struct file *file, struct inode *inode)
 	{ return x(file, ctx); }
 #endif
 
-/* fsparam_string_empty() (6.6+): a string mount option that also accepts the
- * empty value ("opt="). Byte-identical to the upstream 6.6 definition, built
- * from the __fsparam()/fs_param_can_be_empty primitives present since 5.x. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* str_on_off() renders a bool as "on"/"off". Upstream mainline only gained
+ * it at 6.6 (in the new <linux/string_choices.h>), but android14-6.1
+ * back-ported the same helper straight into its existing
+ * include/linux/string_helpers.h (verified against
+ * android.googlesource.com's include/linux/string_helpers.h and
+ * include/linux/string_choices.h across all seven KMIs: android12/13-5.10
+ * and android13/14-5.15 have neither; android14-6.1 already has str_on_off
+ * in string_helpers.h; android15-6.6+ has it in string_choices.h). So the
+ * fallback is only needed below 6.1, not below 6.6. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#ifndef str_on_off
+static inline const char *str_on_off(bool v)
+{
+	return v ? "on" : "off";
+}
+#endif
+#endif
+
+/* fsparam_string_empty() (6.12+): a string mount option that also accepts
+ * the empty value ("opt="). Byte-identical to the upstream definition, built
+ * from the __fsparam()/fs_param_can_be_empty primitives. The `flags` field's
+ * fs_param_can_be_empty bit itself only exists from 5.16 onward (verified
+ * against android.googlesource.com's include/linux/fs_parser.h across
+ * android12/13-5.10, android13/14-5.15, android14-6.1 and android15-6.6 --
+ * none of them define either fs_param_can_be_empty or fsparam_string_empty,
+ * only android16-6.12+ does), so both need a fallback here. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 #include <linux/fs_parser.h>
+#ifndef fs_param_can_be_empty
+#define fs_param_can_be_empty 0x0004
+#endif
 #ifndef fsparam_string_empty
 #define fsparam_string_empty(NAME, OPT) \
 	__fsparam(fs_param_is_string, NAME, OPT, fs_param_can_be_empty, NULL)
