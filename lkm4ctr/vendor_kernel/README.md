@@ -116,46 +116,55 @@ still must be built with the remaining options for full namespace coverage:
 - `CONFIG_CGROUPS=y`
 - `CONFIG_TIME_NS=y`
 
-Of these, `CONFIG_IPC_NS=n` is the one exception that no longer needs a
-diagnostic caveat: `unshare(CLONE_NEWIPC)`/SysV IPC/mqueue syscalls have
-always performed genuine vendored isolation regardless of this option (see
-"Module-owned default namespace, always vendored" above), but until now
-external tools that verify isolation by diffing `readlink(2)` on
-`/proc/<pid>/ns/ipc` (including `lkm4ctr_checker`'s generic namespace test)
-could not observe it, and `docker exec`/`docker run` could not even *probe*
-namespace support at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only
-registers that procfs entry `#ifdef CONFIG_IPC_NS`, a decision baked into
-the running `vmlinux` that no syscall hook can undo. `glue/vendor_kernel_procfs.c`
-closes this observability gap in two parts:
+Of these, `CONFIG_IPC_NS=n` (and, on kernels that still gate it,
+`CONFIG_PID_NS=n`) are the exceptions that no longer need a diagnostic
+caveat: `unshare(CLONE_NEWIPC)`/SysV IPC/mqueue syscalls and
+`unshare(CLONE_NEWPID)`/pid virtualization have always performed genuine
+vendored isolation regardless of these options (see "Module-owned default
+namespace, always vendored" above), but until now external tools that
+verify isolation by diffing `readlink(2)` on `/proc/<pid>/ns/{ipc,pid}`
+(including `lkm4ctr_checker`'s generic namespace test) could not observe
+it, and `docker exec`/`docker run` could not even *probe* namespace support
+at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only registers those
+procfs entries `#ifdef CONFIG_IPC_NS`/`#ifdef CONFIG_PID_NS`, a decision
+baked into the running `vmlinux` that no syscall hook can undo.
+`glue/vendor_kernel_procfs.c` closes this observability gap in two parts:
 - Hooking `readlink(2)`/`readlinkat(2)`: the real syscall always runs
   first, and only on its `-ENOENT` for a path unambiguously naming
-  `.../<pid|self|thread-self>/ns/ipc` is the `"ipc:[<inum>]"` text
-  fabricated, using the same `vns_task_ipc_ns()` namespace object the real
-  SysV/mqueue syscalls already act on.
+  `.../<pid|self|thread-self>/ns/ipc` or `.../<pid|self|thread-self>/ns/pid`
+  is the `"ipc:[<inum>]"`/`"pid:[<inum>]"` text fabricated, using the same
+  `vns_task_ipc_ns()`/`task_active_pid_ns()` namespace objects the real
+  SysV/mqueue syscalls and pid virtualization already act on.
 - Hooking `stat(2)`/`lstat(2)`/`newfstatat(2)`: runc/containerd's own
   namespace-support probe (`configs.IsNamespaceSupported()`) never reads the
   readlink(2) target at all, it only checks whether `stat(2)` on the path
   *succeeds*. Without this second hook, that probe still fails with plain
   `-ENOENT` even with the readlink(2) fabrication in place, and `docker
   exec`/`docker run` abort with `"OCI runtime exec failed: ... namespace
-  NEWIPC is not supported: unknown"`. Since struct stat's on-wire layout is
+  NEWIPC is not supported: unknown"` (or the analogous `"namespace NEWPID
+  is not supported"` message for pid). Since struct stat's on-wire layout is
   architecture-specific and the kernel's own conversion code isn't exported,
-  this hook instead transparently substitutes the `.../ns/ipc` leaf for
-  `.../ns/mnt` (identical length, patched in place on the caller's own path
-  buffer and restored immediately after) before calling through to the real
-  syscall: the mount namespace entry is the one `/proc/<pid>/ns/` entry
-  that is never Kconfig-gated, so it is always present, and every caller of
-  this stat(2) family only cares whether the call succeeds (see above), not
-  which namespace's numbers come back.
+  this hook instead transparently substitutes the `.../ns/ipc` or
+  `.../ns/pid` leaf for `.../ns/mnt` (identical length in both cases,
+  patched in place on the caller's own path buffer and restored immediately
+  after) before calling through to the real syscall: the mount namespace
+  entry is the one `/proc/<pid>/ns/` entry that is never Kconfig-gated, so
+  it is always present, and every caller of this stat(2) family only cares
+  whether the call succeeds (see above), not which namespace's numbers come
+  back.
 
 Both hook groups are installed best-effort/non-fatal (a resolution failure
 only logs a warning): they are purely an observability enhancement, so they
 never block `vendor_kernel`'s core namespace functionality from loading.
-`NET`/`MNT`/`CGROUP` are deliberately **not** given the same treatment:
-unlike IPC, `vendor_kernel` has no real per-task namespace object backing
-those on a kernel missing the corresponding `CONFIG_*_NS`, so fabricating
-their `/proc/<pid>/ns/*` entries would misreport nonexistent isolation as
-real.
+Only IPC and PID get this treatment: `UTS`/`USER` are likewise vendored
+unconditionally of their respective `CONFIG_*_NS` option, but no device has
+been observed lacking `CONFIG_UTS_NS`/`CONFIG_USER_NS` while also lacking
+`CONFIG_IPC_NS`/`CONFIG_PID_NS`, so no equivalent gap has been seen for
+them. `NET`/`MNT`/`CGROUP` are deliberately **not** given the same
+treatment: unlike IPC/PID, `vendor_kernel` has no real per-task namespace
+object backing those on a kernel missing the corresponding `CONFIG_*_NS`,
+so fabricating their `/proc/<pid>/ns/*` entries would misreport nonexistent
+isolation as real.
 
 `lkm4ctr/Kconfig`'s `LKM4CTR_VENDOR_KERNEL` option `select`s `CONFIG_UTS_NS`,
 `CONFIG_PID_NS`, and `CONFIG_USER_NS` too (along with the rest), so any
