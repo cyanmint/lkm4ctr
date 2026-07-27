@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 #include <linux/namei.h>
 #include <linux/xattr.h>
 #include <linux/security.h>

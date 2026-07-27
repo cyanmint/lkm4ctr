@@ -228,6 +228,39 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 }
 #endif /* < 6.6 */
 
+/*
+ * [BUILD-COMPAT] rw_verify_area() is not declared in any module-visible
+ * header on android12-5.10/android13-5.10/android13-5.15/android14-5.15
+ * (verified against android.googlesource.com include/linux/fs.h for each
+ * branch: android14-6.1 onward declares it, these four do not), even though
+ * the symbol itself is exported and still resolved at load time via
+ * shadow_hook_resolve() below. Supply the prototype ourselves so typeof()
+ * has something to use; this is a no-op on branches that already declare it
+ * identically.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+int rw_verify_area(int, struct file *, const loff_t *, size_t);
+#endif
+
+/*
+ * [BUILD-COMPAT] uuid_to_fsid() (<linux/statfs.h>) does not exist on
+ * android12-5.10/android13-5.10 (verified against
+ * android.googlesource.com include/linux/statfs.h: present starting at
+ * android13-5.15). Reimplement its "fold 16-byte uuid to 64-bit fsid" body
+ * verbatim from the >=5.15 header.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+static inline __kernel_fsid_t u64_to_fsid(u64 v)
+{
+	return (__kernel_fsid_t){.val = {(u32)v, (u32)(v >> 32)}};
+}
+
+static inline __kernel_fsid_t uuid_to_fsid(__u8 *uuid)
+{
+	return u64_to_fsid(le64_to_cpup((void *)uuid) ^
+			    le64_to_cpup((void *)(uuid + sizeof(u64))));
+}
+#endif
 
 #if VNS_OVL_TIER_NEW
 #define VNS_OVL_VFS_COMPAT_LIST(X) \
@@ -407,6 +440,7 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(unlock_rename) \
 	X(take_dentry_name_snapshot) \
 	X(vfs_rename) \
+	X(notify_change) \
 	X(release_dentry_name_snapshot) \
 	X(vfs_setxattr) \
 	X(vfs_removexattr) \
@@ -420,6 +454,7 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(is_subdir) \
 	X(vfs_getxattr) \
 	X(__vfs_getxattr) \
+	X(lookup_one_len) \
 	X(lookup_one_len_unlocked) \
 	X(__d_drop) \
 	X(vfs_getattr) \
@@ -663,9 +698,27 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define unlock_rename (*vns_ovl_vfsc_unlock_rename)
 #define take_dentry_name_snapshot (*vns_ovl_vfsc_take_dentry_name_snapshot)
 #define vfs_rename (*vns_ovl_vfsc_vfs_rename)
+/*
+ * [BUILD-COMPAT] VNS_OVL_TIER_OLD (<5.12) predates idmapped mounts: none of
+ * the VFS entry points below take a `struct mnt_idmap *`/`struct
+ * user_namespace *` argument yet, but the unified 6.12-shaped overlayfs
+ * source calls every one of them with the (always-dummy, see
+ * ovl_mnt_idmap() above) idmap threaded through as an extra argument. Rather
+ * than touch every call site, redefine each of these as a variadic macro
+ * that drops the idmap argument (found in the same position the running
+ * kernel's *idmapped* API would place it) before forwarding to the resolved
+ * function pointer, whose real (pre-idmap) signature was captured by pass 1
+ * above via typeof(). vfs_link()'s idmap is its *second* argument (the 6.12
+ * signature is (old_dentry, idmap, dir, new_dentry, delegated_inode)); every
+ * other one threads it first.
+ */
+#define notify_change(idmap, dentry, attr, delegated_inode) \
+	(*vns_ovl_vfsc_notify_change)((dentry), (attr), (delegated_inode))
 #define release_dentry_name_snapshot (*vns_ovl_vfsc_release_dentry_name_snapshot)
-#define vfs_setxattr (*vns_ovl_vfsc_vfs_setxattr)
-#define vfs_removexattr (*vns_ovl_vfsc_vfs_removexattr)
+#define vfs_setxattr(idmap, dentry, name, value, size, flags) \
+	(*vns_ovl_vfsc_vfs_setxattr)((dentry), (name), (value), (size), (flags))
+#define vfs_removexattr(idmap, dentry, name) \
+	(*vns_ovl_vfsc_vfs_removexattr)((dentry), (name))
 #define get_anon_bdev (*vns_ovl_vfsc_get_anon_bdev)
 #define kern_unmount_array (*vns_ovl_vfsc_kern_unmount_array)
 #define free_anon_bdev (*vns_ovl_vfsc_free_anon_bdev)
@@ -674,8 +727,13 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define inode_owner_or_capable (*vns_ovl_vfsc_inode_owner_or_capable)
 #define exportfs_decode_fh (*vns_ovl_vfsc_exportfs_decode_fh)
 #define is_subdir (*vns_ovl_vfsc_is_subdir)
-#define vfs_getxattr (*vns_ovl_vfsc_vfs_getxattr)
+#define vfs_getxattr(idmap, dentry, name, value, size) \
+	(*vns_ovl_vfsc_vfs_getxattr)((dentry), (name), (value), (size))
 #define __vfs_getxattr (*vns_ovl_vfsc___vfs_getxattr)
+#define lookup_one(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_one_len)((name), (base), (len))
+#define lookup_one_unlocked(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_one_len_unlocked)((name), (base), (len))
 #define lookup_one_len_unlocked (*vns_ovl_vfsc_lookup_one_len_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
@@ -684,13 +742,20 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define set_posix_acl (*vns_ovl_vfsc_set_posix_acl)
 #define inode_insert5 (*vns_ovl_vfsc_inode_insert5)
 #define vfs_get_link (*vns_ovl_vfsc_vfs_get_link)
-#define vfs_unlink (*vns_ovl_vfsc_vfs_unlink)
-#define vfs_rmdir (*vns_ovl_vfsc_vfs_rmdir)
-#define vfs_link (*vns_ovl_vfsc_vfs_link)
-#define vfs_mknod (*vns_ovl_vfsc_vfs_mknod)
-#define vfs_mkdir (*vns_ovl_vfsc_vfs_mkdir)
-#define vfs_create (*vns_ovl_vfsc_vfs_create)
-#define vfs_symlink (*vns_ovl_vfsc_vfs_symlink)
+#define vfs_unlink(idmap, dir, dentry, delegated_inode) \
+	(*vns_ovl_vfsc_vfs_unlink)((dir), (dentry), (delegated_inode))
+#define vfs_rmdir(idmap, dir, dentry) \
+	(*vns_ovl_vfsc_vfs_rmdir)((dir), (dentry))
+#define vfs_link(old_dentry, idmap, dir, new_dentry, delegated_inode) \
+	(*vns_ovl_vfsc_vfs_link)((old_dentry), (dir), (new_dentry), (delegated_inode))
+#define vfs_mknod(idmap, dir, dentry, mode, dev) \
+	(*vns_ovl_vfsc_vfs_mknod)((dir), (dentry), (mode), (dev))
+#define vfs_mkdir(idmap, dir, dentry, mode) \
+	(*vns_ovl_vfsc_vfs_mkdir)((dir), (dentry), (mode))
+#define vfs_create(idmap, dir, dentry, mode, want_excl) \
+	(*vns_ovl_vfsc_vfs_create)((dir), (dentry), (mode), (want_excl))
+#define vfs_symlink(idmap, dir, dentry, oldname) \
+	(*vns_ovl_vfsc_vfs_symlink)((dir), (dentry), (oldname))
 #define vfs_tmpfile (*vns_ovl_vfsc_vfs_tmpfile)
 #define security_dentry_create_files_as (*vns_ovl_vfsc_security_dentry_create_files_as)
 #define posix_acl_create (*vns_ovl_vfsc_posix_acl_create)
@@ -718,10 +783,13 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define errseq_check (*vns_ovl_vfsc_errseq_check)
 #define iterate_dir (*vns_ovl_vfsc_iterate_dir)
 #define lookup_positive_unlocked (*vns_ovl_vfsc_lookup_positive_unlocked)
+#define lookup_one_positive_unlocked(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_positive_unlocked)((name), (base), (len))
 #define override_creds (*vns_ovl_vfsc_override_creds)
 #define revert_creds (*vns_ovl_vfsc_revert_creds)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
-#define inode_permission (*vns_ovl_vfsc_inode_permission)
+#define inode_permission(idmap, inode, mask) \
+	(*vns_ovl_vfsc_inode_permission)((inode), (mask))
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
 #define vfs_ioctl (*vns_ovl_vfsc_vfs_ioctl)
@@ -1028,10 +1096,11 @@ static inline int vns_ovl_fsverity_get_digest(struct inode *inode, u8 *digest,
 #define new_mnt_idmap new_mnt_userns
 #endif
 
-/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([6.1, 6.6)). Same
+/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([5.10, 6.6)). Same
  * (idmap, parentpath, mode, open_flag, cred) shape; on MID `idmap` is the
- * aliased struct user_namespace *. */
-#if VNS_OVL_TIER_MID
+ * aliased struct user_namespace *, and on OLD (5.10, no idmapped mounts) the
+ * vfs_tmpfile_open() shim above simply ignores it. */
+#if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
 static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
 					       const struct path *parentpath,
 					       umode_t mode, int open_flag,

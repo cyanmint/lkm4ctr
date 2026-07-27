@@ -18,6 +18,14 @@
 #include <linux/exportfs.h>
 #include <linux/splice.h>
 #include <linux/errseq.h>
+/* [BUILD-COMPAT] <linux/fs_context.h>/<linux/fs_parser.h> declare
+ * fs_param_is_enum() (used by glue/vendor_kernel_ovl_vfs_compat.h's
+ * VNS_OVL_VFS_COMPAT_LIST()). params.c/super.c already include these
+ * directly, but every other .c file in this directory reaches
+ * fs_param_is_enum() only through this header's compat-header include below,
+ * so make sure the declaration is visible here too. */
+#include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 /* [BUILD-COMPAT] <linux/fileattr.h> (and the generic ->fileattr_get/_set
  * inode_operations members it defines) only exist >=5.13; see
  * glue/vendor_kernel_ovl_vfs_compat.h for the pre-5.13 struct fileattr
@@ -392,6 +400,14 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 				struct dentry *newdentry, unsigned int flags)
 {
 	int err;
+
+	pr_debug("rename(%pd2, %pd2, 0x%x)\n", olddentry, newdentry, flags);
+#if VNS_OVL_TIER_OLD
+	/* [BUILD-COMPAT] struct renamedata does not exist before 5.12; call
+	 * the pre-idmap 6-argument vfs_rename() directly instead. */
+	err = vfs_rename(olddir, olddentry, newdir, newdentry, NULL, flags);
+#else
+	{
 	struct renamedata rd = {
 		.old_mnt_idmap	= ovl_upper_mnt_idmap(ofs),
 		.old_dir 	= olddir,
@@ -401,9 +417,9 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 		.new_dentry 	= newdentry,
 		.flags 		= flags,
 	};
-
-	pr_debug("rename(%pd2, %pd2, 0x%x)\n", olddentry, newdentry, flags);
 	err = vfs_rename(&rd);
+	}
+#endif
 	if (err) {
 		pr_debug("...rename(%pd2, %pd2, ...) = %i\n",
 			 olddentry, newdentry, err);
