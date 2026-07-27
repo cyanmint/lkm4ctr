@@ -734,6 +734,10 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 	(*vns_ovl_vfsc_lookup_one_len)((name), (base), (len))
 #define lookup_one_unlocked(idmap, name, base, len) \
 	(*vns_ovl_vfsc_lookup_one_len_unlocked)((name), (base), (len))
+/* lookup_one_len_unlocked: bare (no-idmap) alias to the same resolved
+ * pointer as lookup_one_unlocked above, kept for any caller using the raw
+ * pre-idmap kernel name directly instead of the 6.12-shaped idmap-taking
+ * one. */
 #define lookup_one_len_unlocked (*vns_ovl_vfsc_lookup_one_len_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)

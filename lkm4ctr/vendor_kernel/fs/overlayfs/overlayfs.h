@@ -401,6 +401,8 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 {
 	int err;
 
+	/* Logged before dispatch (success case); the error path below logs
+	 * again with the result. */
 	pr_debug("rename(%pd2, %pd2, 0x%x)\n", olddentry, newdentry, flags);
 #if VNS_OVL_TIER_OLD
 	/* [BUILD-COMPAT] struct renamedata does not exist before 5.12; call
