@@ -72,6 +72,19 @@
 			  LINUX_VERSION_CODE <  KERNEL_VERSION(6, 3, 0))
 #define VNS_OVL_TIER_OLD (LINUX_VERSION_CODE <  KERNEL_VERSION(5, 12, 0))
 
+/* Within MID (see below), the real kernel API split further at two extra
+ * boundaries this compat header must track for kallsyms-resolved symbols:
+ *   - posix_acl_clone()   introduced v6.0 (absent on 5.15-shaped MID kernels)
+ *   - vfs_tmpfile_open()  introduced v6.1 (absent on 5.15-shaped MID kernels;
+ *                         those still have the older vfs_tmpfile())
+ * VNS_OVL_TIER_MID_NEW below flags the sub-range where both already exist. */
+#define VNS_OVL_TIER_MID_NEW (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+
+/* posix_acl_clone() itself was introduced v6.0 (exported GPL); below that,
+ * MID-tier kernels (5.15-shaped) need a local reimplementation instead of a
+ * kallsyms redirect -- see the shim near the end of this file. */
+#define VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
+
 /* backing_file_open() exists since 6.6; backing_file_read_iter()/... since 6.9. */
 #define VNS_OVL_HAVE_BACKING_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
@@ -264,6 +277,16 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 #endif /* NEW */
 
 #if VNS_OVL_TIER_MID
+#if VNS_OVL_TIER_MID_NEW
+#define VNS_OVL_VFSC_TMPFILE_ENTRY(X) X(vfs_tmpfile_open)
+#else
+#define VNS_OVL_VFSC_TMPFILE_ENTRY(X) X(vfs_tmpfile)
+#endif
+#if VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE
+#define VNS_OVL_VFSC_ACLCLONE_ENTRY(X) X(posix_acl_clone)
+#else
+#define VNS_OVL_VFSC_ACLCLONE_ENTRY(X)
+#endif
 #define VNS_OVL_VFS_COMPAT_LIST(X) \
 	X(prepare_creds) \
 	X(errseq_sample) \
@@ -296,8 +319,7 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_listxattr) \
 	X(get_cached_acl_rcu) \
 	X(get_acl) \
-	X(posix_acl_clone) \
-	X(vfs_set_acl_prepare) \
+	VNS_OVL_VFSC_ACLCLONE_ENTRY(X) \
 	X(set_posix_acl) \
 	X(vfs_fileattr_set) \
 	X(vfs_fileattr_get) \
@@ -317,7 +339,7 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(do_splice_direct) \
 	X(d_find_any_alias) \
 	X(vfs_fallocate) \
-	X(vfs_tmpfile_open) \
+	VNS_OVL_VFSC_TMPFILE_ENTRY(X) \
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
 	X(vfs_clone_file_range) \
@@ -535,8 +557,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
 #define get_cached_acl_rcu (*vns_ovl_vfsc_get_cached_acl_rcu)
 /* get_acl: not redirected (see header comment). */
+#if VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE
 #define posix_acl_clone (*vns_ovl_vfsc_posix_acl_clone)
-#define vfs_set_acl_prepare (*vns_ovl_vfsc_vfs_set_acl_prepare)
+#endif
 #define set_posix_acl (*vns_ovl_vfsc_set_posix_acl)
 #define vfs_fileattr_set (*vns_ovl_vfsc_vfs_fileattr_set)
 #define vfs_fileattr_get (*vns_ovl_vfsc_vfs_fileattr_get)
@@ -556,7 +579,11 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define do_splice_direct (*vns_ovl_vfsc_do_splice_direct)
 #define d_find_any_alias (*vns_ovl_vfsc_d_find_any_alias)
 #define vfs_fallocate (*vns_ovl_vfsc_vfs_fallocate)
+#if VNS_OVL_TIER_MID_NEW
 #define vfs_tmpfile_open (*vns_ovl_vfsc_vfs_tmpfile_open)
+#else
+#define vfs_tmpfile (*vns_ovl_vfsc_vfs_tmpfile)
+#endif
 #define vfs_copy_file_range (*vns_ovl_vfsc_vfs_copy_file_range)
 #define vfs_dedupe_file_range_one (*vns_ovl_vfsc_vfs_dedupe_file_range_one)
 #define vfs_clone_file_range (*vns_ovl_vfsc_vfs_clone_file_range)
@@ -723,6 +750,39 @@ static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
 }
 #define kernel_file_open(path, flags, cred) \
 	vns_ovl_kernel_file_open((path), (flags), (cred))
+#endif
+
+/* vfs_tmpfile_open() (6.1+) atomically creates and opens an O_TMPFILE in one
+ * call. Before 6.1, only vfs_tmpfile() existed (creates the tmpfile dentry;
+ * the caller is responsible for opening it separately) -- see
+ * ovl_do_tmpfile() in fs/overlayfs/overlayfs.h, v6.0. Re-create the same
+ * (idmap, parentpath, mode, open_flag, cred) -> struct file* contract by
+ * calling vfs_tmpfile() then dentry_open()ing the result; vfs_tmpfile()
+ * itself dropped its idmap/mnt_userns parameter below 5.12 (VNS_OVL_TIER_OLD,
+ * no idmapped mounts yet). */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+static inline struct file *vfs_tmpfile_open(struct mnt_idmap *idmap,
+					    const struct path *parentpath,
+					    umode_t mode, int open_flag,
+					    const struct cred *cred)
+{
+	struct dentry *dentry;
+	struct file *file;
+	struct path path;
+
+#if VNS_OVL_TIER_OLD
+	dentry = vfs_tmpfile(parentpath->dentry, mode, open_flag);
+#else
+	dentry = vfs_tmpfile(idmap, parentpath->dentry, mode, open_flag);
+#endif
+	if (IS_ERR(dentry))
+		return ERR_CAST(dentry);
+	path.mnt = parentpath->mnt;
+	path.dentry = dentry;
+	file = dentry_open(&path, open_flag, cred);
+	dput(dentry);
+	return file;
+}
 #endif
 
 /* backing_file_open()/backing_tmpfile_open() (6.6+): open a real file while
@@ -1037,9 +1097,12 @@ static inline int vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct f
  * is what the 5.19+ definition itself expands to -- see
  * https://raw.githubusercontent.com/torvalds/linux/v5.19/include/linux/fsverity.h */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0)
-#include <crypto/sha2.h>
+/* SHA512_DIGEST_SIZE's real header (<crypto/sha2.h>, or <crypto/sha.h> on
+ * even older trees) is not reliably present/path-stable across every DDK
+ * kernel tree in our support window; hardcode the (ABI-stable, well-known)
+ * numeric value instead of depending on a header that may not exist. */
 #ifndef FS_VERITY_MAX_DIGEST_SIZE
-#define FS_VERITY_MAX_DIGEST_SIZE SHA512_DIGEST_SIZE
+#define FS_VERITY_MAX_DIGEST_SIZE 64
 #endif
 /* i_user_ns() (5.19+): the filesystem-side user namespace an inode's
  * uid/gid are stored relative to. Pre-5.19 the same value is reached
@@ -1048,6 +1111,29 @@ static inline int vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct f
 #ifndef i_user_ns
 #define i_user_ns(inode) ((inode)->i_sb->s_user_ns)
 #endif
+#endif
+
+/* posix_acl_clone() (6.0+, EXPORT_SYMBOL_GPL): duplicate a struct posix_acl
+ * with its own refcount. Pre-6.0 kernels lack the symbol entirely (see
+ * VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE above), so reimplement it locally with
+ * the same kmemdup()+refcount_set() logic as the real function (see
+ * https://raw.githubusercontent.com/torvalds/linux/v6.0/fs/posix_acl.c). */
+#if !VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE
+static inline struct posix_acl *posix_acl_clone(const struct posix_acl *acl,
+						gfp_t flags)
+{
+	struct posix_acl *clone = NULL;
+
+	if (acl) {
+		int size = sizeof(struct posix_acl) +
+			   acl->a_count * sizeof(struct posix_acl_entry);
+
+		clone = kmemdup(acl, size, flags);
+		if (clone)
+			refcount_set(&clone->a_refcount, 1);
+	}
+	return clone;
+}
 #endif
 
 /* vfsuid_t/vfsgid_t (6.0+, <linux/mnt_idmapping.h>): the idmapped-mount-aware

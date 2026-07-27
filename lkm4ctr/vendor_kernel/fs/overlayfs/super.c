@@ -1365,16 +1365,20 @@ static struct dentry *ovl_get_root(struct super_block *sb,
 	}
 
 	/* Look for xwhiteouts marker except in the lowermost layer */
-	for (int i = 0; i < ovl_numlower(oe) - 1; i++, lowerpath++) {
-		struct path path = {
-			.mnt = lowerpath->layer->mnt,
-			.dentry = lowerpath->dentry,
-		};
+	{
+		int loop_i;
 
-		/* overlay.opaque=x means xwhiteouts directory */
-		if (ovl_get_opaquedir_val(ofs, &path) == 'x') {
-			ovl_layer_set_xwhiteouts(ofs, lowerpath->layer);
-			ovl_dentry_set_xwhiteouts(root);
+		for (loop_i = 0; loop_i < ovl_numlower(oe) - 1; loop_i++, lowerpath++) {
+			struct path path = {
+				.mnt = lowerpath->layer->mnt,
+				.dentry = lowerpath->dentry,
+			};
+
+			/* overlay.opaque=x means xwhiteouts directory */
+			if (ovl_get_opaquedir_val(ofs, &path) == 'x') {
+				ovl_layer_set_xwhiteouts(ofs, lowerpath->layer);
+				ovl_dentry_set_xwhiteouts(root);
+			}
 		}
 	}
 

@@ -370,8 +370,9 @@ static void ovl_idmap_posix_acl(const struct inode *realinode,
 				struct posix_acl *acl)
 {
 	struct user_namespace *fs_userns = i_user_ns(realinode);
+	unsigned int i;
 
-	for (unsigned int i = 0; i < acl->a_count; i++) {
+	for (i = 0; i < acl->a_count; i++) {
 		vfsuid_t vfsuid;
 		vfsgid_t vfsgid;
 

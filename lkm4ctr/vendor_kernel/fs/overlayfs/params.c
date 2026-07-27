@@ -445,12 +445,13 @@ out_free:
 static void ovl_reset_lowerdirs(struct ovl_fs_context *ctx)
 {
 	struct ovl_fs_context_layer *l = ctx->lower;
+	size_t nr;
 
 	// Reset old user provided lowerdir string
 	kfree(ctx->lowerdir_all);
 	ctx->lowerdir_all = NULL;
 
-	for (size_t nr = 0; nr < ctx->nr; nr++, l++) {
+	for (nr = 0; nr < ctx->nr; nr++, l++) {
 		path_put(&l->path);
 		kfree(l->name);
 		l->name = NULL;
