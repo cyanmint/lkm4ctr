@@ -80,6 +80,7 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 		     struct path *path);
 
 #include <linux/version.h>
+#include <linux/statfs.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
@@ -283,6 +284,41 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	if (inode->i_flags & S_APPEND)
 		stat->attributes |= STATX_ATTR_APPEND;
 }
+#endif
+
+/*
+ * [BUILD-COMPAT] struct iattr's ->ia_uid/->ia_gid (plain kuid_t/kgid_t)
+ * were replaced by the vfsuid_t/vfsgid_t-typed ->ia_vfsuid/->ia_vfsgid
+ * (plus the VFSUIDT_INIT()/VFSGIDT_INIT() constructors) starting at 6.1
+ * (verified against android.googlesource.com include/linux/fs.h and
+ * include/linux/mnt_idmapping.h: absent on android13-5.15/android14-5.15
+ * and the OLD tier). Before 6.1, ->ia_uid/->ia_gid already take a plain
+ * kuid_t/kgid_t directly, so VFSUIDT_INIT()/VFSGIDT_INIT() can just be the
+ * identity, and the field-name macros redirect the designated initializer
+ * in copy_up.c to the pre-6.1 field names.
+ */
+#if !VNS_OVL_TIER_MID_NEW
+#define VFSUIDT_INIT(val) (val)
+#define VFSGIDT_INIT(val) (val)
+#define ia_vfsuid ia_uid
+#define ia_vfsgid ia_gid
+#endif
+
+/*
+ * [BUILD-COMPAT] FMODE_CAN_ODIRECT and struct file's ->f_iocb_flags do not
+ * exist before 6.1 (verified against android.googlesource.com
+ * include/linux/fs.h: absent on android13-5.15/android14-5.15 and the OLD
+ * tier). Before 6.1, real upstream overlayfs (fs/overlayfs/file.c) checked
+ * direct-I/O support via `file->f_mapping->a_ops->direct_IO` instead --
+ * reproduce that via VNS_OVL_FMODE_CAN_ODIRECT() and drop the
+ * ->f_iocb_flags cache update (it exists purely to speed up iocb_flags(),
+ * which is still called directly wherever ->f_iocb_flags would otherwise be
+ * read).
+ */
+#if !VNS_OVL_TIER_MID_NEW
+#define VNS_OVL_FMODE_CAN_ODIRECT(f) ((f)->f_mapping->a_ops->direct_IO != NULL)
+#else
+#define VNS_OVL_FMODE_CAN_ODIRECT(f) ((f)->f_mode & FMODE_CAN_ODIRECT)
 #endif
 
 /*
@@ -762,7 +798,18 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define free_anon_bdev (*vns_ovl_vfsc_free_anon_bdev)
 #define kern_path (*vns_ovl_vfsc_kern_path)
 #define dget_parent (*vns_ovl_vfsc_dget_parent)
-#define inode_owner_or_capable (*vns_ovl_vfsc_inode_owner_or_capable)
+#define inode_owner_or_capable(idmap, inode) \
+	(*vns_ovl_vfsc_inode_owner_or_capable)((inode))
+/*
+ * [BUILD-COMPAT] capable_wrt_inode_uidgid() is a plain, always
+ * exported/linkable symbol on VNS_OVL_TIER_OLD (<5.12) -- it simply
+ * doesn't take a `struct mnt_idmap *` yet (verified against
+ * android.googlesource.com include/linux/capability.h). See the
+ * setattr_prepare()/generic_permission() comment above for why a
+ * self-referencing macro is safe here.
+ */
+#define capable_wrt_inode_uidgid(idmap, inode, cap) \
+	capable_wrt_inode_uidgid((inode), (cap))
 #define exportfs_decode_fh (*vns_ovl_vfsc_exportfs_decode_fh)
 #define is_subdir (*vns_ovl_vfsc_is_subdir)
 #define vfs_getxattr(idmap, dentry, name, value, size) \

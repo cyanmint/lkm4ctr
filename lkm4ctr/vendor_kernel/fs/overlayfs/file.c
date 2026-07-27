@@ -86,6 +86,7 @@ static void ovl_aio_cleanup_handler(struct ovl_aio_req *aio_req)
 	ovl_aio_put(aio_req);
 }
 
+#if VNS_OVL_TIER_MID_NEW
 static void ovl_aio_rw_complete(struct kiocb *iocb, long res)
 {
 	struct ovl_aio_req *aio_req = container_of(iocb,
@@ -95,7 +96,24 @@ static void ovl_aio_rw_complete(struct kiocb *iocb, long res)
 	ovl_aio_cleanup_handler(aio_req);
 	orig_iocb->ki_complete(orig_iocb, res);
 }
+#else
+/*
+ * [BUILD-COMPAT] struct kiocb's ->ki_complete took a third `long ret2`
+ * argument on the 5.10/5.15-shaped kernels (verified against
+ * android.googlesource.com include/linux/fs.h; dropped again by 6.1) --
+ * match that arity here instead of the unified (6.12-shaped, 2-arg) one.
+ */
+static void ovl_aio_rw_complete(struct kiocb *iocb, long res, long res2)
+{
+	struct ovl_aio_req *aio_req = container_of(iocb,
+						   struct ovl_aio_req, iocb);
+	struct kiocb *orig_iocb = aio_req->orig_iocb;
+
+	ovl_aio_cleanup_handler(aio_req);
+	orig_iocb->ki_complete(orig_iocb, res, res2);
+}
 #endif
+#endif /* VNS_OVL_NEED_BACKING_FILE_FALLBACK */
 
 static char ovl_whatisit(struct inode *inode, struct inode *realinode)
 {
@@ -160,7 +178,7 @@ static int ovl_change_flags(struct file *file, unsigned int flags)
 	if (((flags ^ file->f_flags) & O_APPEND) && IS_APPEND(inode))
 		return -EPERM;
 
-	if ((flags & O_DIRECT) && !(file->f_mode & FMODE_CAN_ODIRECT))
+	if ((flags & O_DIRECT) && !VNS_OVL_FMODE_CAN_ODIRECT(file))
 		return -EINVAL;
 
 	if (file->f_op->check_flags) {
@@ -171,7 +189,9 @@ static int ovl_change_flags(struct file *file, unsigned int flags)
 
 	spin_lock(&file->f_lock);
 	file->f_flags = (file->f_flags & ~OVL_SETFL_MASK) | flags;
+#if VNS_OVL_TIER_MID_NEW
 	file->f_iocb_flags = iocb_flags(file);
+#endif
 	spin_unlock(&file->f_lock);
 
 	return 0;
@@ -382,7 +402,7 @@ static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 #else
 	ret = -EINVAL;
 	if (iocb->ki_flags & IOCB_DIRECT &&
-	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+	    !VNS_OVL_FMODE_CAN_ODIRECT(fd_file(real)))
 		goto out_fdput;
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
@@ -459,7 +479,7 @@ static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 #else
 	ret = -EINVAL;
 	if (iocb->ki_flags & IOCB_DIRECT &&
-	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+	    !VNS_OVL_FMODE_CAN_ODIRECT(fd_file(real)))
 		goto out_fdput;
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
