@@ -26,6 +26,7 @@
 #include <linux/cred.h>
 #include <linux/rcupdate.h>
 #include <linux/spinlock.h>
+#include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/file.h>
 #include <linux/ipc.h>
@@ -61,6 +62,27 @@ struct vns_registry {
 };
 
 extern struct vns_registry vendor_kernel_registry;
+
+/*
+ * vendored fs/overlayfs (vendor_kernel/fs/overlayfs/). vns_ovl_fs_type
+ * uses the same name as upstream, "overlay", but is never
+ * register_filesystem()'d directly: glue/vendor_kernel_overlay.c hooks
+ * get_fs_type() and always hands this struct out for the name "overlay"
+ * -- regardless of whether the running kernel has its own working
+ * overlayfs -- so "mount -t overlay ..." always uses this vendored
+ * implementation while lkm4ctr.ko is loaded. See fs/overlayfs/super.c.
+ * Lifecycle is chained from vendor_kernel_init()/vendor_kernel_exit();
+ * vns_ovl_mount_count feeds vendor_kernel's diagfs status
+ * (glue/vendor_kernel_diag.c).
+ */
+extern atomic_t vns_ovl_mount_count;
+extern struct file_system_type vns_ovl_fs_type;
+int vns_ovl_init(void);
+void vns_ovl_exit(void);
+int vns_overlay_init(void);
+void vns_overlay_exit(void);
+size_t vns_overlay_diag_snprintf(char *buf, size_t buflen);
+
 extern int (*vns_proc_alloc_inum_fn)(unsigned int *);
 extern void (*vns_proc_free_inum_fn)(unsigned int);
 extern struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace *, struct user_namespace *, struct fs_struct *);

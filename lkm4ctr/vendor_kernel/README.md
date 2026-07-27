@@ -243,6 +243,48 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - `fs/nsfs.c`
 - `kernel/cgroup/namespace.c`
 - `kernel/time/namespace.c`
+- `fs/overlayfs/super.c`
+- `fs/overlayfs/namei.c`
+- `fs/overlayfs/util.c`
+- `fs/overlayfs/inode.c`
+- `fs/overlayfs/dir.c`
+- `fs/overlayfs/readdir.c`
+- `fs/overlayfs/copy_up.c`
+- `fs/overlayfs/export.c`
+- `fs/overlayfs/file.c`
+- `fs/overlayfs/overlayfs.h`
+- `fs/overlayfs/ovl_entry.h`
+
+### Vendored overlayfs
+
+`fs/overlayfs/` is vendored verbatim from kernel-common, upstream's own
+out-of-tree-buildable overlay filesystem, with two minimal edits (both in
+`fs/overlayfs/super.c`):
+
+- `module_init(ovl_init)`/`module_exit(ovl_exit)` were replaced with plain
+  `vns_ovl_init()`/`vns_ovl_exit()` functions (renamed from `ovl_init`/
+  `ovl_exit`, and no longer `static`), since lkm4ctr.ko already has a
+  single `module_init`/`module_exit` pair in `lkm4ctr_main.c`. These are
+  chained in from `vendor_kernel_init()`/`vendor_kernel_exit()` via
+  `glue/vendor_kernel_overlay.c`.
+- The `file_system_type` (`vns_ovl_fs_type`, renamed from the static
+  `ovl_fs_type` so `glue/vendor_kernel_overlay.c` can reference it) keeps
+  upstream's name, `"overlay"`, but is **never** passed to
+  `register_filesystem()`/`unregister_filesystem()`. Instead,
+  `glue/vendor_kernel_overlay.c` hooks the exported `get_fs_type()` kernel
+  function (the same lookup `mount(2)` itself uses to resolve a filesystem
+  name) and, for the name `"overlay"`, always hands out `vns_ovl_fs_type`
+  -- unconditionally, regardless of whether the running kernel also ships
+  its own built-in overlayfs or a separate `overlay.ko`. This means
+  `mount -t overlay ...` always uses this vendored implementation while
+  `lkm4ctr.ko` is loaded, with zero risk of a `register_filesystem()`
+  `-EBUSY` collision against a real one (since it is never registered into
+  the global `file_systems` list at all).
+- `vns_ovl_mount_count` (new, not upstream) tracks live vendored-overlay
+  mounts (incremented in `ovl_fill_super()` on success, decremented in the
+  new `vns_ovl_kill_sb()` wrapper around `kill_anon_super()`) and is
+  surfaced through vendor_kernel's diagfs status
+  (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
 
 ## Helper files
 
@@ -251,6 +293,7 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - `glue/vendor_kernel_syscalls.c` - syscall hooks; installs real namespaces via `vns_switch_task_namespaces()`
 - `glue/vendor_kernel_ipc_syscalls.c` - SysV IPC + POSIX mqueue syscall hooks; module-owned default `ipc_namespace` init/exit
 - `glue/vendor_kernel_ipc_compat.c` - resolves/stubs the non-exported mm/vfs/netlink/audit/security/ucounts symbols the vendored `ipc/*.c` pull in
+- `glue/vendor_kernel_overlay.c` - vendored overlayfs lifecycle + `get_fs_type("overlay")` hook (see "Vendored overlayfs" above)
 - `glue/vendor_kernel_diag.c` - diagfs renderer
 - `include/uapi/vendor_kernel.h` - minimal UAPI marker header
 

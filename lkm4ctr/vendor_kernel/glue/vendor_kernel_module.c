@@ -327,6 +327,16 @@ int vendor_kernel_init(void)
 	else
 		total_hooked += hooked;
 
+	hooked = vns_overlay_init();
+	if (hooked) {
+		shadow_hook_remove_all(vendor_kernel_procfs_hooks);
+		shadow_hook_remove_all(vendor_kernel_ipc_hooks);
+		shadow_hook_remove_all(vendor_kernel_core_hooks);
+		vns_exit_hook_exit();
+		vns_ipc_default_exit();
+		return hooked;
+	}
+
 	vendor_kernel_enabled = true;
 	LKM4CTR_INFO("vendor_kernel", "loaded (%d hook(s) installed)", total_hooked);
 	if (!vns_pidns_runtime_supported)
@@ -340,6 +350,7 @@ void vendor_kernel_exit(void)
 	if (!vendor_kernel_enabled)
 		return;
 	vendor_kernel_enabled = false;
+	vns_overlay_exit();
 	shadow_hook_remove_all(vendor_kernel_procfs_hooks);
 	shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 	shadow_hook_remove_all(vendor_kernel_core_hooks);

@@ -16,7 +16,7 @@ module entry point, one `.ko`.
 |-----------------------|-----------------------------------|---------|
 | `lkm4ctr.ko`          | `lkm4ctr/`                        | Unified module containing the shared hook engine plus the vendored namespace/IPC/mqueue and cgroup-device compatibility subsystems. |
 | `shadow_hijack`       | `lkm4ctr/shadow_hijack/`          | Internal shared ftrace/kprobe hook implementation used by the other subsystems inside `lkm4ctr.ko`. |
-| `vendor_kernel`       | `lkm4ctr/vendor_kernel/`          | Vendored namespace/IPC/mqueue implementation: namespace syscalls, `/proc` namespace visibility, SysV IPC, and POSIX mqueue support. |
+| `vendor_kernel`       | `lkm4ctr/vendor_kernel/`          | Vendored namespace/IPC/mqueue/overlayfs implementation: namespace syscalls, `/proc` namespace visibility, SysV IPC, POSIX mqueue support, and an always-used vendored overlayfs (`get_fs_type("overlay")` hook). |
 | `shadow_cgdevices`    | `lkm4ctr/shadow_cgdevices/`       | Transparent device-open hook shim for the cgroup-device compatibility slot. |
 | `lkm4ctr_checker`     | `lkm4ctr_checker/`                | **Userspace** diagnostic binary (not a kernel module): performs real syscalls and reports PASS/STUB/FAIL per feature. |
 
@@ -41,6 +41,7 @@ change anything). See each module's own README for the full rationale.
 | `vendor_kernel` — NET namespace      | **Bookkeeping** | A separate namespace id/refcount is tracked, but no network-stack partitioning is provided. |
 | `vendor_kernel` — CGROUP namespace   | **Kernel-provided or bookkeeping-only** | Uses the real kernel cgroup namespace support when present; on kernels lacking it, only bookkeeping remains. |
 | `vendor_kernel` — MNT namespace      | **Kernel-provided** | Relies on the running kernel's mount-namespace implementation; no separate vendored mount-namespace core is provided. |
+| `vendor_kernel` — overlayfs          | **Real**        | A vendored `fs/overlayfs` always answers `get_fs_type("overlay")` (hooked), so `mount -t overlay ...` genuinely mounts and operates through this module's own overlay implementation, regardless of the running kernel's own overlayfs support. |
 | `shadow_cgdevices` (`chrdev_open`)     | **Stub**        | Hook installed but currently only preserves native behaviour; no rule enforcement yet. |
 | `shadow_cgdevices` (`blkdev_open`)     | **Stub, best-effort** | Same as above, and only installed if the symbol exists with the expected prototype on that KMI. |
 | `lkm4ctr_checker`                  | n/a (diagnostics) | **Userspace binary**, not a kernel module: actually attempts the relevant syscalls and reports PASS/STUB/FAIL based on the observed effect, rather than reporting compile-time config alone. |
