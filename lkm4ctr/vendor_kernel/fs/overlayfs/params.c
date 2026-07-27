@@ -16,7 +16,7 @@
  * kernels (falling back to the running kernel's own overlay
  * implementation) instead of failing the build.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 
 #include <linux/fs.h>

@@ -43,38 +43,22 @@
 #include "../../../common/lkm4ctr_log.h"
 
 /*
- * The vendored fs/overlayfs sources cover 5 distinct, individually verified
- * VFS/fs_context API eras, one per subdirectory:
+ * Since the overlayfs unification, vendor_kernel/fs/overlayfs/ is a SINGLE copy
+ * of the upstream sources (taken from android16-6.12) that builds and runs
+ * across every targeted KMI via the three-tier compatibility layer in
+ * glue/vendor_kernel_ovl_vfs_compat.{h,c} (tiers OLD [5.10, 5.12),
+ * MID [5.12, 6.3), NEW [6.3, 6.19); see that header). All of fs/overlayfs/ is
+ * guarded by the single range [5.10, 6.19), so vns_ovl_init(), vns_ovl_exit()
+ * and vns_ovl_fs_type exist for exactly that span and this dispatch just calls
+ * them once.
  *
- *   - vendor_kernel/fs/overlayfs_5_10/  [5.10, 5.15) (android12-5.10, android13-5.10)
- *   - vendor_kernel/fs/overlayfs_5_15/  [5.15, 6.1)  (android13-5.15, android14-5.15)
- *   - vendor_kernel/fs/overlayfs/       [6.1, 6.3)   (android14-6.1)
- *   - vendor_kernel/fs/overlayfs_6_6/   [6.6, 6.7)   (android15-6.6)
- *   - vendor_kernel/fs/overlayfs_6_12/  [6.12, 6.13) (android16-6.12)
- *
- * Each era's *.c files are individually guarded by their own
- * #if LINUX_VERSION_CODE range (see the [BUILD-COMPAT] comment at the top of
- * each file), so on any given target kernel at most one era's files compile
- * to real content -- the vns_ovl_* symbols below always resolve to exactly
- * one implementation (or none, in an unsupported gap between eras). Outside
- * every covered range, vns_ovl_init(), vns_ovl_exit() and vns_ovl_fs_type do
- * not even exist (every era's files compile to nothing), so the
+ * Outside [5.10, 6.19) the vendored sources compile to nothing, so the
  * get_fs_type() override must not be installed; the running kernel's own
- * overlay implementation is used instead. Missing vendored overlayfs support
- * is not a fatal condition for the rest of vendor_kernel, so
- * vns_overlay_init() still returns 0 in that case.
- *
- * Deliberate gaps (not covered by any era, matching no upstream android*
- * KMI in .github/workflows/build-lkm4ctr.yml): [6.3, 6.6) and [6.7, 6.12).
- * These are real, but unverified, VFS API transitions -- see "Vendored
- * overlayfs" in vendor_kernel/README.md for why cross-version porting is
- * avoided in favor of only vendoring exact, verified upstream sources.
+ * overlay implementation is used instead. Missing vendored overlayfs support is
+ * not a fatal condition for the rest of vendor_kernel, so vns_overlay_init()
+ * still returns 0 in that case.
  */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 static struct file_system_type *(*real_get_fs_type)(const char *name);
 

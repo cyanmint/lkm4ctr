@@ -47,56 +47,15 @@ lkm4ctr-objs := \
 	vendor_kernel/fs/overlayfs/copy_up.o \
 	vendor_kernel/fs/overlayfs/export.o \
 	vendor_kernel/fs/overlayfs/file.o \
-	vendor_kernel/fs/overlayfs_5_10/super.o \
-	vendor_kernel/fs/overlayfs_5_10/namei.o \
-	vendor_kernel/fs/overlayfs_5_10/util.o \
-	vendor_kernel/fs/overlayfs_5_10/inode.o \
-	vendor_kernel/fs/overlayfs_5_10/dir.o \
-	vendor_kernel/fs/overlayfs_5_10/readdir.o \
-	vendor_kernel/fs/overlayfs_5_10/copy_up.o \
-	vendor_kernel/fs/overlayfs_5_10/export.o \
-	vendor_kernel/fs/overlayfs_5_10/file.o \
-	vendor_kernel/fs/overlayfs_5_15/super.o \
-	vendor_kernel/fs/overlayfs_5_15/namei.o \
-	vendor_kernel/fs/overlayfs_5_15/util.o \
-	vendor_kernel/fs/overlayfs_5_15/inode.o \
-	vendor_kernel/fs/overlayfs_5_15/dir.o \
-	vendor_kernel/fs/overlayfs_5_15/readdir.o \
-	vendor_kernel/fs/overlayfs_5_15/copy_up.o \
-	vendor_kernel/fs/overlayfs_5_15/export.o \
-	vendor_kernel/fs/overlayfs_5_15/file.o \
-	vendor_kernel/fs/overlayfs_6_6/super.o \
-	vendor_kernel/fs/overlayfs_6_6/namei.o \
-	vendor_kernel/fs/overlayfs_6_6/util.o \
-	vendor_kernel/fs/overlayfs_6_6/inode.o \
-	vendor_kernel/fs/overlayfs_6_6/dir.o \
-	vendor_kernel/fs/overlayfs_6_6/readdir.o \
-	vendor_kernel/fs/overlayfs_6_6/copy_up.o \
-	vendor_kernel/fs/overlayfs_6_6/export.o \
-	vendor_kernel/fs/overlayfs_6_6/file.o \
-	vendor_kernel/fs/overlayfs_6_6/params.o \
-	vendor_kernel/fs/overlayfs_6_12/super.o \
-	vendor_kernel/fs/overlayfs_6_12/namei.o \
-	vendor_kernel/fs/overlayfs_6_12/util.o \
-	vendor_kernel/fs/overlayfs_6_12/inode.o \
-	vendor_kernel/fs/overlayfs_6_12/dir.o \
-	vendor_kernel/fs/overlayfs_6_12/readdir.o \
-	vendor_kernel/fs/overlayfs_6_12/copy_up.o \
-	vendor_kernel/fs/overlayfs_6_12/export.o \
-	vendor_kernel/fs/overlayfs_6_12/file.o \
-	vendor_kernel/fs/overlayfs_6_12/params.o \
-	vendor_kernel/fs/overlayfs_6_12/xattrs.o \
+	vendor_kernel/fs/overlayfs/params.o \
+	vendor_kernel/fs/overlayfs/xattrs.o \
 	vendor_kernel/kernel/cgroup/namespace.o \
 	vendor_kernel/kernel/time/namespace.o \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_procfs.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
-	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat_5_10.o \
-	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat_5_15.o \
 	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
-	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat_6_6.o \
-	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat_6_12.o \
 	vendor_kernel/glue/vendor_kernel_diag.o \
 	vendor_kernel/glue/vendor_kernel_compat.o
 

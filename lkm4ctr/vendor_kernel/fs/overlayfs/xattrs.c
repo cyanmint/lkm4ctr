@@ -16,7 +16,7 @@
  * kernels (falling back to the running kernel's own overlay
  * implementation) instead of failing the build.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 
 #include <linux/fs.h>
@@ -65,7 +65,7 @@ static int ovl_xattr_set(struct dentry *dentry, struct inode *inode, const char 
 	if (!value && !upperdentry) {
 		ovl_path_lower(dentry, &realpath);
 		old_cred = ovl_override_creds(dentry->d_sb);
-		err = vfs_getxattr(mnt_idmap(realpath.mnt), realdentry, name, NULL, 0);
+		err = vfs_getxattr(ovl_mnt_idmap(realpath.mnt), realdentry, name, NULL, 0);
 		revert_creds(old_cred);
 		if (err < 0)
 			goto out;
@@ -109,7 +109,7 @@ static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char 
 
 	ovl_i_path_real(inode, &realpath);
 	old_cred = ovl_override_creds(dentry->d_sb);
-	res = vfs_getxattr(mnt_idmap(realpath.mnt), realpath.dentry, name, value, size);
+	res = vfs_getxattr(ovl_mnt_idmap(realpath.mnt), realpath.dentry, name, value, size);
 	revert_creds(old_cred);
 	return res;
 }
