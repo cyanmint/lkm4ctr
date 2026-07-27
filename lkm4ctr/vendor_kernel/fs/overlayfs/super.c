@@ -55,6 +55,20 @@ atomic_t vns_ovl_mount_count = ATOMIC_INIT(0);
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Overlay filesystem");
 MODULE_LICENSE("GPL");
+/*
+ * [BUILD-COMPAT] not present in the android14-6.1 kernel-common snapshot
+ * this file was originally vendored from, but real production android14-6.1
+ * device kernels have since moved every vfs_*()/mount_nodev()/
+ * clone_private_mount()/etc. symbol overlayfs depends on behind the
+ * ANDROID_GKI_VFS_EXPORT_ONLY EXPORT_SYMBOL_NS() namespace (the same
+ * namespace every other vendored overlayfs era below already imports,
+ * matching their own upstream source). Importing it here is a no-op on any
+ * kernel that does not use the namespace for these symbols (an unused
+ * MODULE_IMPORT_NS() string is always harmless), but is required for
+ * insmod to resolve them instead of failing with "Unknown symbol ... (err
+ * -2)" on a kernel that does.
+ */
+MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
 
 
 struct ovl_dir_cache;

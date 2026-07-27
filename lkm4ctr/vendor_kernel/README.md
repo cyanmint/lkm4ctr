@@ -312,6 +312,17 @@ minimal edits applied independently in each era's `super.c` (and, for the
   new `vns_ovl_kill_sb()` wrapper around `kill_anon_super()`) and is
   surfaced through vendor_kernel's diagfs status
   (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
+- Every era's `super.c` carries `MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);`
+  (present verbatim in the `5.10`/`5.15`/`6.6` upstream sources already; added
+  here to the `6.1` and `6.12` eras, whose upstream snapshots at the time
+  they were vendored predate that symbol namespace being applied to some of
+  the `vfs_*()`/`mount_nodev()`/`clone_private_mount()`/etc. exports
+  overlayfs depends on). Real production device kernels for any of the 5
+  eras may gate these symbols behind that namespace even where our
+  reference `kernel-common` snapshot does not yet; omitting the import
+  causes `insmod` to fail outright with "Unknown symbol ... (err -2)" for
+  every such symbol on a kernel that enforces it, while importing an unused
+  namespace name is always a harmless no-op on a kernel that does not.
 
 **KMI support range**: every KMI in `.github/workflows/build-lkm4ctr.yml`
 is now covered by exactly one of 5 individually verified vendored overlayfs
