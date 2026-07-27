@@ -354,4 +354,4 @@ const struct xattr_handler * const *ovl_xattr_handlers(struct ovl_fs *ofs)
 		ovl_trusted_xattr_handlers;
 }
 
-#endif /* LINUX_VERSION_CODE in [KERNEL_VERSION(6, 12, 0), KERNEL_VERSION(6, 13, 0)) */
+#endif /* LINUX_VERSION_CODE in [KERNEL_VERSION(5, 10, 0), KERNEL_VERSION(6, 19, 0)) */
