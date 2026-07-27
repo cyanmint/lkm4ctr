@@ -30,6 +30,23 @@
 #include "overlayfs.h"
 #include "params.h"
 
+/*
+ * [BUILD-COMPAT] fs_param_is_enum() may be trimmed from the module symbol
+ * table by CONFIG_TRIM_UNUSED_KSYMS on some GKI KMIs, unlike
+ * fs_param_is_bool()/fs_param_is_u32()/fs_param_is_string() (exercised by
+ * enough in-tree filesystems to always survive trimming) -- so, unlike
+ * those, it goes through vendor_kernel_ovl_vfs_compat.h's
+ * shadow_hook_resolve() mechanism instead of being linked directly.
+ * fsparam_enum()'s expansion embeds the raw symbol name into a designated
+ * initializer of ovl_parameter_spec[] below, which needs the symbol at
+ * module-load relocation time -- before vns_ovl_vfs_compat_resolve() has a
+ * chance to resolve it. Redefine fsparam_enum() to leave .type NULL at
+ * compile time instead, and patch it in at runtime once resolved (see
+ * vns_ovl_patch_fsparam_enum(), called from vns_ovl_init()).
+ */
+#undef fsparam_enum
+#define fsparam_enum(NAME, OPT, array) __fsparam(NULL, NAME, OPT, 0, array)
+
 static bool ovl_redirect_dir_def = IS_ENABLED(CONFIG_OVERLAY_FS_REDIRECT_DIR);
 module_param_named(redirect_dir, ovl_redirect_dir_def, bool, 0644);
 MODULE_PARM_DESC(redirect_dir,

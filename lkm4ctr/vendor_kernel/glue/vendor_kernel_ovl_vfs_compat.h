@@ -63,6 +63,22 @@
 #ifndef _VNS_OVL_VFS_COMPAT_H
 #define _VNS_OVL_VFS_COMPAT_H
 
+/*
+ * vfs_path_lookup() is not declared in any public header (only
+ * fs/internal.h, unavailable to out-of-tree modules) -- it is itself
+ * EXPORT_SYMBOL_NS(vfs_path_lookup, ANDROID_GKI_VFS_EXPORT_ONLY) in
+ * fs/namei.c, so a direct prototype is all that is needed for typeof().
+ * Also, like every other name in VNS_OVL_VFS_COMPAT_LIST, it may be trimmed
+ * from the module symbol table entirely on some GKI KMIs
+ * (CONFIG_TRIM_UNUSED_KSYMS), so it is resolved the same way rather than
+ * linked directly. Declared once, centrally, here (rather than locally in
+ * namei.c) so every TU that includes this header sees the prototype before
+ * the pass-1 typeof() declare below, since this header may be reached via
+ * an include chain that has not itself declared it yet. */
+int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
+		     const char *name, unsigned int flags,
+		     struct path *path);
+
 #include <linux/version.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
@@ -85,9 +101,23 @@
  * kallsyms redirect -- see the shim near the end of this file. */
 #define VNS_OVL_TIER_HAVE_POSIX_ACL_CLONE (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
 
-/* backing_file_open() exists since 6.6; backing_file_read_iter()/... since 6.9. */
+/* d_tmpfile() was renamed d_mark_tmpfile() at 6.7 ("vfs: rename d_tmpfile to
+ * d_mark_tmpfile"). Only NEW-tier kernels can straddle this boundary
+ * (android15-6.6 is NEW-tier but < 6.7); MID/OLD are always < 6.3 so always
+ * need the pre-rename name resolved. */
+#define VNS_OVL_TIER_HAVE_D_MARK_TMPFILE (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0))
+#if VNS_OVL_TIER_HAVE_D_MARK_TMPFILE
+#define VNS_OVL_VFSC_DTMPFILE_ENTRY(X)
+#else
+#define VNS_OVL_VFSC_DTMPFILE_ENTRY(X) X(d_tmpfile)
+#endif
+
+/* backing_file_open() exists since 6.6 (in <linux/fs.h>); the full
+ * backing_file_ctx-based API (backing_file_read_iter()/write_iter()/
+ * splice_read()/splice_write()/mmap(), later moved to its own
+ * <linux/backing-file.h>) landed together at 6.8. */
 #define VNS_OVL_HAVE_BACKING_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
-#define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
+#define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
 
 /* <linux/backing-file.h> declares backing_file_read_iter()/write_iter()/...
@@ -257,7 +287,12 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_copy_file_range) \
 	X(vfs_dedupe_file_range_one) \
 	X(vfs_clone_file_range) \
-	X(vfs_llseek)
+	X(vfs_llseek) \
+	X(vfs_path_lookup) \
+	X(rw_verify_area) \
+	X(vfs_fadvise) \
+	X(fs_param_is_enum) \
+	VNS_OVL_VFSC_DTMPFILE_ENTRY(X)
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
@@ -345,7 +380,12 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_clone_file_range) \
 	X(vfs_llseek) \
 	X(inode_permission) \
-	X(open_with_fake_path)
+	X(open_with_fake_path) \
+	X(vfs_path_lookup) \
+	X(rw_verify_area) \
+	X(vfs_fadvise) \
+	X(fs_param_is_enum) \
+	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
 	X(vfs_iter_read) \
@@ -431,7 +471,11 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_ioctl) \
 	X(vfs_setpos) \
 	X(down_write_killable) \
-	X(generic_fillattr)
+	X(generic_fillattr) \
+	X(vfs_path_lookup) \
+	X(rw_verify_area) \
+	X(fs_param_is_enum) \
+	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X)
 #endif /* OLD */
@@ -510,6 +554,13 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_dedupe_file_range_one (*vns_ovl_vfsc_vfs_dedupe_file_range_one)
 #define vfs_clone_file_range (*vns_ovl_vfsc_vfs_clone_file_range)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
+#define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
+#define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
+#define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+#if !VNS_OVL_TIER_HAVE_D_MARK_TMPFILE
+#define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
+#endif
+
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
 #define backing_file_read_iter (*vns_ovl_vfsc_backing_file_read_iter)
 #define backing_file_write_iter (*vns_ovl_vfsc_backing_file_write_iter)
@@ -590,6 +641,10 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
 #define inode_permission (*vns_ovl_vfsc_inode_permission)
 #define open_with_fake_path (*vns_ovl_vfsc_open_with_fake_path)
+#define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
+#define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
+#define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+#define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
 #define vfs_iter_read (*vns_ovl_vfsc_vfs_iter_read)
 #define vfs_iter_write (*vns_ovl_vfsc_vfs_iter_write)
 #define vfs_iocb_iter_read (*vns_ovl_vfsc_vfs_iocb_iter_read)
@@ -673,6 +728,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_setpos (*vns_ovl_vfsc_vfs_setpos)
 #define down_write_killable (*vns_ovl_vfsc_down_write_killable)
 #define generic_fillattr (*vns_ovl_vfsc_generic_fillattr)
+#define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
+#define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
+#define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
 #endif /* OLD */
 
 /* ================================================================== */
@@ -684,6 +742,22 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 /* the kernels that lack the 6.12 spelling. Semantics were taken from   */
 /* the pre-unification per-era overlayfs copies (the DDK oracle).       */
 /* ================================================================== */
+
+/* alloc_inode_sb() (5.18+): allocates a filesystem-specific inode from its
+ * kmem_cache while also registering it with the superblock's inode LRU
+ * (sb->s_inode_lru) for reclaim purposes. Pre-5.18 kernels have no such
+ * wrapper (nor the kmem_cache_alloc_lru() it is built on) -- fall back to a
+ * plain kmem_cache_alloc(). Degraded but safe: the allocated inode simply
+ * is not tracked by the superblock's LRU shrinker, matching how every
+ * pre-5.18 filesystem (including the pre-unification overlayfs) allocated
+ * its inodes. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
+static inline void *alloc_inode_sb(struct super_block *sb,
+				   struct kmem_cache *cache, gfp_t gfp)
+{
+	return kmem_cache_alloc(cache, gfp);
+}
+#endif
 
 /* AT_GETATTR_NOSEC (6.6+): the "skip security_inode_getattr()" fast path.
  * On older kernels the flag does not exist; define it to 0 so
@@ -803,6 +877,12 @@ static inline struct file *backing_file_open(const struct path *user_path, int f
 {
 	return open_with_fake_path(user_path, flags, d_inode(real_path->dentry), cred);
 }
+#endif
+/* backing_tmpfile_open() is a separate, later addition to <linux/fs.h>/
+ * <linux/backing-file.h> than backing_file_open(): the latter landed in
+ * 6.6, but backing_tmpfile_open() only in 6.10. Kernels in [6.6, 6.10) have
+ * backing_file_open() natively but still need this fallback. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 static inline struct file *backing_tmpfile_open(const struct path *user_path, int flags,
 						const struct path *real_parentpath,
 						umode_t mode, const struct cred *cred)
@@ -812,9 +892,10 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
 }
 #endif
 
-/* d_mark_tmpfile() (6.6+) is the 6.12 source's spelling of the older
- * d_tmpfile(); both take the same (struct file *, struct inode *) pair. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* d_mark_tmpfile() is the 6.7 rename of the older d_tmpfile() (not 6.6 --
+ * see "vfs: rename d_tmpfile to d_mark_tmpfile", merged for v6.7); both take
+ * the same (struct file *, struct inode *) pair. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 #define d_mark_tmpfile d_tmpfile
 #endif
 
@@ -1026,7 +1107,7 @@ static inline const char *posix_acl_xattr_name(int type)
 }
 static inline struct posix_acl *get_inode_acl(struct inode *inode, int type)
 {
-	return get_acl(inode, type);
+	return (*vns_ovl_vfsc_get_acl)(inode, type);
 }
 static inline struct posix_acl *vfs_get_acl(struct mnt_idmap *idmap,
 					    struct dentry *dentry,
@@ -1036,7 +1117,7 @@ static inline struct posix_acl *vfs_get_acl(struct mnt_idmap *idmap,
 
 	if (type < 0)
 		return ERR_PTR(-EOPNOTSUPP);
-	return get_acl(d_inode(dentry), type);
+	return (*vns_ovl_vfsc_get_acl)(d_inode(dentry), type);
 }
 /* is_posix_acl_xattr() (6.2+) checks whether a xattr name is one of the two
  * POSIX ACL names. Trivial, ABI-stable comparison; reimplement directly

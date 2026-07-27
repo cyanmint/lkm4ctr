@@ -35,14 +35,11 @@
 
 /*
  * [BUILD-COMPAT] not #include "../internal.h": that is a private,
- * non-exported kernel header unavailable to out-of-tree modules. It
- * only declares vfs_path_lookup() here, which is itself
- * EXPORT_SYMBOL_NS(vfs_path_lookup, ANDROID_GKI_VFS_EXPORT_ONLY) in
- * fs/namei.c, so a direct prototype is all that is needed.
+ * non-exported kernel header unavailable to out-of-tree modules. It only
+ * declares vfs_path_lookup(); see glue/vendor_kernel_ovl_vfs_compat.h for
+ * the shared prototype (also resolved via shadow_hook_resolve() there, in
+ * case it is trimmed from the module symbol table on some GKI KMIs).
  */
-int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
-		     const char *name, unsigned int flags,
-		     struct path *path);
 
 struct ovl_lookup_data {
 	struct super_block *sb;
