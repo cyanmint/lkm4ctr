@@ -108,8 +108,7 @@ int vns_ipc_default_init(void)
 	vns_default_ipc_ns.ns.ops = &vns_ipcns_operations;
 
 	/*
-	 * Best-effort, mirroring shadow_mqueue's own proactive /dev/mqueue
-	 * creation: make sure /dev/mqueue is already a working mountpoint by
+	 * Best-effort: make sure /dev/mqueue is already a working mountpoint by
 	 * the time this returns, instead of only reacting to a container's
 	 * own mount(2) call that init.rc's boot-time attempt may already have
 	 * failed before this (typically late-loaded) module was ever

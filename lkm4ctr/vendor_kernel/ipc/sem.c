@@ -387,14 +387,22 @@ void sem_init_ns(struct ipc_namespace *ns)
 	ipc_init_ids(&ns->ids[IPC_SEM_IDS]);
 }
 
-#ifdef CONFIG_IPC_NS
+/*
+ * [BUILD-COMPAT] upstream wraps this in "#ifdef CONFIG_IPC_NS"; vendor_kernel
+ * exists precisely to run on kernels where CONFIG_SYSVIPC/CONFIG_IPC_NS are
+ * *not* set, so that guard would compile this definition out entirely,
+ * leaving vns_free_ipc_ns()'s unconditional call to sem_exit_ns() (renamed
+ * vns_sem_exit_ns) dangling as an unresolved symbol at insmod time. Removed
+ * so this subsystem is self-contained regardless of the host kernel's
+ * CONFIG_IPC_NS setting, matching nsproxy.c/pid_namespace.c/
+ * user_namespace.c.
+ */
 void sem_exit_ns(struct ipc_namespace *ns)
 {
 	free_ipcs(ns, &sem_ids(ns), freeary);
 	idr_destroy(&ns->ids[IPC_SEM_IDS].ipcs_idr);
 	rhashtable_destroy(&ns->ids[IPC_SEM_IDS].key_ht);
 }
-#endif
 
 void __init sem_init(void)
 {

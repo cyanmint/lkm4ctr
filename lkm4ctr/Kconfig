@@ -84,3 +84,18 @@ config LKM4CTR_VENDOR_KERNEL
 	  namespace types it vendors are actually available on the target
 	  kernel and unshare(2)/clone(2) for IPC/NET namespaces (among
 	  others) do not spuriously fail.
+
+config LKM4CTR_VENDOR_KERNEL_OVERLAYFS
+	bool "vendor_kernel: Vendored overlayfs"
+	depends on LKM4CTR_VENDOR_KERNEL
+	default y
+	help
+	  Vendor the entire Linux kernel overlayfs (fs/overlayfs/) into
+	  lkm4ctr.ko and always use it for "overlay" mounts. Hooks
+	  get_fs_type() so every lookup for the name "overlay" is answered
+	  by this vendored implementation, unconditionally -- regardless of
+	  whether the running kernel also ships its own built-in overlayfs
+	  or overlay.ko; the real get_fs_type() is never even consulted for
+	  that name. Auto-installs at insmod time alongside the rest of
+	  vendor_kernel; mount count is exposed via the vendor_kernel
+	  diagfs status file. See vendor_kernel/README.md.

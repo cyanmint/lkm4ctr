@@ -1387,7 +1387,16 @@ fail_msg_accounting:
 	return ret;
 }
 
-#ifdef CONFIG_IPC_NS
+/*
+ * [BUILD-COMPAT] upstream wraps this in "#ifdef CONFIG_IPC_NS"; vendor_kernel
+ * exists precisely to run on kernels where CONFIG_SYSVIPC/CONFIG_IPC_NS are
+ * *not* set, so that guard would compile this definition out entirely,
+ * leaving vns_free_ipc_ns()'s unconditional call to msg_exit_ns() (renamed
+ * vns_msg_exit_ns) dangling as an unresolved symbol at insmod time. Removed
+ * so this subsystem is self-contained regardless of the host kernel's
+ * CONFIG_IPC_NS setting, matching nsproxy.c/pid_namespace.c/
+ * user_namespace.c.
+ */
 void msg_exit_ns(struct ipc_namespace *ns)
 {
 	free_ipcs(ns, &msg_ids(ns), freeque);
@@ -1395,7 +1404,6 @@ void msg_exit_ns(struct ipc_namespace *ns)
 	rhashtable_destroy(&ns->ids[IPC_MSG_IDS].key_ht);
 	vns_msg_accounting_destroy(ns);
 }
-#endif
 
 #ifdef CONFIG_PROC_FS
 static int sysvipc_msg_proc_show(struct seq_file *s, void *it)

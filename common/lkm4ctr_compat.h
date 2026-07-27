@@ -12,8 +12,8 @@
  * (upstream commit "file: convert to struct fd") that landed in v6.8; on the
  * older GKI branches (e.g. 6.1) these modules still target, "struct fd" is a
  * plain aggregate with a directly accessible ->file member, so provide
- * compatible shims when the helpers aren't present. Used by shadow_mqueue
- * and shadow_ns.
+ * compatible shims when the helpers aren't present. Used by vendor_kernel's
+ * procfs and mqueue glue.
  */
 
 #ifndef _LKM4CTR_COMPAT_H
@@ -22,10 +22,39 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 #include <linux/mnt_idmapping.h>
+#endif
+
+/*
+ * lkm4ctr_module_put_and_exit() - drop the caller's own module reference and
+ * terminate the calling (kernel worker) thread, in one step, replacing the
+ * classic module_put_and_exit() used on kernels older than v5.17 (see
+ * lkm4ctr_diagfs.c's "self-unload hazard" comment for why
+ * module_put_and_kthread_exit() is used unchanged, via its own macro, on
+ * v5.17+ instead).
+ *
+ * module_put_and_exit(code) expands to a direct call to
+ * __module_put_and_exit(), an ordinary EXPORT_SYMBOL() function upstream
+ * that can be absent from a given KMI's trimmed export allow-list on
+ * production/GKI-certified Android kernels built with
+ * CONFIG_TRIM_UNUSED_KSYMS ("Unknown symbol __module_put_and_exit (err -2)"
+ * observed at insmod on android12-5.10/android13-5.10 kernels), since
+ * nothing else built into vmlinux itself calls it. module_put()/do_exit(),
+ * in contrast, are always fundamental, universally-exported primitives
+ * every kernel module depends on and are never observed missing.
+ * Reimplementing the exact same module_put() + exit sequence directly with
+ * those primitives avoids the trimmed symbol entirely.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+static inline void __noreturn lkm4ctr_module_put_and_exit(long code)
+{
+	module_put(THIS_MODULE);
+	do_exit(code);
+}
 #endif
 
 #ifndef fd_file

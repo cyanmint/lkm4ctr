@@ -445,7 +445,7 @@ static int lkm4ctr_hotreload_worker(void *unused)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
 	module_put_and_kthread_exit(0);
 #else
-	module_put_and_exit(0);
+	lkm4ctr_module_put_and_exit(0);
 #endif
 	return 0;
 }

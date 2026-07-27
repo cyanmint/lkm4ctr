@@ -87,7 +87,8 @@ void shadow_cgdevices_exit(void)
 }
 
 /*
- * Presence marker for lkm4ctr_checker (see shadow_sysvipc.c for rationale).
+ * Presence marker for lkm4ctr_checker so it can tell whether this subsystem
+ * is present in the merged module.
  */
 int shadow_cgdevices_is_active(void)
 {

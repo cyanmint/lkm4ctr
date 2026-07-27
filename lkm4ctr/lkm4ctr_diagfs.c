@@ -116,21 +116,21 @@
  * This keeps the filesystem simple and race-resistant while still surfacing
  * the underlying registries' current state.
  *
- * Directory traversal reuses the kernel's own
- * simple_dir_inode_operations/simple_dir_operations (fs/libfs.c) rather than
- * hand-rolling dcache walking: unlike function symbols such as
- * ftrace_set_filter_ip()/vm_mmap()/module_refcount() elsewhere in this
- * module, these two are plain data (struct) symbols, so they cannot be
- * recovered via shadow_hook_resolve()'s register_kprobe() trick if
- * CONFIG_TRIM_UNUSED_KSYMS ever stripped them -- but they are directly
- * referenced by security/inode.c (securityfs), which every Android GKI
- * kernel builds directly into vmlinux (CONFIG_SECURITYFS=y, a hard
- * requirement of the SELinux LSM every such kernel enables), giving them a
- * permanent non-modular in-tree caller that CONFIG_TRIM_UNUSED_KSYMS can
- * never trim away. This is the same "always-referenced-by-something-
- * essential" reasoning already relied on for misc_register()/
- * misc_deregister() (see the removed lkm4ctr_safe_unload.c's file header).
+ * Directory traversal reuses the kernel's own simple_lookup() (fs/libfs.c)
+ * -- a plain function symbol, resolved lazily via lkm4ctr_diagfs_resolve()
+ * like mount_nodev()/generic_delete_inode() below -- wired up into a
+ * locally-owned struct inode_operations rather than referencing the
+ * kernel's own simple_dir_inode_operations struct directly: that struct is
+ * plain data, which register_kprobe()'s resolution trick fundamentally
+ * cannot recover (kprobes require a probe-able instruction/text address),
+ * and unlike mount_nodev()/generic_delete_inode() it is also a GKI
+ * "Protected symbol" on some KMIs (EACCES at insmod even when present),
+ * blocking direct reference regardless of export/trim state. Likewise,
+ * kill_litter_super() and d_alloc_name() -- both plain functions -- are
+ * resolved lazily instead of called directly, for the same "Protected
+ * symbol" reason.
  */
+
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -197,10 +197,9 @@ static unsigned long lkm4ctr_diagfs_resolve(const char *name)
 
 /*
  * mount_nodev() and generic_delete_inode() are ordinary EXPORT_SYMBOL()
- * functions, not GPL-only, but unlike simple_dir_inode_operations/
- * simple_dir_operations above they are plain code, not data -- so they
- * *can* be recovered via lkm4ctr_diagfs_resolve()'s register_kprobe() trick
- * if CONFIG_TRIM_UNUSED_KSYMS strips them (confirmed: "Unknown symbol
+ * functions, plain code, so they can be recovered via
+ * lkm4ctr_diagfs_resolve()'s register_kprobe() trick if
+ * CONFIG_TRIM_UNUSED_KSYMS strips them (confirmed: "Unknown symbol
  * mount_nodev"/"Unknown symbol generic_delete_inode" on insmod against a
  * production GKI kernel), same class of issue as module_refcount()/
  * call_usermodehelper() below. Resolved lazily at lkm4ctr_diagfs_init()
@@ -214,6 +213,46 @@ typedef int (*lkm4ctr_generic_delete_inode_t)(struct inode *inode);
 
 static lkm4ctr_mount_nodev_t lkm4ctr_mount_nodev_fn;
 static lkm4ctr_generic_delete_inode_t lkm4ctr_generic_delete_inode_fn;
+
+/*
+ * kill_litter_super()/d_alloc_name()/simple_lookup() are ordinary plain
+ * function symbols (fs/super.c, fs/dcache.c, fs/libfs.c respectively), but
+ * on some GKI KMIs they are enforced as "Protected symbols" (EACCES at
+ * insmod, distinct from the ordinary ENOENT/CONFIG_TRIM_UNUSED_KSYMS case
+ * mount_nodev()/generic_delete_inode() hit above) -- resolved lazily via
+ * lkm4ctr_diagfs_resolve() the same way, which sidesteps both enforcement
+ * mechanisms uniformly since the reference becomes a runtime indirect call
+ * rather than a direct ELF-level one.
+ */
+typedef void (*lkm4ctr_kill_litter_super_t)(struct super_block *sb);
+typedef struct dentry *(*lkm4ctr_d_alloc_name_t)(struct dentry *parent,
+						  const char *name);
+typedef struct dentry *(*lkm4ctr_simple_lookup_t)(struct inode *dir,
+						   struct dentry *dentry,
+						   unsigned int flags);
+
+static lkm4ctr_kill_litter_super_t lkm4ctr_kill_litter_super_fn;
+static lkm4ctr_d_alloc_name_t lkm4ctr_d_alloc_name_fn;
+static lkm4ctr_simple_lookup_t lkm4ctr_simple_lookup_fn;
+
+static struct dentry *lkm4ctr_diagfs_dir_lookup(struct inode *dir,
+						 struct dentry *dentry,
+						 unsigned int flags)
+{
+	if (!lkm4ctr_simple_lookup_fn)
+		return ERR_PTR(-ENOSYS);
+	return lkm4ctr_simple_lookup_fn(dir, dentry, flags);
+}
+
+/*
+ * Module-owned replacement for the kernel's own simple_dir_inode_operations
+ * (see the file header comment above for why that struct cannot be
+ * referenced directly). Only .lookup is populated upstream too (see
+ * fs/libfs.c), so this is a complete, faithful replica.
+ */
+static const struct inode_operations lkm4ctr_diagfs_dir_inode_operations = {
+	.lookup = lkm4ctr_diagfs_dir_lookup,
+};
 
 /*
  * module_refcount() and call_usermodehelper() are ordinary EXPORT_SYMBOL()
@@ -434,12 +473,12 @@ static struct dentry *lkm4ctr_diagfs_mkdir(struct super_block *sb,
 	inode = lkm4ctr_diagfs_make_inode(sb, S_IFDIR | 0555);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	inode->i_op = &simple_dir_inode_operations;
+	inode->i_op = &lkm4ctr_diagfs_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
 	set_nlink(inode, 2);
 
 	inode_lock(d_inode(parent));
-	dentry = d_alloc_name(parent, name);
+	dentry = lkm4ctr_d_alloc_name_fn ? lkm4ctr_d_alloc_name_fn(parent, name) : NULL;
 	if (!dentry) {
 		inode_unlock(d_inode(parent));
 		iput(inode);
@@ -494,7 +533,7 @@ static struct dentry *lkm4ctr_diagfs_create_file(struct super_block *sb,
 	}
 
 	inode_lock(d_inode(parent));
-	dentry = d_alloc_name(parent, name);
+	dentry = lkm4ctr_d_alloc_name_fn ? lkm4ctr_d_alloc_name_fn(parent, name) : NULL;
 	if (!dentry) {
 		inode_unlock(d_inode(parent));
 		iput(inode);
@@ -1574,7 +1613,7 @@ static int lkm4ctr_safe_unload_fn(void *unused)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
 	module_put_and_kthread_exit(0);
 #else
-	module_put_and_exit(0);
+	lkm4ctr_module_put_and_exit(0);
 #endif
 
 abort:
@@ -1948,7 +1987,7 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 	root_inode = lkm4ctr_diagfs_make_inode(sb, S_IFDIR | 0555);
 	if (!root_inode)
 		return -ENOMEM;
-	root_inode->i_op = &simple_dir_inode_operations;
+	root_inode->i_op = &lkm4ctr_diagfs_dir_inode_operations;
 	root_inode->i_fop = &simple_dir_operations;
 	set_nlink(root_inode, 2);
 
@@ -2009,7 +2048,10 @@ static struct dentry *lkm4ctr_diagfs_mount(struct file_system_type *fs_type,
 static void lkm4ctr_diagfs_kill_sb(struct super_block *sb)
 {
 	atomic_dec(&lkm4ctr_diagfs_mount_count);
-	kill_litter_super(sb);
+	if (lkm4ctr_kill_litter_super_fn)
+		lkm4ctr_kill_litter_super_fn(sb);
+	else
+		generic_shutdown_super(sb);
 }
 
 static struct file_system_type lkm4ctr_diagfs_type = {
@@ -2028,12 +2070,22 @@ int lkm4ctr_diagfs_init(void)
 		(lkm4ctr_mount_nodev_t)lkm4ctr_diagfs_resolve("mount_nodev");
 	lkm4ctr_generic_delete_inode_fn =
 		(lkm4ctr_generic_delete_inode_t)lkm4ctr_diagfs_resolve("generic_delete_inode");
+	lkm4ctr_kill_litter_super_fn =
+		(lkm4ctr_kill_litter_super_t)lkm4ctr_diagfs_resolve("kill_litter_super");
+	lkm4ctr_d_alloc_name_fn =
+		(lkm4ctr_d_alloc_name_t)lkm4ctr_diagfs_resolve("d_alloc_name");
+	lkm4ctr_simple_lookup_fn =
+		(lkm4ctr_simple_lookup_t)lkm4ctr_diagfs_resolve("simple_lookup");
 
-	if (!lkm4ctr_mount_nodev_fn || !lkm4ctr_generic_delete_inode_fn) {
+	if (!lkm4ctr_mount_nodev_fn || !lkm4ctr_generic_delete_inode_fn ||
+	    !lkm4ctr_d_alloc_name_fn || !lkm4ctr_simple_lookup_fn) {
 		LKM4CTR_ERR(LKM4CTR_DIAGFS_TAG,
-			    "could not resolve mount_nodev/generic_delete_inode; diagfs unavailable");
+			    "could not resolve mount_nodev/generic_delete_inode/d_alloc_name/simple_lookup; diagfs unavailable");
 		return -ENOSYS;
 	}
+	if (!lkm4ctr_kill_litter_super_fn)
+		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
+			     "kill_litter_super unresolved; falling back to generic_shutdown_super() on unmount");
 
 	mutex_lock(&lkm4ctr_unload_lock);
 	lkm4ctr_diagfs_global_state = LKM4CTR_STATE_ACTIVE;

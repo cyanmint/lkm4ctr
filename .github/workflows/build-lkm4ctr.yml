@@ -1,5 +1,5 @@
 # Build the merged lkm4ctr out-of-tree module across a KMI matrix, then
-# boot-test the TEST_KMI build under QEMU against three prebuilt kernels.
+# boot-test every KMI under QEMU against its prebuilt stock/patched kernels.
 #
 # lkm4ctr is a single combined lkm4ctr.ko built from subsystem sources
 # under lkm4ctr/lkm4ctr/ (see lkm4ctr/README.md). This workflow
@@ -25,9 +25,8 @@
 #
 # Module built (per KMI):
 #   lkm4ctr                -- merged module containing the shared
-#                                shadow_hijack hook engine plus shadow_ns,
-#                                shadow_sysvipc, shadow_mqueue and
-#                                shadow_cgdevices.
+#                                shadow_hijack hook engine plus
+#                                vendor_kernel and shadow_cgdevices.
 # The resulting .ko for a given KMI is uploaded on its own
 # (lkm4ctr-modules-<kmi>-arm64); it no longer bundles the userspace
 # checker binary (see below).
@@ -44,56 +43,68 @@
 #
 # Boot test (QEMU)
 # -----------------
-# testsuite.zip now bundles a ready-to-use image1.ext4 directly (a full
-# Android system-as-root userland with toybox, a real bionic libc, static
+# testsuite.zip bundles a ready-to-use image1.ext4 directly (a full Android
+# system-as-root userland with toybox, a real bionic libc, static
 # docker/dockerd/containerd/runc under /system/bin, and the exported alpine
-# tarball already baked in at its root), so this workflow no longer builds
-# it at all -- it is downloaded and used completely verbatim.
+# tarball already baked in at its root) plus a prebuilt static arm64
+# /busybox binary, so this workflow no longer builds either at all -- both
+# are downloaded and used completely verbatim, for every KMI.
 #
-# Once the TEST_KMI (android14-6.1) .ko build and the checker build finish,
-# the "test" job downloads both, fetches testsuite.zip (which also bundles a
-# prebuilt /busybox binary, so none is built by this workflow), and builds a
-# single injected (busybox) ramdisk before booting all three kernels in the
-# same job:
-#   - the injected ramdisk's /init is qemu_test/qemu_test.sh (a single
-#     "#!/busybox sh" script that also doubles as the host-side QEMU
-#     launcher used below -- see its own header comment), dispatching on
-#     PID/argv[0]. As stage 1 (PID 1, argv[0] == "init"), it populates /dev
-#     via mdev (the test kernels have no devtmpfs support), mounts
-#     image1.ext4 (/dev/nvme0n1, the prebuilt testsuite root filesystem --
-#     the test kernels have no virtio support either, hence NVMe) at
-#     /newroot, copies /ctr (lkm4ctr.ko + lkm4ctr_checker, baked into
-#     this same ramdisk) and /busybox onto it, writes its own script onto
-#     the new root as /second_init, then busybox switch_root's into
-#     /newroot and execs /second_init -- the standard, kernel-supported way
-#     to hand off from a cpio-based initramfs to a real block-device root.
-#     Since /second_init's argv[0] is no longer "init", the very same script
-#     now runs its stage-2 body instead of stage-1.
+# The actual per-KMI *kernels* booted under QEMU come from a second archive,
+# testsuitekernels.zip, which bundles a "stock" (unpatched Android GKI) and,
+# where available, a "patched" (SukiSU/SUSFS + ctr_patches) prebuilt kernel
+# Image for each KMI, named `Image.<short-kmi>.stock` /
+# `Image.<short-kmi>.patched` (e.g. `Image.a14-6.1.stock`; the "android"
+# prefix of the KMI name is shortened to "a").
+#
+# The "test" job runs as its own matrix, one job per KMI in
+# needs.prepare.outputs.test_matrix (the KMI build matrix plus
+# $TEST_ONLY_KMIS -- see below). For a KMI actually built above, it
+# downloads that KMI's lkm4ctr.ko plus the (KMI-independent) checker
+# binary, fetches testsuite.zip and testsuitekernels.zip, and builds a
+# single injected (busybox) ramdisk before booting every kernel Image
+# available for that KMI in sequence:
+#   - the injected ramdisk's /init is qemu_test.sh (a single "#!/busybox sh"
+#     script that also doubles as the host-side QEMU launcher used below --
+#     see its own header comment), dispatching on PID/argv[0]. As stage 1
+#     (PID 1, argv[0] == "init"), it populates /dev via mdev (the test
+#     kernels have no devtmpfs support), mounts image1.ext4 (/dev/nvme0n1,
+#     the prebuilt testsuite root filesystem -- the test kernels have no
+#     virtio support either, hence NVMe) at /newroot, copies
+#     /lkm4ctr_checker (always) and /lkm4ctr.ko (only if this KMI was
+#     actually built) and /busybox onto it, writes its own script onto the
+#     new root as /second_init, then busybox switch_root's into /newroot
+#     and execs /second_init -- the standard, kernel-supported way to hand
+#     off from a cpio-based initramfs to a real block-device root. Since
+#     /second_init's argv[0] is no longer "init", the very same script now
+#     runs its stage-2 body instead of stage-1.
 # The stage-2 body (running as PID 1 of the real root, image1.ext4) then:
 # populates /dev again (switch_root does not preserve the initramfs's
 # un-mounted /dev contents, so mdev must repopulate it), runs
-# lkm4ctr_checker, insmods lkm4ctr.ko (from /ctr, copied there by
-# stage 1), runs lkm4ctr_checker again, starts a real dockerd in the
-# background (capturing its output to a log file), `docker import`s the
-# alpine tarball already sitting at the root of image1.ext4, `docker run
-# --privileged --rm --network host -it`s it, and finally powers off via
-# sysrq -- i.e. an actual dockerd running under the lkm4ctr-patched
-# kernel, not just a checker binary observing raw syscalls.
+# lkm4ctr_checker, insmods lkm4ctr.ko (if present -- a KMI with no build,
+# see $TEST_ONLY_KMIS below, simply skips this and continues as a pure
+# boot/dockerd sanity check), runs lkm4ctr_checker again, starts a real
+# dockerd in the background, `docker run --privileged --rm --network host
+# -it`s the alpine/ubuntu images already sitting at the root of
+# image1.ext4, and finally returns to a shell -- i.e. an actual dockerd
+# running under the lkm4ctr-patched kernel, not just a checker binary
+# observing raw syscalls.
 #
-# The boot step exercises all three kernels bundled in testsuite.zip
-# sequentially in a *single* job (not a matrix), so QEMU is installed and
-# the (sizeable) prebuilt image1.ext4 is downloaded only once instead of
-# once per kernel:
+# Within one KMI's job, every kernel Image available for that KMI (stock,
+# and patched if bundled) is booted sequentially, so QEMU is installed and
+# the (sizeable) prebuilt image1.ext4 is downloaded only once per KMI
+# instead of once per kernel:
 #   - "stock": a stock, unpatched Android GKI kernel (no SukiSU/SUSFS/
 #     lkm4ctr patches at all), a baseline sanity check of the QEMU boot
 #     environment itself.
-#   - "sukisu": SukiSU/SUSFS-patched but without ctr_patches, to isolate
-#     whether any test failure is caused by ctr_patches specifically.
-#   - "sukisu-ctrpatches": SukiSU/SUSFS-patched *with* ctr_patches applied --
-#     the actual configuration lkm4ctr.ko is built and meant to be
-#     insmod'd against.
-# Each boot produces its own QEMU console log, uploaded together as a
-# single 3-file artifact.
+#   - "patched": SukiSU/SUSFS-patched *with* ctr_patches applied -- the
+#     actual configuration lkm4ctr.ko is built and meant to be insmod'd
+#     against.
+# $TEST_ONLY_KMIS lists KMIs (currently android17-6.18) that
+# testsuitekernels.zip already ships a "stock" kernel Image for, but which
+# ghcr.io/ylarod/ddk-min has no DDK image for yet, so no "build" job exists
+# for them in the matrix above; they are still boot-tested (bare, without
+# any lkm4ctr.ko) purely as a forward-looking QEMU/kernel sanity check.
 #
 # Credit: SukiSU-Ultra (https://github.com/SukiSU-Ultra/SukiSU-Ultra).
 
@@ -131,23 +142,28 @@ env:
   DEFAULT_KMIS: >-
     android12-5.10,android13-5.10,android13-5.15,android14-5.15,android14-6.1,android15-6.6,android16-6.12
   DDK_RELEASE: '20260313'
-  # KMI whose build is boot-tested under QEMU below.
-  TEST_KMI: android14-6.1
-  # testsuite.zip bundles the three QEMU test kernels (stock / sukisu /
-  # sukisu+ctr_patches), a ready-to-use image1.ext4 (a full Android
+  # KMIs boot-tested under QEMU below (see "Boot test (QEMU)" above) that
+  # have no ghcr.io/ylarod/ddk-min DDK image yet, so they are not part of
+  # the "build" matrix at all -- always appended to the "test" matrix
+  # regardless of the "kmis" workflow_dispatch input.
+  TEST_ONLY_KMIS: android17-6.18
+  # testsuite.zip bundles a ready-to-use image1.ext4 (a full Android
   # system-as-root userland with toybox, bionic libc, static
   # docker/dockerd/containerd/runc preinstalled under /system/bin, and the
-  # exported alpine tarball already baked in at its root), and a prebuilt
+  # exported alpine tarball already baked in at its root) and a prebuilt
   # static arm64 busybox binary for the injected QEMU test ramdisk's
   # /busybox, in one archive.
   TESTSUITE_URL: https://github.com/cyanmint/GKI_KernelSU_SUSFS/releases/download/v2.2.0/testsuite.zip
+  # testsuitekernels.zip bundles the per-KMI QEMU test kernels themselves
+  # (Image.<short-kmi>.stock / Image.<short-kmi>.patched).
+  TESTSUITE_KERNELS_URL: https://github.com/cyanmint/GKI_KernelSU_SUSFS/releases/download/v2.2.0/testsuitekernels.zip
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-      test_kmi: ${{ steps.set-matrix.outputs.test_kmi }}
+      test_matrix: ${{ steps.set-matrix.outputs.test_matrix }}
       ddk_release: ${{ steps.set-matrix.outputs.ddk_release }}
     steps:
       - name: Compute KMI matrix
@@ -163,11 +179,24 @@ jobs:
           print(json.dumps(kmis))
           " "$kmis")
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
-          # Expose TEST_KMI/DDK_RELEASE as job outputs: the "env" context is
-          # not available in job-level "if:" conditions or in
+          # The "test" matrix is the "build" matrix above plus
+          # $TEST_ONLY_KMIS (KMIs with no DDK image/build job yet, boot-
+          # tested bare -- see "Boot test (QEMU)" above), deduplicated.
+          test_json=$(python3 -c "
+          import json, sys
+          build_kmis = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
+          test_only_kmis = [k.strip() for k in sys.argv[2].split(',') if k.strip()]
+          seen = []
+          for k in build_kmis + test_only_kmis:
+              if k not in seen:
+                  seen.append(k)
+          print(json.dumps(seen))
+          " "$kmis" "$TEST_ONLY_KMIS")
+          echo "test_matrix=$test_json" >> "$GITHUB_OUTPUT"
+          # Expose DDK_RELEASE as a job output: the "env" context is not
+          # available in job-level "if:" conditions or in
           # "jobs.<job_id>.container", so downstream jobs cannot reference
-          # env.TEST_KMI/env.DDK_RELEASE directly there.
-          echo "test_kmi=$TEST_KMI" >> "$GITHUB_OUTPUT"
+          # env.DDK_RELEASE directly there.
           echo "ddk_release=$DDK_RELEASE" >> "$GITHUB_OUTPUT"
 
   # lkm4ctr_checker is a plain userspace diagnostic binary (see
@@ -274,20 +303,30 @@ jobs:
           name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: modules-out/
 
-  # Build a single injected (busybox) ramdisk carrying lkm4ctr.ko,
-  # lkm4ctr_checker and the merged init script, then boot-test all three
-  # testsuite kernels under QEMU against it plus the prebuilt image1.ext4
-  # from testsuite.zip -- all in one job, since assembling this ramdisk no
-  # longer needs its own separate session (no more building image1.ext4,
-  # exporting an alpine tarball, or assembling a second ext4 image).
-  # Independent of the full KMI matrix -- only needs the single TEST_KMI .ko
-  # plus the checker binary. Skipped (not failed) if TEST_KMI was excluded
-  # from the build matrix (e.g. via a custom `kmis` workflow_dispatch
-  # input).
+  # Build a single injected (busybox) ramdisk carrying lkm4ctr.ko (if this
+  # KMI was actually built), lkm4ctr_checker and the merged init script,
+  # then boot-test every kernel Image available for this KMI in
+  # testsuitekernels.zip under QEMU against it plus the prebuilt
+  # image1.ext4 from testsuite.zip -- all in one job per KMI, since
+  # assembling this ramdisk no longer needs its own separate session (no
+  # more building image1.ext4, exporting an alpine tarball, or assembling a
+  # second ext4 image).
+  #
+  # Runs as its own matrix over needs.prepare.outputs.test_matrix (the KMI
+  # build matrix plus $TEST_ONLY_KMIS), independently of the full "build"
+  # matrix's overall pass/fail -- an individual KMI's lkm4ctr.ko download
+  # is allowed to fail (continue-on-error) so a KMI excluded from the build
+  # matrix (e.g. via a custom `kmis` workflow_dispatch input, or one of
+  # $TEST_ONLY_KMIS) still gets boot-tested bare (see "Boot test (QEMU)"
+  # above), it just skips the insmod.
   test:
     needs: [prepare, build, build-checker]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build-checker.result == 'success' && contains(fromJson(needs.prepare.outputs.matrix), needs.prepare.outputs.test_kmi) }}
+    if: ${{ !cancelled() && needs.build-checker.result == 'success' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi: ${{ fromJson(needs.prepare.outputs.test_matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -297,10 +336,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cpio qemu-system-arm
 
-      - name: Download lkm4ctr.ko (${{ env.TEST_KMI }})
+      - name: Compute short KMI name
+        run: |
+          # testsuitekernels.zip shortens the "android" KMI prefix to "a"
+          # (e.g. android14-6.1 -> a14-6.1).
+          echo "SHORT_KMI=a${KMI#android}" >> "$GITHUB_ENV"
+        env:
+          KMI: ${{ matrix.kmi }}
+
+      # Allowed to fail: $TEST_ONLY_KMIS (and any KMI dropped from a custom
+      # `kmis` workflow_dispatch input) have no "build" job/artifact at all.
+      - name: Download lkm4ctr.ko (${{ matrix.kmi }})
+        continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: lkm4ctr-modules-${{ env.TEST_KMI }}-arm64
+          name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: payload/
 
       - name: Download lkm4ctr_checker (arm64)
@@ -310,27 +360,31 @@ jobs:
           path: payload/
       - run: chmod +x payload/lkm4ctr_checker
 
-      # --- 1. Fetch testsuite.zip: three kernels + prebuilt image1.ext4 +
-      #        prebuilt busybox (arm64, static) ---
+      # --- 1. Fetch testsuite.zip: prebuilt image1.ext4 + prebuilt busybox
+      #        (arm64, static) -- no longer bundles any kernels ---
       - name: Download and extract testsuite.zip
         run: |
           set -e
           curl -fL -o testsuite.zip "$TESTSUITE_URL"
           mkdir -p testsuite
-          unzip -o testsuite.zip -d testsuite
-          # Normalize the versioned kernel filenames to fixed names so the
-          # boot loop below can reference them unambiguously (kernel-sukisu-*
-          # would otherwise also glob-match kernel-sukisu-ctrpatches-*).
-          mv testsuite/kernel-stock-* testsuite/kernel-stock
-          mv testsuite/kernel-sukisu-ctrpatches-* testsuite/kernel-sukisu-ctrpatches
-          mv testsuite/kernel-sukisu-[0-9]* testsuite/kernel-sukisu
+          unzip -o testsuite.zip image1.ext4 busybox -d testsuite
           chmod +x testsuite/busybox
           ls -la testsuite
 
-      # --- 2. injected ramdisk: /ctr (module + checker), /busybox (prebuilt,
-      #        from testsuite.zip) and the merged qemu_test.sh (init mode),
-      #        which mounts image1.ext4 (/dev/nvme0n1) and switch_root's into
-      #        it ---
+      # --- 2. Fetch testsuitekernels.zip: extract only this KMI's kernel
+      #        Image(s) ("stock", and "patched" where bundled) ---
+      - name: Download and extract test kernels for ${{ matrix.kmi }}
+        run: |
+          set -e
+          curl -fL -o testsuitekernels.zip "$TESTSUITE_KERNELS_URL"
+          mkdir -p testkernels
+          unzip -o testsuitekernels.zip "Image.${SHORT_KMI}.*" -d testkernels
+          ls -la testkernels
+
+      # --- 3. injected ramdisk: lkm4ctr.ko (if built for this KMI) +
+      #        lkm4ctr_checker, /busybox (prebuilt, from testsuite.zip) and
+      #        the merged qemu_test.sh (init mode), which mounts
+      #        image1.ext4 (/dev/nvme0n1) and switch_root's into it ---
       - name: Build injected (busybox) ramdisk
         run: |
           set -e
@@ -338,20 +392,25 @@ jobs:
           cp testsuite/busybox injected-ramdisk/busybox
           chmod 755 injected-ramdisk/busybox
 
-          cp payload/lkm4ctr.ko injected-ramdisk/
           cp payload/lkm4ctr_checker injected-ramdisk/
           chmod 755 injected-ramdisk/lkm4ctr_checker
 
+          if [ -f payload/lkm4ctr.ko ]; then
+            cp payload/lkm4ctr.ko injected-ramdisk/
+          else
+            echo "no lkm4ctr.ko built for ${{ matrix.kmi }} -- booting bare (boot/dockerd sanity only)"
+          fi
+
           # Merged host-launcher/stage-1/stage-2 script: committed at
-          # qemu_test/qemu_test.sh for better management (rather than
-          # generated inline here). Its own shebang (#!/busybox sh) is what
-          # the kernel execs here, dispatching on PID/argv[0]: run as /init
+          # qemu_test.sh for better management (rather than generated
+          # inline here). Its own shebang (#!/busybox sh) is what the
+          # kernel execs here, dispatching on PID/argv[0]: run as /init
           # with PID 1 it performs stage 1 (mdev-populate /dev, mount
-          # image1.ext4, copy /ctr and /busybox onto it, switch_root);
-          # copied onto the new root and run as /second_init it performs
-          # stage 2 instead. (Host invocations of this same file, i.e. `bash
-          # qemu_test.sh ...` below, take its third mode instead -- see the
-          # script's own header comment.)
+          # image1.ext4, copy lkm4ctr_checker/lkm4ctr.ko and /busybox onto
+          # it, switch_root); copied onto the new root and run as
+          # /second_init it performs stage 2 instead. (Host invocations of
+          # this same file, i.e. `bash qemu_test.sh ...` below, take its
+          # third mode instead -- see the script's own header comment.)
           cp qemu_test.sh injected-ramdisk/init
           chmod 755 injected-ramdisk/init
 
@@ -361,27 +420,28 @@ jobs:
       # A generous per-kernel timeout: starting dockerd + docker import + a
       # real `docker run` takes noticeably longer than a plain
       # insmod+checker smoke test.
-      - name: Boot all three kernels under QEMU
+      - name: Boot ${{ matrix.kmi }} kernels under QEMU
         run: |
           # GitHub Actions runs step "run:" blocks with `bash -e`, so a
           # nonzero exit from qemu_test.sh (e.g. a kernel panic/timeout)
-          # would otherwise abort this loop before the remaining variants
-          # are booted; "set +e" keeps all three variants running
+          # would otherwise abort this loop before the remaining kernels
+          # are booted; "set +e" keeps every available kernel running
           # regardless of any individual failure.
           set +e
           # qemu_test.sh's shebang is #!/busybox sh (needed for its
           # ramdisk-init roles above), so it must be invoked explicitly as
           # "bash qemu_test.sh ..." here rather than "./qemu_test.sh ...",
           # which would honor that shebang instead.
-          for variant in stock sukisu sukisu-ctrpatches; do
-            bash qemu_test.sh testsuite/image1.ext4 "testsuite/kernel-$variant" /init injected-ramdisk.cpio
+          for kernel in testkernels/Image."$SHORT_KMI".*; do
+            [ -e "$kernel" ] || continue
+            bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio
           done
 
-      - name: Upload injected-ramdisk.cpio
+      - name: Upload injected-ramdisk.cpio (${{ matrix.kmi }})
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: injected-ramdisk.cpio
+          name: injected-ramdisk-${{ matrix.kmi }}
           path: injected-ramdisk.cpio
 
   # Only runs for a manual workflow_dispatch run with the "create_release"

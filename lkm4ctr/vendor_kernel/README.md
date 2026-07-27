@@ -1,10 +1,10 @@
 # vendor_kernel
 
-vendor_kernel is a parallel, vendored copy of the kernel namespace subsystem for `lkm4ctr`. Unlike `shadow_ns`, it hooks namespace syscalls unconditionally and installs a real, vendored `struct nsproxy *` directly on `task_struct->nsproxy` (via `vns_switch_task_namespaces()`), so the rest of the kernel (hostname, `/proc`, ipc/netns lookups, future `fork()`s) transparently observes the new namespace instead of the caller's original one.
+vendor_kernel is a parallel, vendored copy of the kernel namespace subsystem for `lkm4ctr`. It hooks namespace syscalls unconditionally and installs a real, vendored `struct nsproxy *` directly on `task_struct->nsproxy` (via `vns_switch_task_namespaces()`), so the rest of the kernel (hostname, `/proc`, ipc/netns lookups, future `fork()`s) transparently observes the new namespace instead of the caller's original one.
 
 ## Real isolation vs. bookkeeping
 
-- `unshare(CLONE_NEWxxx)` builds the new namespaces and then calls `vns_switch_task_namespaces(current, new_nsp)` to install them on the calling task for real. Because this happens synchronously before the syscall returns, any subsequent `fork()`/`clone()` from that task sees the new namespace state immediately. `CLONE_NEWPID` performs real pid namespace isolation even when the *running* kernel lacks its own pid-namespace core (`copy_pid_ns()` absent, i.e. a stock `CONFIG_PID_NS=n` kernel): `alloc_pid()`/`task_active_pid_ns()` are unconditional of `CONFIG_PID_NS`, so a module-owned `pid_namespace` still gets real per-namespace pid virtualization. The only real danger on such a kernel is the target's own inline `zap_pid_ns_processes()` `BUG()` stub, which the real `do_exit()` would otherwise reach once the namespace's pid 1 exits; vendor_kernel defuses this in `vns_task_exit_cleanup()`'s `do_exit()` exit-safety kprobe (`kernel/nsproxy.c`), running a shadow_ns-style reduced-scope zap cascade (`vns_zap_pid_ns_processes()`, `kernel/pid_namespace.c`) and handing the namespace's `child_reaper` off to the real init task so the real `find_child_reaper()` never reaches the broken stub.
+- `unshare(CLONE_NEWxxx)` builds the new namespaces and then calls `vns_switch_task_namespaces(current, new_nsp)` to install them on the calling task for real. Because this happens synchronously before the syscall returns, any subsequent `fork()`/`clone()` from that task sees the new namespace state immediately. `CLONE_NEWPID` performs real pid namespace isolation even when the *running* kernel lacks its own pid-namespace core (`copy_pid_ns()` absent, i.e. a stock `CONFIG_PID_NS=n` kernel): `alloc_pid()`/`task_active_pid_ns()` are unconditional of `CONFIG_PID_NS`, so a module-owned `pid_namespace` still gets real per-namespace pid virtualization. The only real danger on such a kernel is the target's own inline `zap_pid_ns_processes()` `BUG()` stub, which the real `do_exit()` would otherwise reach once the namespace's pid 1 exits; vendor_kernel defuses this in `vns_task_exit_cleanup()`'s `do_exit()` exit-safety kprobe (`kernel/nsproxy.c`), running its own reduced-scope zap cascade (`vns_zap_pid_ns_processes()`, `kernel/pid_namespace.c`) and handing the namespace's `child_reaper` off to the real init task so the real `find_child_reaper()` never reaches the broken stub.
 - `clone(CLONE_NEWxxx, ...)` (namespaces requested directly at clone time, without a prior `unshare()`) has the vns_* flags masked off before the underlying `clone()`/`clone3()` syscall runs, then the new namespaces are built and installed on the just-created child task. This makes UTS/IPC/USER/NET/MNT/CGROUP isolation real for that pattern too. The one caveat: because the real `copy_process()` already allocated the child's own `struct pid` from the *parent's* pid namespace before this hook runs, the child's own pid is not renumbered by this path (only namespaces it creates for its own descendants are new) — fully remapping the child's own pid for direct `clone(CLONE_NEWPID, ...)` would require hooking `copy_process()`/`kernel_clone()` itself.
 - `setns(2)` (`vns_sys_setns()`) already performed a real install via the same switch primitive and required no changes.
 - The per-tgid registry (`vns_task_find()` / `struct vns_task`) is retained purely for diagfs statistics (`stat_unshare`/`stat_setns`/`stat_clone`); it is no longer the source of truth for which namespaces a task is in — `task_struct->nsproxy` is.
@@ -93,7 +93,7 @@ supported fix instead.
 ## Required kernel Kconfig options
 
 `vendor_kernel` resolves a handful of the running kernel's namespace-adjacent
-*function* symbols (e.g. `init_ipc_ns`, `init_cgroup_ns`) by name at module
+*function* symbols (e.g. `init_ipc_ns`) by name at module
 load time via `shadow_hook_resolve()`; the namespace object slab caches
 themselves (`uts_ns_cache`/`nsproxy_cachep`/`pid_ns_cachep`/`user_ns_cachep`)
 are no longer resolved from the running kernel at all -- see "Slab-cache
@@ -102,60 +102,73 @@ backing `CONFIG_*_NS` option is not built into the running kernel, the
 corresponding resolved function does not exist, and `unshare(2)`/
 `clone(2)`/`setns(2)` for that namespace type either falls back to
 bookkeeping-only behaviour or fails with `-EINVAL` (this is the root cause
-of `ns_ipc`/`ns_net` unshare test failures seen on kernels that ship with
-`CONFIG_IPC_NS=n`/`CONFIG_NET_NS=n`, even though `vendor_kernel` itself
-loads and activates successfully). `UTS_NS`, `PID_NS`, and `USER_NS` are the
-exception: as documented above under "Namespace refcounting is fully
-self-contained", vendor_kernel no longer depends on the target's
-`CONFIG_UTS_NS`/`CONFIG_PID_NS`/`CONFIG_USER_NS` at all. The running kernel
+of `ns_net` unshare test failures seen on kernels that ship with
+`CONFIG_NET_NS=n`, even though `vendor_kernel` itself
+loads and activates successfully). `UTS_NS`, `PID_NS`, `USER_NS`, `IPC_NS`,
+and `CGROUP_NS` are the exception: as documented above under "Namespace
+refcounting is fully self-contained" and below under "Module-owned default
+cgroup namespace, always vendored", vendor_kernel no longer depends on the
+target's `CONFIG_UTS_NS`/`CONFIG_PID_NS`/`CONFIG_USER_NS`/`CONFIG_IPC_NS`/
+`CONFIG_CGROUPS` at all for these to install and refcount correctly (real,
+per-task `CLONE_NEWCGROUP` isolation itself remains bookkeeping-only --
+see "Known remaining gaps" below -- but that has never depended on the
+running kernel's `CONFIG_CGROUPS` setting either way). The running kernel
 still must be built with the remaining options for full namespace coverage:
 
 - `CONFIG_NAMESPACES=y`
-- `CONFIG_IPC_NS=y` (also requires `CONFIG_SYSVIPC=y` and/or `CONFIG_POSIX_MQUEUE=y`, since `IPC_NS depends on (SYSVIPC || POSIX_MQUEUE)`)
 - `CONFIG_NET_NS=y`
-- `CONFIG_CGROUPS=y`
 - `CONFIG_TIME_NS=y`
 
-Of these, `CONFIG_IPC_NS=n` is the one exception that no longer needs a
-diagnostic caveat: `unshare(CLONE_NEWIPC)`/SysV IPC/mqueue syscalls have
-always performed genuine vendored isolation regardless of this option (see
-"Module-owned default namespace, always vendored" above), but until now
-external tools that verify isolation by diffing `readlink(2)` on
-`/proc/<pid>/ns/ipc` (including `lkm4ctr_checker`'s generic namespace test)
-could not observe it, and `docker exec`/`docker run` could not even *probe*
-namespace support at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only
-registers that procfs entry `#ifdef CONFIG_IPC_NS`, a decision baked into
-the running `vmlinux` that no syscall hook can undo. `glue/vendor_kernel_procfs.c`
-closes this observability gap in two parts:
+
+Of these, `CONFIG_IPC_NS=n` (and, on kernels that still gate it,
+`CONFIG_PID_NS=n`) are the exceptions that no longer need a diagnostic
+caveat: `unshare(CLONE_NEWIPC)`/SysV IPC/mqueue syscalls and
+`unshare(CLONE_NEWPID)`/pid virtualization have always performed genuine
+vendored isolation regardless of these options (see "Module-owned default
+namespace, always vendored" above), but until now external tools that
+verify isolation by diffing `readlink(2)` on `/proc/<pid>/ns/{ipc,pid}`
+(including `lkm4ctr_checker`'s generic namespace test) could not observe
+it, and `docker exec`/`docker run` could not even *probe* namespace support
+at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only registers those
+procfs entries `#ifdef CONFIG_IPC_NS`/`#ifdef CONFIG_PID_NS`, a decision
+baked into the running `vmlinux` that no syscall hook can undo.
+`glue/vendor_kernel_procfs.c` closes this observability gap in two parts:
 - Hooking `readlink(2)`/`readlinkat(2)`: the real syscall always runs
   first, and only on its `-ENOENT` for a path unambiguously naming
-  `.../<pid|self|thread-self>/ns/ipc` is the `"ipc:[<inum>]"` text
-  fabricated, using the same `vns_task_ipc_ns()` namespace object the real
-  SysV/mqueue syscalls already act on.
+  `.../<pid|self|thread-self>/ns/ipc` or `.../<pid|self|thread-self>/ns/pid`
+  is the `"ipc:[<inum>]"`/`"pid:[<inum>]"` text fabricated, using the same
+  `vns_task_ipc_ns()`/`task_active_pid_ns()` namespace objects the real
+  SysV/mqueue syscalls and pid virtualization already act on.
 - Hooking `stat(2)`/`lstat(2)`/`newfstatat(2)`: runc/containerd's own
   namespace-support probe (`configs.IsNamespaceSupported()`) never reads the
   readlink(2) target at all, it only checks whether `stat(2)` on the path
   *succeeds*. Without this second hook, that probe still fails with plain
   `-ENOENT` even with the readlink(2) fabrication in place, and `docker
   exec`/`docker run` abort with `"OCI runtime exec failed: ... namespace
-  NEWIPC is not supported: unknown"`. Since struct stat's on-wire layout is
+  NEWIPC is not supported: unknown"` (or the analogous `"namespace NEWPID
+  is not supported"` message for pid). Since struct stat's on-wire layout is
   architecture-specific and the kernel's own conversion code isn't exported,
-  this hook instead transparently substitutes the `.../ns/ipc` leaf for
-  `.../ns/mnt` (identical length, patched in place on the caller's own path
-  buffer and restored immediately after) before calling through to the real
-  syscall: the mount namespace entry is the one `/proc/<pid>/ns/` entry
-  that is never Kconfig-gated, so it is always present, and every caller of
-  this stat(2) family only cares whether the call succeeds (see above), not
-  which namespace's numbers come back.
+  this hook instead transparently substitutes the `.../ns/ipc` or
+  `.../ns/pid` leaf for `.../ns/mnt` (identical length in both cases,
+  patched in place on the caller's own path buffer and restored immediately
+  after) before calling through to the real syscall: the mount namespace
+  entry is the one `/proc/<pid>/ns/` entry that is never Kconfig-gated, so
+  it is always present, and every caller of this stat(2) family only cares
+  whether the call succeeds (see above), not which namespace's numbers come
+  back.
 
 Both hook groups are installed best-effort/non-fatal (a resolution failure
 only logs a warning): they are purely an observability enhancement, so they
 never block `vendor_kernel`'s core namespace functionality from loading.
-`NET`/`MNT`/`CGROUP` are deliberately **not** given the same treatment:
-unlike IPC, `vendor_kernel` has no real per-task namespace object backing
-those on a kernel missing the corresponding `CONFIG_*_NS`, so fabricating
-their `/proc/<pid>/ns/*` entries would misreport nonexistent isolation as
-real.
+Only IPC and PID get this treatment: `UTS`/`USER` are likewise vendored
+unconditionally of their respective `CONFIG_*_NS` option, but no device has
+been observed lacking `CONFIG_UTS_NS`/`CONFIG_USER_NS` while also lacking
+`CONFIG_IPC_NS`/`CONFIG_PID_NS`, so no equivalent gap has been seen for
+them. `NET`/`MNT`/`CGROUP` are deliberately **not** given the same
+treatment: unlike IPC/PID, `vendor_kernel` has no real per-task namespace
+object backing those on a kernel missing the corresponding `CONFIG_*_NS`,
+so fabricating their `/proc/<pid>/ns/*` entries would misreport nonexistent
+isolation as real.
 
 `lkm4ctr/Kconfig`'s `LKM4CTR_VENDOR_KERNEL` option `select`s `CONFIG_UTS_NS`,
 `CONFIG_PID_NS`, and `CONFIG_USER_NS` too (along with the rest), so any
@@ -165,8 +178,7 @@ consistency and for any code elsewhere in the kernel that assumes them, but
 own uts/pid/user namespace support.
 
 `glue/vendor_kernel_procfs.c` also fabricates `/proc/<pid>/setgroups` on a
-kernel genuinely missing `CONFIG_USER_NS`, mirroring
-`shadow_ns/shadow_ns_procfs.c`'s identical fabrication: `fs/proc/base.c`
+kernel genuinely missing `CONFIG_USER_NS`: `fs/proc/base.c`
 only wires up that per-pid dentry `#ifdef CONFIG_USER_NS`, so modern
 `runc`/`containerd`'s unconditional `open()`/`openat2()` sanity-check of
 `self/setgroups` (part of its "is this really an unrestricted procfs"
@@ -176,7 +188,7 @@ with `"unsafe procfs detected ... setgroups: no such file or directory"`.
 `open`/`openat`/`openat2` are hooked to let the real syscall run first and
 only fabricate a descriptor once it has already failed with `-ENOENT` for a
 path unambiguously naming a `"setgroups"` leaf under a procfs-rooted pid
-directory. Like `shadow_ns`, the fabricated descriptor is a simple one-way
+directory. The fabricated descriptor is a simple one-way
 `"allow"` -> `"deny"` latch on its own private inode (via
 `anon_inode_getfd_secure()`, resolved through `shadow_hook_resolve()`)
 rather than being wired to `vendor_kernel`'s own real per-task
@@ -197,13 +209,38 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - **`vns_free_ipc_ns()` fully tears down a per-task IPC namespace, mirroring upstream `free_ipc_ns()`.** `sem_exit_ns()`/`msg_exit_ns()`/`shm_exit_ns()` (`ipc/sem.c`/`ipc/msg.c`/`ipc/shm.c`, `#define`-aliased to `vns_sem_exit_ns`/`vns_msg_exit_ns`/`vns_shm_exit_ns`) are called from `ipc/namespace.c`'s `vns_free_ipc_ns()` exactly where upstream calls them, right after `mq_put_mnt(ns)`. A previous version of this function skipped all three, reasoning they were "not exported to out-of-tree modules" — but they don't need to be: they are vendored, non-static functions linked into the very same `lkm4ctr.ko`, resolved at link time like every other cross-file call in this module. Skipping them leaked every SysV queue/array/segment still registered in the namespace and, critically, never called `percpu_counter_destroy()` on `msg_exit_ns()`'s own `ns->percpu_msg_bytes`/`percpu_msg_hdrs` (`vns_msg_accounting_destroy()`), so the immediately-following `kfree(ns)` freed memory that was still linked into the kernel-wide `percpu_counters` list. That corrupted the list for the next *unrelated* `percpu_counter_init()` call anywhere in the kernel (observed via a real `cgroup_mkdir` -> `mem_cgroup_css_alloc` -> `wb_domain_init` -> `fprop_global_init` -> `__percpu_counter_init` call site, minutes after the container that triggered the leaking `unshare(CLONE_NEWIPC)` had already exited): `kernel BUG at lib/list_debug.c:29` ("list_add corruption"). This may also be the true root cause (or a contributing one) behind the similarly-shaped `percpu_counters` corruption documented below for `CLONE_NEWNET`/`xfrm4_net_init`, since both share the same global list.
 - **Non-exported symbol resolution.** The vendored `ipc/*.c` pull in ~40 non-exported kernel helpers (mm, `wake_q`, ucounts, vfs, netlink, audit and the `security_*` LSM ipc/msg/sem/shm hooks) plus a handful of data symbols (`ipc_mni`, `ipc_mni_shift`, `ipc_min_cycle`, `sysctl_overcommit_memory`). `glue/vendor_kernel_ipc_compat.c` resolves the functions by name via `shadow_hook_resolve()` (reliable for kallsyms *function* symbols) with safe fallback stubs, and defines the data symbols directly from their upstream constant values; the POSIX-mqueue exact-name wrappers there also cover trimmed VFS/mount helpers such as `getname`/`putname`, `dentry_open`, `fs_context_for_mount`, `fc_mount`, `get_tree_{nodev,keyed}` and `simple_lookup`, so production GKI `CONFIG_TRIM_UNUSED_KSYMS` no longer leaves `mq_open()`/`mq_unlink()` unresolved at insmod time. This mirrors the `glue/vendor_kernel_compat.c` strategy used for the namespace core.
 - **Non-target caveat.** On a kernel that genuinely ships `CONFIG_SYSVIPC=y`/`CONFIG_POSIX_MQUEUE=y` (e.g. the host used for local `make` type-checking), loading these hooks *shadows* the already-working syscalls and routes them through the vendored code operating on the vendored `vns_default_ipc_ns` (or a per-task vendored `ipc_namespace`) — **not** the running kernel's real `init_ipc_ns`, per the self-containment guarantee above. That is still not the intended deployment — `vendor_kernel` targets kernels where these configs are `n` — but it is harmless in practice since the vendored implementation is a faithful copy of the same kernel version's code, and it will never corrupt or read the host kernel's own message queues / SysV IDRs.
-- **`/dev/mqueue` availability, without requiring `--ipc host`.** `mqueue_fs_type.name` (`ipc/mqueue.c`) is registered under the real name `"mqueue"`, not a module-private alias, so an unmodified `runc`/`containerd`/`dockerd`'s own `mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC, ...)` during container init finds it through the ordinary `get_fs_type("mqueue")` lookup and just works — no `--ipc host` workaround needed. `register_filesystem()` tolerates losing that name to a real `CONFIG_POSIX_MQUEUE=y` kernel's own builtin mqueue filesystem (`-EBUSY`): `mqueue_fs_type_registered` tracks whether registration actually succeeded, so `vns_mqueue_fs_exit()`/the error path never call `unregister_filesystem()` on a struct that was never linked in, and `mq_create_mount()`'s own `fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT)` (used for the module's own internal ipc_namespace bookkeeping) never depends on the name lookup succeeding either way, since it references the local struct pointer directly. On top of that, `glue/vendor_kernel_ipc_mount.c`'s `vns_mqueue_dev_ensure()` (called from `vns_ipc_default_init()`) proactively creates `/dev/mqueue` and mounts it at module load time — mirroring `shadow_mqueue`'s own "Proactive `/dev/mqueue` creation" (see `../shadow_mqueue/README.md`) — since `lkm4ctr.ko` is typically insmod'd late (e.g. a KernelSU/Magisk post-fs-data module), well after init.rc's own one-shot `mount mqueue mqueue /dev/mqueue ...` line already ran and silently failed with `-ENODEV` (init never retries a failed boot-time mount). Unlike `shadow_mqueue` (which has no real mqueue filesystem of its own and only ever mounts `tmpfs` there), this proactively mounts the real, vendored `mqueue` filesystem type first, falling back to `tmpfs` only if that unexpectedly fails. All of the VFS helpers this needs (`path_mount`, `vfs_mkdir`, `kern_path`/`kern_path_create`/`done_path_create`, `path_put`) are resolved at runtime via `shadow_hook_resolve()`, same as the rest of vendor_kernel's non-exported-symbol handling; this step is best-effort and never fails module init.
+- **`/dev/mqueue` availability, without requiring `--ipc host`.** `mqueue_fs_type.name` (`ipc/mqueue.c`) is registered under the real name `"mqueue"`, not a module-private alias, so an unmodified `runc`/`containerd`/`dockerd`'s own `mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC, ...)` during container init finds it through the ordinary `get_fs_type("mqueue")` lookup and just works — no `--ipc host` workaround needed. `register_filesystem()` tolerates losing that name to a real `CONFIG_POSIX_MQUEUE=y` kernel's own builtin mqueue filesystem (`-EBUSY`): `mqueue_fs_type_registered` tracks whether registration actually succeeded, so `vns_mqueue_fs_exit()`/the error path never call `unregister_filesystem()` on a struct that was never linked in, and `mq_create_mount()`'s own `fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT)` (used for the module's own internal ipc_namespace bookkeeping) never depends on the name lookup succeeding either way, since it references the local struct pointer directly. On top of that, `glue/vendor_kernel_ipc_mount.c`'s `vns_mqueue_dev_ensure()` (called from `vns_ipc_default_init()`) proactively creates `/dev/mqueue` and mounts it at module load time, since `lkm4ctr.ko` is typically insmod'd late (e.g. a KernelSU/Magisk post-fs-data module), well after init.rc's own one-shot `mount mqueue mqueue /dev/mqueue ...` line already ran and silently failed with `-ENODEV` (init never retries a failed boot-time mount). It proactively mounts the real, vendored `mqueue` filesystem type first, falling back to `tmpfs` only if that unexpectedly fails. All of the VFS helpers this needs (`path_mount`, `vfs_mkdir`, `kern_path`/`kern_path_create`/`done_path_create`, `path_put`) are resolved at runtime via `shadow_hook_resolve()`, same as the rest of vendor_kernel's non-exported-symbol handling; this step is best-effort and never fails module init.
 - **`sysvsem`/`sysvshm` exit-time state is self-contained too.** Upstream keeps the per-task semaphore-undo list (`task_struct->sysvsem`) and the per-task orphaned-shm-segment list (`task_struct->sysvshm`) as real `task_struct` members, but on a `CONFIG_SYSVIPC=n` target kernel those members don't exist in `struct task_struct` at all. `ipc/sem.c`/`ipc/shm.c` therefore keep this state in vendor_kernel's own per-task side table (the same `struct vns_task` registry `glue/vendor_kernel_module.c` already uses for the per-task `nsproxy` pointer) instead of the real `task_struct` fields: `vns_copy_semundo()`/`vns_prepare_exit_sem()`/`vns_exit_sem()` and `vns_prepare_exit_shm()`/`vns_exit_shm()` are called from the clone/exit paths (`glue/vendor_kernel_syscalls.c`'s `vendor_kernel_clone_track()`, `kernel/nsproxy.c`'s `vns_task_exit_cleanup()`) instead of the upstream `copy_semundo()`/`exit_sem()`/`exit_shm()` call sites baked into the real `fork()`/`do_exit()`. On a target that genuinely ships `CONFIG_SYSVIPC=y` (so `task_struct` does carry real `sysvsem`/`sysvshm`), the real fields are used directly instead, guarded by `#if defined(CONFIG_SYSVIPC)`.
+
+## Module-owned default cgroup namespace, always vendored
+
+`vns_default_cgroup_ns` (`kernel/cgroup/namespace.c`) is a module-owned default
+`cgroup_namespace` singleton, analogous to `vns_default_ipc_ns`/`vns_init_time_ns`.
+`vendor_kernel_init()` calls `vns_cgroup_default_init()` (pinning its refcount to
+a large sentinel, same pattern as `vns_init_nsproxy.count`) and unconditionally
+points `vns_init_nsproxy.cgroup_ns` at it -- **never** at the running kernel's
+real `init_cgroup_ns`, regardless of whether `shadow_hook_resolve("init_cgroup_ns")`
+succeeds. `vns_init_cgroup_ns_ptr` is still resolved for cosmetic bookkeeping only
+(mirroring `vns_init_ipc_ns_ptr`) and is never installed anywhere.
+
+This closes the one remaining case where `vendor_kernel`'s pinned default
+nsproxy depended on the target kernel's own resolved namespace object instead
+of a vendored one, bringing `CGROUP_NS` bookkeeping in line with
+`UTS_NS`/`PID_NS`/`USER_NS`/`IPC_NS`/overlayfs. It does **not** change the
+scope of cgroup namespace *isolation* itself: `vns_copy_cgroup_ns()` still
+unconditionally returns the caller's existing `cgroup_ns` (`get_cgroup_ns(old_ns)`)
+rather than allocating a new one on `unshare(CLONE_NEWCGROUP)`, so
+`vns_default_cgroup_ns.root_cset` is deliberately left `NULL` and never
+dereferenced -- building a real, isolated per-namespace `root_cset` would
+require duplicating the running kernel's non-exported cgroup core (`css_set`
+table, `cgroup_mutex`, `task_css_set()`), which is out of scope for this
+module (see "Known remaining gaps" below).
 
 ## Known remaining gaps
 
 - `SHM_HUGETLB` shared-memory segments are a best-effort gap: `ipc/shm.c` references the running kernel's hugetlb `hstates[]`/`default_hstate_idx`/`size_to_hstate()`, which are not exported and are absent entirely on `CONFIG_HUGETLB_PAGE=n`. `glue/vendor_kernel_ipc_compat.c` defines these as zeroed/NULL-returning stubs, so `shmget(..., SHM_HUGETLB)` fails cleanly with `-EINVAL` (`shm.c` null-checks `hstate_sizelog()`) rather than doing anything unsafe; ordinary (non-hugetlb) `shmget()` is fully functional.
 - `NET_NS` and `MNT_NS` are still resolved via optional function pointers (`vns_copy_net_ns_fn`/`vns_copy_mnt_ns_fn` in `glue/vendor_kernel_module.c`) rather than being fully vendored, so they still silently fall back to bookkeeping-only/no-op behaviour on a target kernel with `CONFIG_NET_NS=n`/`CONFIG_NAMESPACES` MNT support missing.
+- `CGROUP_NS` bookkeeping (`vns_init_nsproxy.cgroup_ns`, `/proc/<pid>/ns/cgroup` refcounting) is fully vendored and independent of the target's `CONFIG_CGROUPS` setting (see "Module-owned default cgroup namespace, always vendored" above), but `unshare(CLONE_NEWCGROUP)` itself remains bookkeeping-only: `vns_copy_cgroup_ns()` always returns the caller's existing `cgroup_namespace` rather than allocating an isolated one, since a real one requires a live `root_cset` from the running kernel's own (non-exported) cgroup hierarchy. Same posture as `NET_NS`/`MNT_NS` above.
 - `CLONE_NEWNET` is *always* bookkeeping-only (`create_new_namespaces()` in `kernel/nsproxy.c` masks `CLONE_NEWNET` out of the flags it passes to the real, resolved `copy_net_ns()`), even on a target kernel that genuinely has `CONFIG_NET_NS=y` and where `copy_net_ns()` resolves successfully. Letting `copy_net_ns()` actually build a brand-new `struct net` from this call site was observed to corrupt the kernel-wide `percpu_counters` list the first time it ran (`kernel BUG at lib/list_debug.c:29`, call trace `xfrm4_net_init` -> `__percpu_counter_init` -> `ops_init` -> `setup_net` -> `copy_net_ns` -> `create_new_namespaces` [lkm4ctr]), even though every other namespace type built alongside it in the same call is unaffected. The exact mechanism was not fully root-caused (no live KASAN/SLUB-debug reproduction was available), so real `NET_NS` isolation is disabled here rather than risk that crash; `unshare(CLONE_NEWNET)`/`ns_net` reports STUB (no real isolation) instead of PASS.
 - `kernel/cgroup/namespace.c` and `kernel/time/namespace.c` store `user_ns` without taking a reference on it (`(void)user_ns;` in their copy functions), unlike `kernel/pid_namespace.c`/`kernel/user_namespace.c`/`kernel/utsname.c`/`ipc/namespace.c` which now use `vns_get_user_ns()`/`vns_put_user_ns()`; this is a pre-existing gap unrelated to `CONFIG_PID_NS`/`CONFIG_USER_NS` and was not changed here.
 - `cred->user_ns` can be freed independently of nsproxy teardown via a deferred RCU callback (`put_cred_rcu()`), decoupled from task exit -- see "Slab-cache consistency with the real kernel" above for why this is an accepted, no-op-leak-only gap.
@@ -211,7 +248,7 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 
 ## Vendoring rules
 
-- upstream sources were copied from `kernel-common` `android14-6.1` (kernel `6.1.124`)
+- upstream sources for `kernel/`, `ipc/`, and `fs/nsfs.c` were copied from `kernel-common` `android14-6.1` (kernel `6.1.124`); vendored overlayfs is now a single `fs/overlayfs/` tree copied from `android16-6.12`, with `glue/vendor_kernel_ovl_vfs_compat.{h,c}` adapting it across the supported OLD/MID/NEW VFS tiers (see "Vendored overlayfs" below)
 - all non-static global symbols are renamed with a `vns_` prefix
 - slab-cache users for `ipc_namespace`/`cgroup_namespace`/`time_namespace` are `kzalloc`/`kfree` (matches upstream, which also uses plain kzalloc/kmalloc for these); `uts_namespace`/`nsproxy`/`pid_namespace`/`user_namespace` allocate/free through vendor_kernel's own module-owned `kmem_cache_create()` caches (see "Slab-cache consistency with the real kernel" above), never the real kernel's private caches
 - `get_uts_ns()`/`put_uts_ns()`/`get_pid_ns()`/`put_pid_ns()`/`get_user_ns()`/`put_user_ns()` call sites are replaced with `vns_get_uts_ns()`/`vns_put_uts_ns()`/`vns_get_pid_ns()`/`vns_put_pid_ns()`/`vns_get_user_ns()`/`vns_put_user_ns()` (see "Namespace refcounting is fully self-contained" above), and the `#ifdef CONFIG_PID_NS`/`#ifdef CONFIG_USER_NS` blocks gating pid/user namespace installation in `vns_sys_setns()`'s helpers are made unconditional, for the same reason
@@ -235,6 +272,69 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - `fs/nsfs.c`
 - `kernel/cgroup/namespace.c`
 - `kernel/time/namespace.c`
+- `fs/overlayfs/{super.c,namei.c,util.c,inode.c,dir.c,readdir.c,copy_up.c,export.c,file.c,params.c,xattrs.c,overlayfs.h,ovl_entry.h,params.h}` - single vendored overlayfs tree from `android16-6.12`, built across multiple KMIs by `glue/vendor_kernel_ovl_vfs_compat.{h,c}`
+
+### Vendored overlayfs
+
+`fs/overlayfs/` is now a single vendored copy of upstream's out-of-tree-buildable
+overlay filesystem, taken from the `android16-6.12` branch. The source keeps
+the 6.12-era layout (`params.c`/`params.h`, `xattrs.c`, `ovl_entry.h`, etc.);
+cross-KMI support is provided by `glue/vendor_kernel_ovl_vfs_compat.{h,c}`,
+which lets that one 6.12-shaped tree build across the repository's supported
+Android GKI ranges instead of carrying separate per-era copies.
+
+- `module_init(ovl_init)`/`module_exit(ovl_exit)` were replaced with plain
+  `vns_ovl_init()`/`vns_ovl_exit()` functions (renamed from `ovl_init`/
+  `ovl_exit`, and no longer `static`), since lkm4ctr.ko already has a
+  single `module_init`/`module_exit` pair in `lkm4ctr_main.c`. These are
+  chained in from `vendor_kernel_init()`/`vendor_kernel_exit()` via
+  `glue/vendor_kernel_overlay.c`.
+- The `file_system_type` (`vns_ovl_fs_type`, renamed from the static
+  `ovl_fs_type` so `glue/vendor_kernel_overlay.c` can reference it) keeps
+  upstream's name, `"overlay"`, but is **never** passed to
+  `register_filesystem()`/`unregister_filesystem()`. Instead,
+  `glue/vendor_kernel_overlay.c` hooks the exported `get_fs_type()` kernel
+  function (the same lookup `mount(2)` itself uses to resolve a filesystem
+  name) and, for the name `"overlay"`, always hands out `vns_ovl_fs_type`
+  -- unconditionally, regardless of whether the running kernel also ships
+  its own built-in overlayfs or a separate `overlay.ko`. This means
+  `mount -t overlay ...` always uses this vendored implementation while
+  `lkm4ctr.ko` is loaded, with zero risk of a `register_filesystem()`
+  `-EBUSY` collision against a real one (since it is never registered into
+  the global `file_systems` list at all).
+- `vns_ovl_mount_count` (new, not upstream) tracks live vendored-overlay
+  mounts (incremented in `ovl_fill_super()` on success, decremented in the
+  new `vns_ovl_kill_sb()` wrapper around `kill_anon_super()`) and is
+  surfaced through vendor_kernel's diagfs status
+  (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
+- `glue/vendor_kernel_ovl_vfs_compat.{h,c}` is the single compatibility shim
+  for that unified tree. It resolves the VFS/security/exportfs/fileattr
+  helpers production GKI may trim from the module symbol table, and also
+  bridges the API differences between the 6.12 baseline and older kernels:
+
+  | Tier | `LINUX_VERSION_CODE` range | How the 6.12 tree is adapted | KMI(s) covered |
+  |------|----------------------------|-------------------------------|----------------|
+  | `OLD` | `[5.10, 5.12)` | No idmapped mounts yet: real VFS helpers take no idmap argument, so the compat layer drops the threaded idmap parameter and reaches old inode/file callbacks through thin wrapper thunks. | `android12-5.10`, `android13-5.10` |
+  | `MID` | `[5.12, 6.3)` | Idmapped mounts exist but still use `struct user_namespace *`; the compat layer aliases `mnt_idmap` to that type, translates the newer helper surface back to the older equivalents, and uses the manual backing-file I/O fallback. | `android13-5.15`, `android14-5.15`, `android14-6.1` |
+  | `NEW` | `[6.3, 6.19)` | The 6.12 source is mostly native; the shim mainly resolves trim-prone helpers and uses the manual backing-file I/O fallback only on kernels before 6.9. | `android15-6.6`, `android16-6.12`, `android17-6.18` |
+
+  The detailed tier rationale lives in the header comment of
+  `glue/vendor_kernel_ovl_vfs_compat.h` and should be treated as the
+  authoritative design note when extending the compat layer.
+- `fs/overlayfs/super.c` carries `MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);`
+  so the vendored overlayfs can link on kernels that place the needed VFS
+  exports in that namespace. Omitting the import causes hard `Unknown
+  symbol ... (err -2)` failures on kernels that enforce it, while importing
+  an unused namespace is harmless.
+
+**KMI support range**: the single `fs/overlayfs/` tree is active for
+`LINUX_VERSION_CODE` in `[5.10, 6.19)`. Every vendored overlayfs file shares
+that outer guard, compiling to nothing outside the supported span.
+`glue/vendor_kernel_overlay.c` uses the same range for its `get_fs_type()`
+override and calls one unified `vns_ovl_init()`/`vns_ovl_exit()` path; on
+kernels outside `[5.10, 6.19)`, `vns_overlay_init()` simply skips the
+override and `mount -t overlay ...` falls back to the running kernel's own
+overlay implementation.
 
 ## Helper files
 
@@ -243,6 +343,8 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - `glue/vendor_kernel_syscalls.c` - syscall hooks; installs real namespaces via `vns_switch_task_namespaces()`
 - `glue/vendor_kernel_ipc_syscalls.c` - SysV IPC + POSIX mqueue syscall hooks; module-owned default `ipc_namespace` init/exit
 - `glue/vendor_kernel_ipc_compat.c` - resolves/stubs the non-exported mm/vfs/netlink/audit/security/ucounts symbols the vendored `ipc/*.c` pull in
+- `glue/vendor_kernel_overlay.c` - vendored overlayfs lifecycle + `get_fs_type("overlay")` hook (see "Vendored overlayfs" above)
+- `glue/vendor_kernel_ovl_vfs_compat.{c,h}` - unified kallsyms-based VFS helper resolution and tiered API bridging for the single vendored overlayfs tree
 - `glue/vendor_kernel_diag.c` - diagfs renderer
 - `include/uapi/vendor_kernel.h` - minimal UAPI marker header
 

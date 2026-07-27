@@ -8,9 +8,9 @@
  * shadow_hook_install, shadow_hook_remove, shadow_hook_install_all,
  * shadow_hook_remove_all) used to be `static inline` helpers in
  * common/shadow_hook.h, duplicated into every module TU that needed them so
- * that no shared .ko was required. Now that more than one module hooks
- * syscalls (shadow_ns, shadow_sysvipc, shadow_mqueue,
- * shadow_cgdevices), that duplication is wasteful and, more importantly, made
+ * that no shared .ko was required. Now that more than one subsystem hooks
+ * syscalls (vendor_kernel and shadow_cgdevices), that duplication is
+ * wasteful and, more importantly, made
  * the recursion guard fragile (see below). The logic now lives here as a
  * single shared implementation; common/shadow_hook.h is a purely declarative
  * ABI header that both this module and its callers agree on.
@@ -189,12 +189,13 @@ static void shadow_hook_registry_remove(struct shadow_hook **hooks)
 
 /*
  * shadow_hook_registry_tag_matches() - whether @group_tag (e.g.
- * "shadow_ns_procfs") belongs to the @filter subsystem (e.g. "shadow_ns"):
- * either an exact match, or @filter followed by '_' as a prefix. shadow_ns
- * registers several hook groups under related-but-distinct tags (its own
- * "shadow_ns" core plus "shadow_ns_uts"/"_pid"/"_user"/"_procfs"), so the
- * diagfs's single per-module "hooks" file needs every one of them when
- * asked for "shadow_ns", not just an exact-string match.
+ * "vendor_kernel_procfs") belongs to the @filter subsystem (e.g.
+ * "vendor_kernel"): either an exact match, or @filter followed by '_' as a
+ * prefix. vendor_kernel registers several hook groups under
+ * related-but-distinct tags (its own "vendor_kernel" core plus
+ * "vendor_kernel_procfs"/"_syscalls"/"_ipc"), so the diagfs's single
+ * per-module "hooks" file needs every one of them when asked for
+ * "vendor_kernel", not just an exact-string match.
  */
 static bool shadow_hook_registry_tag_matches(const char *filter, const char *group_tag)
 {
@@ -379,6 +380,18 @@ EXPORT_SYMBOL_GPL(shadow_hook_registry_set_active);
  * using the kernel's own symbol table walker; we immediately unregister the
  * (never armed for our purposes) kprobe and reuse the resolved address.
  * Returns 0 if not found.
+ *
+ * Note: this only works if register_kprobe()/unregister_kprobe() themselves
+ * are available -- i.e. CONFIG_KPROBES=y in the target kernel. Since these
+ * are the very primitives this resolver is built on, an "Unknown symbol
+ * register_kprobe"/"unregister_kprobe" error at insmod cannot be worked
+ * around by resolving them the same way (a bootstrapping/chicken-and-egg
+ * problem). CONFIG_KPROBES is effectively mandatory for any real Android
+ * GKI kernel (ftrace/perfetto tracing infrastructure depends on it), so
+ * this indicates the target kernel's own config lacks CONFIG_KPROBES
+ * (e.g. a minimal test kernel), not a normal GKI KMI symbol-list-trimming
+ * issue -- there is no supported fix for that case short of enabling
+ * CONFIG_KPROBES in the target kernel build.
  */
 unsigned long shadow_hook_resolve(const char *name)
 {
@@ -600,7 +613,7 @@ static shadow_unregister_ftrace_function_t shadow_unregister_ftrace_function_fn;
  * single-threaded module init/exit sequencer (never concurrently), so no
  * extra locking is needed here -- same assumption already relied upon by
  * every other shadow_hook_resolve()-based lazy resolution in this codebase
- * (e.g. shadow_mqueue_mount.c's mq_dev_mqueue_ensure()).
+ * (e.g. vendor_kernel_ipc_mount.c's vns_mqueue_dev_ensure()).
  */
 static bool shadow_hook_ftrace_api_ready(void)
 {

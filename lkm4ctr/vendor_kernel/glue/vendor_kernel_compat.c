@@ -106,6 +106,11 @@ typedef int  (*commit_creds_fn_t)(struct cred *);
 typedef bool (*file_ns_capable_fn_t)(const struct file *,
 				     struct user_namespace *, int);
 typedef void (*do_exit_fn_t)(long);
+typedef pid_t (*pid_nr_ns_fn_t)(struct pid *, struct pid_namespace *);
+#ifdef CONFIG_KEYS
+typedef void (*key_put_fn_t)(struct key *);
+#endif
+typedef void (*kill_litter_super_fn_t)(struct super_block *);
 
 static inc_ucount_fn_t            vns_inc_ucount_real;
 static dec_ucount_fn_t            vns_dec_ucount_real;
@@ -135,6 +140,11 @@ static prepare_creds_fn_t         vns_prepare_creds_real;
 static commit_creds_fn_t          vns_commit_creds_real;
 static file_ns_capable_fn_t       vns_file_ns_capable_real;
 static do_exit_fn_t               vns_do_exit_real;
+static pid_nr_ns_fn_t              vns_pid_nr_ns_real;
+#ifdef CONFIG_KEYS
+static key_put_fn_t                vns_key_put_real;
+#endif
+static kill_litter_super_fn_t      vns_kill_litter_super_real;
 
 /*
  * [BUILD-COMPAT] tasklist_lock (kernel/fork.c, not exported).
@@ -145,7 +155,11 @@ static do_exit_fn_t               vns_do_exit_real;
  */
 DEFINE_RWLOCK(tasklist_lock);
 
-/* Resolved pointer to the kernel's init_cgroup_ns data object. */
+/* Resolved pointer to the kernel's init_cgroup_ns data object, kept for
+ * cosmetic bookkeeping only: it is never installed onto
+ * vns_init_nsproxy.cgroup_ns, which always points at the module-owned
+ * vns_default_cgroup_ns singleton (kernel/cgroup/namespace.c) instead --
+ * mirroring vns_init_ipc_ns_ptr below. */
 #ifdef CONFIG_CGROUPS
 struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 #endif /* CONFIG_CGROUPS */
@@ -244,12 +258,25 @@ void vns_compat_resolve(void)
 	RESOLVE(vns_commit_creds_real,          commit_creds);
 	RESOLVE(vns_file_ns_capable_real,       file_ns_capable);
 	RESOLVE(vns_do_exit_real,               do_exit);
+	RESOLVE(vns_pid_nr_ns_real,             pid_nr_ns);
+#ifdef CONFIG_KEYS
+	RESOLVE(vns_key_put_real,               key_put);
+#endif
+	RESOLVE(vns_kill_litter_super_real,     kill_litter_super);
 #ifdef CONFIG_CGROUPS
+	/*
+	 * Best-effort resolve of the *real* kernel's init_cgroup_ns. This is
+	 * used for bookkeeping ONLY (see vns_init_cgroup_ns_ptr's declaration
+	 * above); a failure to resolve it no longer disables cgroup namespace
+	 * bookkeeping, since vns_init_nsproxy.cgroup_ns is always pointed at
+	 * the vendored vns_default_cgroup_ns singleton instead (see
+	 * vendor_kernel_init(), glue/vendor_kernel_module.c).
+	 */
 	vns_init_cgroup_ns_ptr = (struct cgroup_namespace *)(uintptr_t)
 		shadow_hook_resolve("init_cgroup_ns");
 	if (!vns_init_cgroup_ns_ptr)
 		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-			"compat: init_cgroup_ns not resolved (cgroup ns disabled)");
+			"compat: init_cgroup_ns not resolved (bookkeeping only; cgroup ns unaffected)");
 #endif
 	/*
 	 * Best-effort resolve of the *real* kernel's init_ipc_ns. This is now
@@ -681,6 +708,54 @@ void __noreturn vns_do_exit(long error_code)
 	BUG();
 }
 
+/*
+ * [BUILD-COMPAT] pid_nr_ns (kernel/pid.c, not exported on some KMIs).
+ * Translates a struct pid into the pid_t value seen from a given
+ * pid_namespace. Called directly from our vendored ipc/shm.c and ipc/msg.c.
+ */
+pid_t vns_pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	if (vns_pid_nr_ns_real)
+		return vns_pid_nr_ns_real(pid, ns);
+	return 0; /* stub: report "no pid" rather than a bogus value */
+}
+
+#ifdef CONFIG_KEYS
+/*
+ * [BUILD-COMPAT] key_put (security/keys/key.c, not exported on some KMIs).
+ * Drops a reference on a struct key. Called directly from our vendored
+ * kernel/user_namespace.c.
+ */
+void vns_key_put(struct key *key)
+{
+	if (vns_key_put_real)
+		vns_key_put_real(key);
+	/* stub: leak the key rather than risk a bad refcount/UAF */
+}
+#endif /* CONFIG_KEYS */
+
+/*
+ * [BUILD-COMPAT] kill_litter_super (fs/super.c, "Protected symbol" -- EACCES
+ * at insmod -- on some KMIs even though present/exported). Used as the
+ * .kill_sb of our vendored ipc/mqueue.c's pseudo-filesystem. Falls back to
+ * generic_shutdown_super() (always available) if unresolved: this skips
+ * kill_litter_super()'s own d_genocide()/kill_anon_super() bookkeeping
+ * (forced dentry eviction plus device-number release), but
+ * generic_shutdown_super() alone already forcibly evicts the dcache for
+ * this anon superblock, so the mount still tears down cleanly at the cost
+ * of a harmless bdev-number leak in the rare case this fallback is hit.
+ */
+void vns_kill_litter_super(struct super_block *sb)
+{
+	if (vns_kill_litter_super_real) {
+		vns_kill_litter_super_real(sb);
+		return;
+	}
+	LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+		     "compat: kill_litter_super unresolved; using generic_shutdown_super() instead");
+	generic_shutdown_super(sb);
+}
+
 #ifdef CONFIG_CGROUPS
 /*
  * [BUILD-COMPAT] free_cgroup_ns (kernel/cgroup/namespace.c, not exported).
@@ -697,3 +772,28 @@ void free_cgroup_ns(struct cgroup_namespace *ns)
 		     ns);
 }
 #endif
+
+#ifdef CONFIG_NET_NS
+/*
+ * [BUILD-COMPAT] __put_net (net/core/net_namespace.c, not exported on some
+ * KMIs). put_net()'s body is a static inline in <net/net_namespace.h> that
+ * is parsed (and its call to __put_net() already resolved to whatever
+ * symbol table entry the kernel provides) well before vendor_kernel.h's own
+ * macro-remap definitions could take effect, so the usual
+ * vns_xxx()+#define redirect trick cannot intercept this call. Providing
+ * our own externally-linked __put_net() here satisfies put_net()'s
+ * reference directly out of this module's own object files instead of
+ * requiring it to be resolved from vmlinux. vendor_kernel never allocates
+ * its own net namespaces (see vendor_kernel/kernel/nsproxy.c, which only
+ * ever shares/gets a reference on a real net_ns), so hitting this fallback
+ * would only mean a real kernel net namespace refcount unexpectedly
+ * dropped to zero through this module; leak it rather than attempt to
+ * replicate net namespace teardown ourselves.
+ */
+void __put_net(struct net *net)
+{
+	LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+		     "compat: unexpected __put_net(%px); leaking net namespace",
+		     net);
+}
+#endif /* CONFIG_NET_NS */

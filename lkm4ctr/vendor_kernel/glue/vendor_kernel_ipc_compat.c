@@ -137,7 +137,7 @@ typedef unsigned long (*do_mmap_fn_t)(struct file *, unsigned long,
 #endif
 #if defined(CONFIG_HUGETLBFS)
 typedef struct file *(*hugetlb_file_setup_fn_t)(const char *, size_t, vm_flags_t,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	struct ucounts **,
 #endif
 	int, int);
@@ -515,14 +515,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr, unsigned long len,
 
 #if defined(CONFIG_HUGETLBFS)
 struct file *hugetlb_file_setup(const char *name, size_t size, vm_flags_t acct,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 				struct ucounts **ucounts,
 #endif
 				int creat_flags, int page_size_log)
 {
 	if (r_hugetlb_file_setup)
 		return r_hugetlb_file_setup(name, size, acct,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 					    ucounts,
 #endif
 					    creat_flags,

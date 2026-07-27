@@ -14,11 +14,9 @@ module entry point, one `.ko`.
 
 | Component             | Directory                         | Summary |
 |-----------------------|-----------------------------------|---------|
-| `lkm4ctr.ko`          | `lkm4ctr/`                        | nified module containing the shared hook engine plus the namespace, SysV IPC, POSIX mqueue and cgroup-device compatibility subsystems. |
+| `lkm4ctr.ko`          | `lkm4ctr/`                        | Unified module containing the shared hook engine plus the vendored namespace/IPC/mqueue and cgroup-device compatibility subsystems. |
 | `shadow_hijack`       | `lkm4ctr/shadow_hijack/`          | Internal shared ftrace/kprobe hook implementation used by the other subsystems inside `lkm4ctr.ko`. |
-| `shadow_ns`           | `lkm4ctr/shadow_ns/`              | `unshare/setns/clone/clone3/fork/vfork` hooks. Real per-namespace isolation for UTS, PID, USER and (for the SysV IPC data path, via `shadow_sysvipc`) IPC; bookkeeping only for NET/CGROUP/MNT when genuinely absent. |
-| `shadow_sysvipc`      | `lkm4ctr/shadow_sysvipc/`         | System V IPC (msg/sem/shm) hooks and shadow registry. |
-| `shadow_mqueue`       | `lkm4ctr/shadow_mqueue/`          | POSIX mqueue hooks plus real shadow message transfer. |
+| `vendor_kernel`       | `lkm4ctr/vendor_kernel/`          | Vendored namespace/IPC/mqueue/overlayfs implementation: namespace syscalls, `/proc` namespace visibility, SysV IPC, POSIX mqueue support, and an always-used vendored overlayfs (`get_fs_type("overlay")` hook). |
 | `shadow_cgdevices`    | `lkm4ctr/shadow_cgdevices/`       | Transparent device-open hook shim for the cgroup-device compatibility slot. |
 | `lkm4ctr_checker`     | `lkm4ctr_checker/`                | **Userspace** diagnostic binary (not a kernel module): performs real syscalls and reports PASS/STUB/FAIL per feature. |
 
@@ -27,7 +25,7 @@ module entry point, one `.ko`.
 Because every subsystem in this family hooks/simulates functionality that would
 normally be compiled into `vmlinux`, "supported" does not always mean the same
 thing. This table is the single place that spells out, per subsystem (and per
-namespace type inside `shadow_ns`), whether the simulation is **real**
+namespace type inside `vendor_kernel`), whether the simulation is **real**
 (behaves like the native kernel feature, verified by observable side effects),
 **bookkeeping-only** (state is tracked and syscalls succeed, but there is no
 functional isolation/enforcement behind it), or a **stub** (a hook exists but
@@ -36,15 +34,14 @@ change anything). See each module's own README for the full rationale.
 
 | Component                          | Classification | Why |
 |-------------------------------------|-----------------|-----|
-| `shadow_ns` — UTS namespace          | **Real**        | `uname()`/`sethostname()` after `unshare(CLONE_NEWUTS)` observe a genuinely separate nodename/domainname per simulated namespace. |
-| `shadow_ns` — PID namespace          | **Real**        | vpid↔rpid remapping means `getpid()`/`/proc` inside a simulated PID namespace show virtual, namespace-local PIDs distinct from the real ones. |
-| `shadow_ns` — USER namespace         | **Real**        | uid/gid 0 remapping gives genuinely different credential mapping inside vs. outside the simulated namespace. |
-| `shadow_ns` — IPC namespace          | **Real** (SysV IPC)  | A separate namespace id is tracked on `unshare`/`setns`/`clone(CLONE_NEWIPC)`, and `shadow_sysvipc`'s transparent `msgget`/`semget`/`shmget`/... hooks route any task that is a member of a simulated IPC namespace through a namespace-scoped shadow registry instead of the real, un-partitioned `init_ipc_ns` — so SysV message queues/semaphores/shared memory are genuinely partitioned per simulated namespace. POSIX message queues are not covered by this and remain unpartitioned. |
-| `shadow_ns` — NET namespace          | **Bookkeeping**  | A separate namespace id/refcount is tracked, but no network-stack partitioning is provided. |
-| `shadow_ns` — CGROUP namespace       | **Bookkeeping** (only if `CONFIG_CGROUPS=n`) | Same generic id/refcount registry as IPC/NET, used only on the (rare — no GKI defconfig disables it) kernel builds without `CONFIG_CGROUPS`; otherwise always builtin/passthrough. |
-| `shadow_ns` — MNT namespace          | bookkeeping (only if `CONFIG_NAMESPACES=n`, effectively never in practice)   | Mount namespaces have no dedicated per-type Kconfig gate anywhere in mainline Linux, so `shadow_ns` keys MNT's builtin status off `CONFIG_NAMESPACES` itself as a defensive fallback; the real, always-compiled-in mount-namespace code keeps running regardless, this only adds a parallel bookkeeping entry. |
-| `shadow_sysvipc` (msg/sem/shm)        | **Real**        | Maintains an actual object registry (ids, keys, lifecycle) behind the hooked syscalls — not a stub that just returns success. |
-| `shadow_mqueue` (POSIX mqueue)        | **Real**        | Real message transfer: priority-ordered queue, blocking send/receive with timeout semantics, real anon-inode-backed fds. |
+| `vendor_kernel` — UTS namespace      | **Real**        | `uname()`/`sethostname()` after `unshare(CLONE_NEWUTS)` observe a genuinely separate nodename/domainname per vendored namespace. |
+| `vendor_kernel` — PID namespace      | **Real**        | vpid remapping plus `/proc` integration mean `getpid()` and procfs inside a vendored PID namespace show namespace-local PIDs distinct from the host ones. |
+| `vendor_kernel` — USER namespace     | **Real**        | uid/gid remapping gives genuinely different credential mapping inside vs. outside the vendored namespace. |
+| `vendor_kernel` — IPC namespace      | **Real**        | A vendored `ipc_namespace` is installed on `task_struct->nsproxy`, and the hooked SysV IPC and POSIX mqueue syscalls operate on that namespace-scoped state instead of the host default. |
+| `vendor_kernel` — NET namespace      | **Bookkeeping** | A separate namespace id/refcount is tracked, but no network-stack partitioning is provided. |
+| `vendor_kernel` — CGROUP namespace   | **Kernel-provided or bookkeeping-only** | Uses the real kernel cgroup namespace support when present; on kernels lacking it, only bookkeeping remains. |
+| `vendor_kernel` — MNT namespace      | **Kernel-provided** | Relies on the running kernel's mount-namespace implementation; no separate vendored mount-namespace core is provided. |
+| `vendor_kernel` — overlayfs          | **Real**        | A vendored `fs/overlayfs` always answers `get_fs_type("overlay")` (hooked), so `mount -t overlay ...` genuinely mounts and operates through this module's own overlay implementation, regardless of the running kernel's own overlayfs support. |
 | `shadow_cgdevices` (`chrdev_open`)     | **Stub**        | Hook installed but currently only preserves native behaviour; no rule enforcement yet. |
 | `shadow_cgdevices` (`blkdev_open`)     | **Stub, best-effort** | Same as above, and only installed if the symbol exists with the expected prototype on that KMI. |
 | `lkm4ctr_checker`                  | n/a (diagnostics) | **Userspace binary**, not a kernel module: actually attempts the relevant syscalls and reports PASS/STUB/FAIL based on the observed effect, rather than reporting compile-time config alone. |
@@ -54,7 +51,7 @@ Shared, header-only helpers live in `common/`:
 | File                          | Purpose |
 |-------------------------------|---------|
 | `common/shadow_hook.h`        | ftrace/kprobe syscall-hijack helper used by every hooking subsystem. |
-| `common/lkm4ctr_compat.h`  | `fd_file()`/`fd_empty()` compat shims for kernels < 6.8 (used by `shadow_mqueue`). |
+| `common/lkm4ctr_compat.h`  | `fd_file()`/`fd_empty()` compat shims for kernels < 6.8 (used by `vendor_kernel`). |
 | `common/shadow_hook.README.md`| Documentation for the hook helper. |
 
 ## Load order
@@ -111,17 +108,20 @@ when `CONFIG_FUNCTION_TRACER`/`CONFIG_DYNAMIC_FTRACE` are available, and a
 kprobe-`pre_handler` fallback otherwise — the latter is what runs on stock
 Android GKI kernels, which ship with `CONFIG_FUNCTION_TRACER` disabled.
 
-`shadow_mqueue`'s `fd_file()`/`fd_empty()` use targets a kernel API that only
+`vendor_kernel`'s overlayfs support now comes from a single vendored
+`lkm4ctr/vendor_kernel/fs/overlayfs/` tree (android16-6.12 baseline).
+`lkm4ctr/vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.{h,c}` adapts that
+one source tree across the three supported VFS/API tiers: `OLD`
+`[5.10, 5.12)`, `MID` `[5.12, 6.3)`, and `NEW` `[6.3, 6.19)`.
+
+`vendor_kernel`'s procfs and mqueue glue uses `fd_file()`/`fd_empty()`, a
+kernel API that only
 exists from Linux v6.8 onward; `common/lkm4ctr_compat.h` provides shims so
 the same source builds unmodified against older GKI branches (e.g. 6.1).
 
 See each subsystem's own README for its honest scope/limitations. In
-particular, `shadow_ns` only ever simulates a namespace type genuinely absent
-from this
-kernel build (`IS_ENABLED(CONFIG_*_NS)`, which collapses correctly even when
-`CONFIG_NAMESPACES` is disabled entirely) — when it does simulate, UTS/PID/USER
-get real functional isolation; IPC/NET simulation (when needed) remains
-reference-counted bookkeeping only. See
-[`lkm4ctr/shadow_ns/README.md`](lkm4ctr/shadow_ns/README.md) for the full
-design rationale, and the "Real vs. bookkeeping vs. stub" table above for the
-full picture across every subsystem in this family.
+particular, `vendor_kernel` provides the real vendored UTS/PID/USER/IPC/mqueue
+paths and documents the remaining NET/MNT/CGROUP caveats in
+[`lkm4ctr/vendor_kernel/README.md`](lkm4ctr/vendor_kernel/README.md); see that
+README plus the "Real vs. bookkeeping vs. stub" table above for the full
+picture across the current subsystem set.

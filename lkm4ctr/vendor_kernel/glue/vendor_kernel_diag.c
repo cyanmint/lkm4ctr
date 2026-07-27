@@ -31,5 +31,6 @@ size_t vendor_kernel_diag_snprintf(char *buf, size_t buflen)
 		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
 				 "tgid=%d nsproxy=%px\n", t->tgid, t->nsproxy);
 	spin_unlock_irqrestore(&vendor_kernel_registry.lock, flags);
+	pos += vns_overlay_diag_snprintf(buf + pos, pos < buflen ? buflen - pos : 0);
 	return pos;
 }

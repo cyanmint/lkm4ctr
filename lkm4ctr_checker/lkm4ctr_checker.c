@@ -6,8 +6,8 @@
  * This used to be a small kernel module that read back its own compile-time
  * IS_ENABLED(CONFIG_*) view of the target kernel. That could only ever prove
  * what the kernel was *built* to support, never what actually happens at
- * runtime once shadow_ns/shadow_sysvipc/shadow_mqueue/shadow_cgdevices hooks
- * (or their absence) are in the loop - which is exactly what matters when
+ * runtime once lkm4ctr's hooked subsystems (or their absence) are in the
+ * loop - which is exactly what matters when
  * diagnosing a real container-start failure such as:
  *
  *   failed to create task for container: failed to create shim task: OCI
@@ -377,8 +377,8 @@ static void shadow_checker_pid(void)
 		}
 		if (grandchild == 0) {
 			/*
-			 * /proc isolation check (see shadow_ns_procfs.c):
-			 * from inside the new (real or shadow_ns-simulated)
+			 * /proc isolation check (see
+			 * glue/vendor_kernel_procfs.c): from inside the new
 			 * PID namespace, /proc/<own vpid> must resolve, the
 			 * outer checker process's real, still-running host
 			 * pid must NOT be visible via /proc/<main_pid>, and
@@ -390,12 +390,10 @@ static void shadow_checker_pid(void)
 			 * unshare(CLONE_NEWPID) -- otherwise the ambient
 			 * host /proc mount (inherited unchanged) still shows
 			 * the host's own pid namespace regardless of the new
-			 * pid namespace. shadow_ns's own openat/getdents64
-			 * translation hooks intercept /proc access
-			 * independent of which mount instance is used, so
-			 * this remount is harmless (a no-op from their
-			 * point of view) when shadow_ns is simulating
-			 * CLONE_NEWPID instead of a real kernel doing so.
+			 * pid namespace. vendor_kernel's procfs fallback
+			 * hooks intercept /proc access independent of which
+			 * mount instance is used, so this remount is
+			 * harmless from their point of view too.
 			 */
 			pid_t vpid = getpid();
 			char path[64];
@@ -599,7 +597,7 @@ static void shadow_checker_run_as_uid1(const char *label, void (*fn)(void))
  * USER namespace: unshare(CLONE_NEWUSER) always changes the calling task's
  * apparent uid/gid inside the new namespace *before* any uid_map/gid_map is
  * written - either to the overflow uid (genuine, unmapped kernel
- * namespace: typically 65534) or to 0 (shadow_ns's docker-like
+ * namespace: typically 65534) or to 0 (the module's container-style
  * single-mapping remap of the creator to root). Both are a real, observable
  * change; only an unchanged uid indicates no isolation at all. This test is
  * only meaningful when run as a non-root user, so if the checker itself is
@@ -677,10 +675,10 @@ static void shadow_checker_user(void)
  * ---------------------------------------------------------------------
  * IPC / NET / MNT / CGROUP namespaces: none of these has a cheap, safe,
  * universal in-process "did isolation really happen" signal the way UTS/
- * PID/USER do (see lkm4ctr/lkm4ctr/shadow_ns/README.md: shadow_ns's fallback for
- * these four is bookkeeping-only by design, and genuine kernel isolation for
+ * PID/USER do. For these four, the remaining caveats live in
+ * lkm4ctr/lkm4ctr/vendor_kernel/README.md, and genuine kernel isolation for
  * them touches subsystems this tool must not perturb - e.g. mounting/
- * networking). So this tool only reports whether the unshare(2) syscall
+ * networking. So this tool only reports whether the unshare(2) syscall
  * itself succeeds; a successful-but-unverifiable-isolation namespace is
  * still reported STUB unless the child can observe a distinct
  * /proc/self/ns/<type> identity from the parent, which is a reliable
@@ -851,7 +849,7 @@ static void shadow_checker_mqueue(void)
 /*
  * ---------------------------------------------------------------------
  * System V IPC: real functional test via a message queue (msgget/msgsnd/
- * msgrcv), matching what shadow_sysvipc actually hooks.
+ * msgrcv), matching vendor_kernel's hooked SysV IPC path.
  * ---------------------------------------------------------------------
  */
 struct shadow_checker_sysv_msg {
@@ -995,7 +993,7 @@ static void shadow_checker_overlay(void)
 /*
  * ---------------------------------------------------------------------
  * USER namespace id mapping: getuid/geteuid/getgid/getegid/getresuid/
- * getresgid (shadow_ns_user.c's dedicated hooks) after an explicit
+ * getresgid after an explicit
  * "0 <real> 1" uid_map/gid_map write - exactly what every container
  * runtime (runc, crun, ...) does before entering the mapped identity, and
  * a strictly stronger check than shadow_checker_user()'s "did the id
@@ -1157,8 +1155,8 @@ static void shadow_checker_sigusr1_handler(int sig)
 
 /*
  * ---------------------------------------------------------------------
- * PID namespace signal delivery: kill(2) (shadow_ns_pid.c's kill/tgkill/
- * tkill hooks translate a virtual target pid to the real task) must still
+ * PID namespace signal delivery: kill(2) through vendor_kernel's vendored
+ * pid-translation path must still
  * deliver a real signal, not just return 0. A grandchild inside the new
  * pid namespace announces its own (namespace-local) pid and blocks for
  * the signal; the namespace's "init" targets that exact pid with kill(2).
@@ -1300,14 +1298,14 @@ static void shadow_checker_pid_signal(void)
 /*
  * ---------------------------------------------------------------------
  * PID namespace process-group/session hooks: setpgid/getpgid/getsid
- * (shadow_ns_pid.c) exercised from the namespace's own pid-1 task, whose
+ * exercised from the namespace's own pid-1 task, whose
  * own pid/pgid/sid should all be self-consistent (namespace-local 1)
  * exactly like shadow_checker_pid()'s getpid() check above.
  *
  * A freshly unshare(CLONE_NEWPID)'d task does NOT automatically become its
  * own process group/session leader: its pgid/sid are inherited from before
- * the new pid namespace existed, and since the real (or shadow_ns
- * fallback's virtual) leader of that group/session lives outside the new
+ * the new pid namespace existed, and since the real leader of that
+ * group/session lives outside the new
  * namespace, getpgid(0)/getsid(0) legitimately report 0 there (no vnr
  * exists for a group/session leader outside the namespace) even with a
  * fully genuine vpid remap - this is correct real-kernel behaviour, not a
@@ -1424,8 +1422,8 @@ static void shadow_checker_pid_pgrp(void)
 
 /*
  * ---------------------------------------------------------------------
- * PID namespace /proc content rewriting: shadow_ns_procfs.c's read(2)/
- * pread64(2) hooks rewrite /proc/<pid>/stat's pid/ppid/pgrp/session
+ * PID namespace /proc content rewriting: vendor_kernel's read(2)/pread64(2)
+ * procfs fallback hooks rewrite /proc/<pid>/stat's pid/ppid/pgrp/session
  * fields and /proc/<pid>/status's Pid:/PPid: lines from real to
  * namespace-local virtual values (needed for e.g. `ps` to work correctly
  * inside a container). shadow_checker_pid()'s "/proc isolation" test
@@ -1501,7 +1499,7 @@ static void shadow_checker_pid_procfs_content(void)
 			/* Same private-/proc-remount technique as
 			 * shadow_checker_pid(): on a genuine kernel this is
 			 * required for /proc to reflect the new pid
-			 * namespace at all; shadow_ns's own read()/pread64()
+			 * namespace at all; vendor_kernel's read()/pread64()
 			 * translation hooks work independent of which mount
 			 * instance backs /proc, so this remount is a
 			 * harmless no-op from their point of view.
@@ -1674,9 +1672,8 @@ static void shadow_checker_pidfd(void)
 
 /*
  * ---------------------------------------------------------------------
- * ptrace(2): PTRACE_TRACEME + PTRACE_CONT round trip, matching shadow_ns_
- * pid.c's ptrace hook (which translates a virtual target pid before
- * forwarding to the real syscall).
+ * ptrace(2): PTRACE_TRACEME + PTRACE_CONT round trip, matching the vendored
+ * pid-target translation path before forwarding to the real syscall.
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_ptrace(void)
@@ -1720,8 +1717,8 @@ static void shadow_checker_ptrace(void)
 
 /*
  * ---------------------------------------------------------------------
- * wait4(2)/waitid(2): confirm both reaping paths hooked by shadow_ns_
- * pid.c report the correct pid and exit status, not just success/0.
+ * wait4(2)/waitid(2): confirm both vendored reaping paths report the correct
+ * pid and exit status, not just success/0.
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_wait(void)
@@ -1778,7 +1775,7 @@ static void shadow_checker_wait(void)
 /*
  * ---------------------------------------------------------------------
  * System V semaphores: semget/semctl(SETVAL,GETVAL)/semop, matching
- * shadow_sysvipc_hooks.c's semget/semctl/semop/semtimedop hooks.
+ * vendor_kernel's hooked SysV semaphore path.
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_sysv_sem(void)
@@ -1822,8 +1819,8 @@ static void shadow_checker_sysv_sem(void)
 
 /*
  * ---------------------------------------------------------------------
- * System V shared memory: shmget/shmat/shmdt, matching shadow_sysvipc_
- * hooks.c's shmget/shmat/shmdt/shmctl hooks.
+ * System V shared memory: shmget/shmat/shmdt, matching vendor_kernel's hooked
+ * SysV shared-memory path.
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_sysv_shm(void)
@@ -1868,7 +1865,7 @@ static void shadow_checker_sysv_shm(void)
 /*
  * ---------------------------------------------------------------------
  * POSIX mqueue attribute get/set: mq_getattr/mq_setattr, matching
- * shadow_mqueue_hooks.c's mq_getsetattr hook.
+ * vendor_kernel's hooked mq_getsetattr path.
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_mqueue_attr(void)

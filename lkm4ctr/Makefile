@@ -38,11 +38,24 @@ lkm4ctr-objs := \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
 	vendor_kernel/glue/vendor_kernel_ipc_compat.o \
 	vendor_kernel/fs/nsfs.o \
+	vendor_kernel/fs/overlayfs/super.o \
+	vendor_kernel/fs/overlayfs/namei.o \
+	vendor_kernel/fs/overlayfs/util.o \
+	vendor_kernel/fs/overlayfs/inode.o \
+	vendor_kernel/fs/overlayfs/dir.o \
+	vendor_kernel/fs/overlayfs/readdir.o \
+	vendor_kernel/fs/overlayfs/copy_up.o \
+	vendor_kernel/fs/overlayfs/export.o \
+	vendor_kernel/fs/overlayfs/file.o \
+	vendor_kernel/fs/overlayfs/params.o \
+	vendor_kernel/fs/overlayfs/xattrs.o \
 	vendor_kernel/kernel/cgroup/namespace.o \
 	vendor_kernel/kernel/time/namespace.o \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_procfs.o \
+	vendor_kernel/glue/vendor_kernel_overlay.o \
+	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
 	vendor_kernel/glue/vendor_kernel_diag.o \
 	vendor_kernel/glue/vendor_kernel_compat.o
 

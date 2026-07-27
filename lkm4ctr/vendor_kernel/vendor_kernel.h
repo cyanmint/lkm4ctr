@@ -26,6 +26,7 @@
 #include <linux/cred.h>
 #include <linux/rcupdate.h>
 #include <linux/spinlock.h>
+#include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/file.h>
 #include <linux/ipc.h>
@@ -61,6 +62,27 @@ struct vns_registry {
 };
 
 extern struct vns_registry vendor_kernel_registry;
+
+/*
+ * vendored fs/overlayfs (vendor_kernel/fs/overlayfs/). vns_ovl_fs_type
+ * uses the same name as upstream, "overlay", but is never
+ * register_filesystem()'d directly: glue/vendor_kernel_overlay.c hooks
+ * get_fs_type() and always hands this struct out for the name "overlay"
+ * -- regardless of whether the running kernel has its own working
+ * overlayfs -- so "mount -t overlay ..." always uses this vendored
+ * implementation while lkm4ctr.ko is loaded. See fs/overlayfs/super.c.
+ * Lifecycle is chained from vendor_kernel_init()/vendor_kernel_exit();
+ * vns_ovl_mount_count feeds vendor_kernel's diagfs status
+ * (glue/vendor_kernel_diag.c).
+ */
+extern atomic_t vns_ovl_mount_count;
+extern struct file_system_type vns_ovl_fs_type;
+int vns_ovl_init(void);
+void vns_ovl_exit(void);
+int vns_overlay_init(void);
+void vns_overlay_exit(void);
+size_t vns_overlay_diag_snprintf(char *buf, size_t buflen);
+
 extern int (*vns_proc_alloc_inum_fn)(unsigned int *);
 extern void (*vns_proc_free_inum_fn)(unsigned int);
 extern struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace *, struct user_namespace *, struct fs_struct *);
@@ -114,6 +136,26 @@ static inline void vns_count_inc(void *count, bool is_refcount)
 #define vns_get_count(ptr) \
 	vns_count_inc((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
 
+/*
+ * [BUILD-COMPAT] refcount_dec_and_lock() itself is not always exported /
+ * present in a given GKI KMI's trimmed symbol table ("Unknown symbol
+ * refcount_dec_and_lock (err -2)" observed at insmod on some KMIs), but its
+ * upstream implementation (lib/refcount.c) is trivially reproducible from
+ * ordinary always-available inline primitives (refcount_dec_and_test(),
+ * spin_lock()/spin_unlock()) without needing to resolve the real symbol at
+ * all. This is a faithful reimplementation of refcount_dec_and_lock(),
+ * intentionally not calling the real kernel symbol by name.
+ */
+static inline bool vns_refcount_dec_and_lock(refcount_t *r, spinlock_t *lock)
+{
+	spin_lock(lock);
+	if (!refcount_dec_and_test(r)) {
+		spin_unlock(lock);
+		return false;
+	}
+	return true;
+}
+
 static inline void vns_zero_stashed(struct ns_common *ns)
 {
 	memset(&ns->stashed, 0, sizeof(ns->stashed));
@@ -131,7 +173,8 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
-#define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->count, (lock))
+#define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->count, (lock))
+#define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
 #else
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
@@ -145,7 +188,8 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
-#define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->ns.count, (lock))
+#define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->ns.count, (lock))
+#define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define VNS_TIME_REF_INIT .ns.count = REFCOUNT_INIT(1),
 #endif
 
@@ -213,6 +257,14 @@ extern const struct proc_ns_operations vns_ipcns_operations;
 struct cgroup_namespace *vns_copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns, struct cgroup_namespace *old_cgroup_ns);
 void vns_put_cgroup_ns(struct cgroup_namespace *ns);
 extern const struct proc_ns_operations vns_cgroupns_operations;
+/*
+ * vns_default_cgroup_ns / vns_cgroup_default_init() (kernel/cgroup/namespace.c)
+ * -- module-owned default cgroup_namespace, always used as
+ * vns_init_nsproxy.cgroup_ns regardless of whether the running kernel's own
+ * init_cgroup_ns can be resolved, mirroring vns_default_ipc_ns/vns_init_time_ns.
+ */
+extern struct cgroup_namespace vns_default_cgroup_ns;
+void vns_cgroup_default_init(void);
 
 extern struct time_namespace vns_init_time_ns;
 struct time_namespace *vns_copy_time_ns(unsigned long flags, struct user_namespace *user_ns, struct time_namespace *old_ns);
@@ -307,6 +359,15 @@ extern struct shadow_hook *vendor_kernel_procfs_hooks[];
 
 /* compat layer (glue/vendor_kernel_compat.c) */
 extern struct ucounts vns_ucounts_stub;
+/*
+ * vns_init_cgroup_ns_ptr is the best-effort resolved pointer to the *real*
+ * kernel's init_cgroup_ns data object (resolved via shadow_hook_resolve() in
+ * glue/vendor_kernel_compat.c), kept for cosmetic bookkeeping only -- mirroring
+ * vns_init_ipc_ns_ptr below. It is never installed onto vns_init_nsproxy.cgroup_ns:
+ * that field always points at the module-owned vns_default_cgroup_ns singleton
+ * (kernel/cgroup/namespace.c), regardless of whether the running kernel's own
+ * init_cgroup_ns resolves successfully.
+ */
 #ifdef CONFIG_CGROUPS
 extern struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 #endif
@@ -385,6 +446,11 @@ int vns_commit_creds(struct cred *new);
 bool vns_file_ns_capable(const struct file *file, struct user_namespace *ns,
 			 int cap);
 void __noreturn vns_do_exit(long error_code);
+pid_t vns_pid_nr_ns(struct pid *pid, struct pid_namespace *ns);
+#ifdef CONFIG_KEYS
+void vns_key_put(struct key *key);
+#endif
+void vns_kill_litter_super(struct super_block *sb);
 void vns_sem_init_ns(struct ipc_namespace *ns);
 void vns_sem_exit_ns(struct ipc_namespace *ns);
 void vns_shm_init_ns(struct ipc_namespace *ns);
@@ -465,6 +531,11 @@ bool vns_is_file_shm_hugepages(struct file *file);
 #define commit_creds vns_commit_creds
 #define file_ns_capable vns_file_ns_capable
 #define do_exit vns_do_exit
+#define pid_nr_ns vns_pid_nr_ns
+#ifdef CONFIG_KEYS
+#define key_put vns_key_put
+#endif
+#define kill_litter_super vns_kill_litter_super
 #define msg_exit_ns vns_msg_exit_ns
 #define shm_destroy_orphaned vns_shm_destroy_orphaned
 #define exit_shm vns_exit_shm
