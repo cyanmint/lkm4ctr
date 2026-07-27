@@ -342,6 +342,37 @@ int vendor_kernel_init(void)
 		return hooked;
 	}
 
+	/*
+	 * Best-effort: make sure /dev/mqueue is already a working mountpoint by
+	 * the time this returns, instead of only reacting to a container's own
+	 * mount(2) call that init.rc's boot-time attempt may already have
+	 * failed before this (typically late-loaded) module was ever inserted.
+	 * See glue/vendor_kernel_ipc_mount.c for the full rationale. Never
+	 * allowed to fail vendor_kernel_init() itself.
+	 *
+	 * Deliberately called here, last, after every step above that can
+	 * still return an error has already succeeded (vns_ipc_default_init()
+	 * itself used to call this right before its own "return 0;", which is
+	 * too early: any *subsequent* failure in this function -- e.g.
+	 * vns_exit_hook_init(), either shadow_hook_install_all(), or
+	 * vns_overlay_init() above -- unwound back through
+	 * vns_ipc_default_exit(), whose vns_mqueue_dev_teardown() detaches
+	 * the mount via path_umount() but can only *defer* its real
+	 * superblock teardown (cleanup_mnt()/deactivate_super()) to task_work
+	 * run when the current task next returns to userspace (see that
+	 * function's own comment) -- i.e. once insmod's init_module() syscall
+	 * itself returns. But a failed vendor_kernel_init() means
+	 * lkm4ctr_init() itself fails, which the kernel's module loader
+	 * unwinds by freeing this module's memory synchronously, well before
+	 * that deferred task_work runs. The mount's superblock (owned by this
+	 * module's own mqueue_fs_type) then outlives the module, so the
+	 * deferred deactivate_super() call panics on a use-after-free once it
+	 * finally runs. Performing this mount only once nothing else in this
+	 * function can still fail closes that window entirely: from here on,
+	 * vendor_kernel_init() unconditionally succeeds.
+	 */
+	vns_mqueue_dev_ensure();
+
 	vendor_kernel_enabled = true;
 	LKM4CTR_INFO("vendor_kernel", "loaded (%d hook(s) installed)", total_hooked);
 	if (!vns_pidns_runtime_supported)

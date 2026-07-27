@@ -352,8 +352,7 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 #endif
 
 /*
- * [BUILD-COMPAT] d_drop(), uuid_gen(), seq_escape() (reached indirectly via
- * the seq_show_option() inline in params.c) and ns_capable_noaudit() are all
+ * [BUILD-COMPAT] d_drop(), uuid_gen() and ns_capable_noaudit() are all
  * genuinely EXPORT_SYMBOL'd on every KMI in our support matrix, but -- like
  * every other name in VNS_OVL_VFS_COMPAT_LIST -- may still be trimmed from a
  * production GKI build's module symbol table (CONFIG_TRIM_UNUSED_KSYMS,
@@ -362,6 +361,20 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
  * via shadow_hook_resolve() like the rest of this list. vfs_parse_fs_string()
  * is resolved the same way for MID/OLD, which alone reach the
  * vfs_parse_monolithic_sep() fallback further down this file that calls it.
+ *
+ * seq_escape() is deliberately NOT in this list, even though params.c's
+ * seq_show_option() calls reach it indirectly: since (at least)
+ * android13-5.15 through the current NEW tier, seq_escape() is a `static
+ * inline` wrapper around the real, exported seq_escape_mem() (see
+ * include/linux/seq_file.h), not its own kallsyms symbol at all --
+ * shadow_hook_resolve("seq_escape") always fails on those KMIs, which
+ * previously made vns_ovl_vfs_compat_resolve() treat it as a mandatory,
+ * unresolvable symbol and fail vns_overlay_init() outright on every load
+ * (taking the whole rest of vendor_kernel down with it on the resulting
+ * error-unwind path, since every hook installed before that point gets torn
+ * back down too). seq_show_option()'s call to seq_escape() is fully inlined
+ * at the point <linux/seq_file.h> is parsed (always before this header), so
+ * nothing here ever actually needs a resolved seq_escape pointer at runtime.
  */
 
 #if VNS_OVL_TIER_NEW
@@ -395,7 +408,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(__d_drop) \
 	X(d_drop) \
 	X(uuid_gen) \
-	X(seq_escape) \
 	X(ns_capable_noaudit) \
 	X(vfs_getattr) \
 	X(generic_fill_statx_attr) \
@@ -490,7 +502,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(__d_drop) \
 	X(d_drop) \
 	X(uuid_gen) \
-	X(seq_escape) \
 	X(ns_capable_noaudit) \
 	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \
@@ -570,7 +581,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(__d_drop) \
 	X(d_drop) \
 	X(uuid_gen) \
-	X(seq_escape) \
 	X(ns_capable_noaudit) \
 	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \

@@ -108,14 +108,19 @@ int vns_ipc_default_init(void)
 	vns_default_ipc_ns.ns.ops = &vns_ipcns_operations;
 
 	/*
-	 * Best-effort: make sure /dev/mqueue is already a working mountpoint by
-	 * the time this returns, instead of only reacting to a container's
-	 * own mount(2) call that init.rc's boot-time attempt may already have
-	 * failed before this (typically late-loaded) module was ever
-	 * inserted. See glue/vendor_kernel_ipc_mount.c for the full
-	 * rationale. Never allowed to fail vns_ipc_default_init() itself.
+	 * The proactive /dev/mqueue mount (vns_mqueue_dev_ensure(), see
+	 * glue/vendor_kernel_ipc_mount.c) is deliberately NOT performed here
+	 * anymore: it is now vendor_kernel_init()'s own responsibility, done
+	 * only once every other step that could still fail has already
+	 * succeeded. See the comment at that call site for why -- in short,
+	 * mounting here and then having some *later* vendor_kernel_init()
+	 * step fail used to leave a mount whose real superblock teardown
+	 * (deferred to task_work by path_umount(), see
+	 * vns_mqueue_dev_teardown()'s own comment) outlives this module's own
+	 * memory once the failed load is synchronously unwound, causing a
+	 * guaranteed use-after-free panic in deactivate_super() shortly after
+	 * insmod returns.
 	 */
-	vns_mqueue_dev_ensure();
 	return 0;
 
 fail_ipc_sysctls:
