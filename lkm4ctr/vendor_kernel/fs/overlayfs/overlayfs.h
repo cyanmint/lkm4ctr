@@ -18,7 +18,13 @@
 #include <linux/exportfs.h>
 #include <linux/splice.h>
 #include <linux/errseq.h>
+/* [BUILD-COMPAT] <linux/fileattr.h> (and the generic ->fileattr_get/_set
+ * inode_operations members it defines) only exist >=5.13; see
+ * glue/vendor_kernel_ovl_vfs_compat.h for the pre-5.13 struct fileattr
+ * shim and inode.c for the inode_operations field guard. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 #include <linux/fileattr.h>
+#endif
 /*
  * lkm4ctr [BUILD-COMPAT]: the extra Linux headers included above (beyond
  * upstream's plain <linux/kernel.h>/<linux/uuid.h>/<linux/fs.h>/

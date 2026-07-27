@@ -77,6 +77,17 @@
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
 
+/* <linux/backing-file.h> declares backing_file_read_iter()/write_iter()/...
+ * (>=6.9) and is what VNS_OVL_VFS_COMPAT_LIST_BF's typeof()-based resolution
+ * below needs in scope. Include it here (once, centrally) rather than relying
+ * on every .c file that transitively includes this header to remember to add
+ * its own version-gated include -- any TU that pulls in overlayfs.h (and
+ * hence this header) is compiled on every tier, so it must see the
+ * declaration whenever VNS_OVL_HAVE_BACKING_FILE_RW is true. */
+#if VNS_OVL_HAVE_BACKING_FILE_RW
+#include <linux/backing-file.h>
+#endif
+
 /* fd_file()/BORROWED_FD()/CLONED_FD() (6.12+): the "struct fd" accessor
  * helpers and packed .word representation used by the unified 6.12
  * overlayfs/file.c landed after v6.11 (compare
@@ -678,8 +689,8 @@ static inline void super_set_uuid(struct super_block *sb, const u8 *uuid,
 }
 #endif
 
-/* exportfs_can_decode_fh() (6.6+): true iff the fs can decode file handles. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* exportfs_can_decode_fh() (6.7+): true iff the fs can decode file handles. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
 {
 	return nop && nop->fh_to_dentry;
@@ -696,10 +707,22 @@ static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
 #define generic_encode_ino32_fh NULL
 #endif
 
-/* kernel_file_open() (6.6+): open a struct file from a path. Pre-6.6
- * overlayfs used dentry_open() with the same (path, flags, cred) shape. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* kernel_file_open() (6.5+): open a struct file from a path. The call shape
+ * changed twice: pre-6.5 it didn't exist at all (dentry_open() with the same
+ * (path, flags, cred) shape is the equivalent); [6.5,6.10) it took an extra
+ * `struct inode *inode` argument (dropped again at 6.10, back to the
+ * (path, flags, cred) shape overlayfs actually calls it with). */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 #define kernel_file_open(path, flags, cred) dentry_open((path), (flags), (cred))
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
+						     int flags,
+						     const struct cred *cred)
+{
+	return kernel_file_open(path, flags, d_inode(path->dentry), cred);
+}
+#define kernel_file_open(path, flags, cred) \
+	vns_ovl_kernel_file_open((path), (flags), (cred))
 #endif
 
 /* backing_file_open()/backing_tmpfile_open() (6.6+): open a real file while
@@ -799,11 +822,12 @@ static inline int vfs_parse_monolithic_sep(struct fs_context *fc, void *data,
 }
 #endif
 
-/* sb_has_encoding() (6.8+): true iff a super_block carries a Unicode
- * encoding map for casefold/case-insensitive lookups. Older kernels expose the
- * same state directly as sb->s_encoding (see include/linux/fs.h in v6.1), so
- * use that exact field. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+/* sb_has_encoding() (mainline 6.9+, but Android GKI backports it as early as
+ * android15-6.6): true iff a super_block carries a Unicode encoding map for
+ * casefold/case-insensitive lookups. Kernels without it expose the same
+ * state directly as sb->s_encoding (see include/linux/fs.h in v6.1), so use
+ * that exact field. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
 static inline bool sb_has_encoding(struct super_block *sb)
 {
 #if IS_ENABLED(CONFIG_UNICODE)
@@ -1006,6 +1030,125 @@ static inline int vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct f
 #define exportfs_encode_inode_fh(inode, fid, max_len, parent, flags) \
 	vns_ovl_exportfs_encode_inode_fh((inode), (fid), (max_len), (parent), (flags))
 #endif /* MID || OLD */
+
+/* FS_VERITY_MAX_DIGEST_SIZE (5.19+, <linux/fsverity.h>): the max size of a
+ * verity file digest. Pre-5.19 the same value is available directly as
+ * SHA512_DIGEST_SIZE (fs-verity's largest supported hash algorithm), which
+ * is what the 5.19+ definition itself expands to -- see
+ * https://raw.githubusercontent.com/torvalds/linux/v5.19/include/linux/fsverity.h */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 19, 0)
+#include <crypto/sha2.h>
+#ifndef FS_VERITY_MAX_DIGEST_SIZE
+#define FS_VERITY_MAX_DIGEST_SIZE SHA512_DIGEST_SIZE
+#endif
+/* i_user_ns() (5.19+): the filesystem-side user namespace an inode's
+ * uid/gid are stored relative to. Pre-5.19 the same value is reached
+ * directly via inode->i_sb->s_user_ns (see i_uid_read()/i_uid_write() in
+ * include/linux/fs.h, v5.15). */
+#ifndef i_user_ns
+#define i_user_ns(inode) ((inode)->i_sb->s_user_ns)
+#endif
+#endif
+
+/* vfsuid_t/vfsgid_t (6.0+, <linux/mnt_idmapping.h>): the idmapped-mount-aware
+ * uid/gid wrapper types and their accessors. Pre-6.0 kernels have idmapped
+ * mounts (since 5.12) but represent a mapped id as a plain kuid_t/kgid_t
+ * (see i_uid_into_mnt()/kuid_into_mnt() in include/linux/fs.h, v5.15).
+ * vfsuid_t/vfsgid_t are ABI-identical wrappers around kuid_t/kgid_t (same
+ * single-member layout), so alias the types directly and reimplement the
+ * handful of accessors overlayfs uses in terms of from_kuid()/make_kuid()
+ * (the same primitives make_vfsuid()/i_uid_into_mnt() build on upstream). On
+ * VNS_OVL_TIER_OLD (<5.12, no idmapped mounts) `idmap`/`mnt_userns` is always
+ * `&nop_mnt_idmap` (== init_user_ns, see ovl_mnt_idmap() above), so these
+ * degrade to plain identity mapping. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+typedef kuid_t vfsuid_t;
+typedef kgid_t vfsgid_t;
+
+static inline kuid_t vfsuid_into_kuid(vfsuid_t vfsuid)
+{
+	return vfsuid;
+}
+
+static inline kgid_t vfsgid_into_kgid(vfsgid_t vfsgid)
+{
+	return vfsgid;
+}
+
+static inline vfsuid_t make_vfsuid(struct user_namespace *mnt_userns,
+				    struct user_namespace *fs_userns,
+				    kuid_t kuid)
+{
+	uid_t uid = from_kuid(fs_userns, kuid);
+
+	if (uid == (uid_t)-1)
+		return INVALID_UID;
+	return make_kuid(mnt_userns, uid);
+}
+
+static inline vfsgid_t make_vfsgid(struct user_namespace *mnt_userns,
+				    struct user_namespace *fs_userns,
+				    kgid_t kgid)
+{
+	gid_t gid = from_kgid(fs_userns, kgid);
+
+	if (gid == (gid_t)-1)
+		return INVALID_GID;
+	return make_kgid(mnt_userns, gid);
+}
+
+static inline vfsuid_t i_uid_into_vfsuid(struct user_namespace *mnt_userns,
+					 const struct inode *inode)
+{
+	return make_vfsuid(mnt_userns, i_user_ns(inode), inode->i_uid);
+}
+
+static inline vfsgid_t i_gid_into_vfsgid(struct user_namespace *mnt_userns,
+					 const struct inode *inode)
+{
+	return make_vfsgid(mnt_userns, i_user_ns(inode), inode->i_gid);
+}
+#endif /* < 6.0 */
+
+/* <linux/fileattr.h>/struct fileattr (5.13+): the generic FS_IOC_GETFLAGS/
+ * FS_IOC_FSGETXATTR container type, and the ->fileattr_get/->fileattr_set
+ * inode_operations members + vfs_fileattr_get()/vfs_fileattr_set() VFS
+ * helpers built around it, do not exist before 5.13 (see
+ * https://raw.githubusercontent.com/torvalds/linux/v5.13/include/linux/fileattr.h,
+ * absent at v5.12). Only android12-5.10/android13-5.10 (VNS_OVL_TIER_OLD)
+ * fall below this line in our support matrix. Since the ioctl-to-inode_op
+ * dispatch itself doesn't exist pre-5.13, there is no clean shim: overlay
+ * files on these two KMIs simply do not support FS_IOC_GETFLAGS/
+ * FS_IOC_FSGETXATTR passthrough to the upper/lower filesystem (a real,
+ * accepted feature degradation, not a build workaround) -- the
+ * ->fileattr_get/->fileattr_set inode_operations fields are dropped
+ * entirely for this tier (see inode.c), and vfs_fileattr_get()/
+ * vfs_fileattr_set() are stubbed out below purely so the (now dead, never
+ * wired into any inode_operations) ovl_real_fileattr_get()/_set() in
+ * inode.c still link. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 13, 0)
+struct fileattr {
+	u32	flags;
+	u32	fsx_xflags;
+	u32	fsx_extsize;
+	u32	fsx_nextents;
+	u32	fsx_projid;
+	u32	fsx_cowextsize;
+	bool	flags_valid:1;
+	bool	fsx_valid:1;
+};
+
+static inline int vfs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int vfs_fileattr_set(struct user_namespace *mnt_userns,
+				   struct dentry *dentry, struct fileattr *fa)
+{
+	return -EOPNOTSUPP;
+}
+#endif /* < 5.13 */
 
 #endif /* !VNS_OVL_VFS_COMPAT_IMPL */
 

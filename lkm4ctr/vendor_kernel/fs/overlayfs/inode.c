@@ -29,7 +29,9 @@
 #include <linux/xattr.h>
 #include <linux/ratelimit.h>
 #include <linux/fiemap.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 #include <linux/fileattr.h>
+#endif
 #include <linux/security.h>
 #include <linux/namei.h>
 #include <linux/posix_acl.h>
@@ -774,8 +776,10 @@ static const struct inode_operations ovl_file_inode_operations = {
 	OVL_IOPS_ACL_FIELDS
 	.update_time	= ovl_update_time,
 	.fiemap		= ovl_fiemap,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 	.fileattr_get	= ovl_fileattr_get,
 	.fileattr_set	= ovl_fileattr_set,
+#endif
 };
 
 static const struct inode_operations ovl_symlink_inode_operations = {
