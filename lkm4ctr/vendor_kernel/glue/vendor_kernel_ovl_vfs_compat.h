@@ -1576,6 +1576,11 @@ static inline void *vns_ovl_krealloc_array(void *p, size_t new_n,
 {
 	size_t bytes;
 
+	/* Mirrors upstream krealloc_array()'s own overflow handling: a
+	 * silent NULL return on overflow, treated by callers the same as
+	 * any other allocation failure. No extra diagnostic is emitted
+	 * here, consistent with the real symbol this is standing in for.
+	 */
 	if (unlikely(check_mul_overflow(new_n, new_size, &bytes)))
 		return NULL;
 	return krealloc(p, bytes, flags);
