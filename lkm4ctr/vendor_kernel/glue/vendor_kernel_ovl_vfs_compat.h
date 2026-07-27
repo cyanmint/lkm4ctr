@@ -77,6 +77,41 @@
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
 
+/* fd_file()/BORROWED_FD()/CLONED_FD() (6.12+): the "struct fd" accessor
+ * helpers and packed .word representation used by the unified 6.12
+ * overlayfs/file.c landed after v6.11 (compare
+ * https://raw.githubusercontent.com/torvalds/linux/v6.11/include/linux/file.h
+ * vs.
+ * https://raw.githubusercontent.com/torvalds/linux/v6.12/include/linux/file.h).
+ * On older kernels in our support window, struct fd is still the plain
+ * { .file, .flags } aggregate, so provide compatible accessors and small
+ * constructors for "borrowed" and "cloned" references. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#ifndef fd_file
+#define fd_file(f) ((f).file)
+#endif
+#ifndef fd_empty
+#define fd_empty(f) (!fd_file(f))
+#endif
+static inline struct fd vns_ovl_borrowed_fd(struct file *file)
+{
+	return (struct fd){ .file = file, .flags = 0 };
+}
+static inline struct fd vns_ovl_cloned_fd(struct file *file)
+{
+	return (struct fd){ .file = file, .flags = FDPUT_FPUT };
+}
+#else
+static inline struct fd vns_ovl_borrowed_fd(struct file *file)
+{
+	return BORROWED_FD(file);
+}
+static inline struct fd vns_ovl_cloned_fd(struct file *file)
+{
+	return CLONED_FD(file);
+}
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Idmap type / accessor bridging for tiers MID and OLD (pre-6.3).     */
 /* ------------------------------------------------------------------ */
@@ -723,6 +758,60 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
 #define fsparam_string_empty(NAME, OPT) \
 	__fsparam(fs_param_is_string, NAME, OPT, fs_param_can_be_empty, NULL)
 #endif
+#endif
+
+/* vfs_parse_monolithic_sep() (added after 6.1): parse old mount(2)-style
+ * "key[,key=value...]" data using a filesystem-provided separator callback.
+ * The unified 6.12 params.c needs this for overlayfs's backslash-aware
+ * lowerdir splitting. Older fs_context code only exposes vfs_parse_fs_string(),
+ * so reproduce the later helper's effect locally by iterating the separator
+ * callback and feeding each parsed token through the existing string parser. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+static inline int vfs_parse_monolithic_sep(struct fs_context *fc, void *data,
+					   char *(*sep)(char **))
+{
+	char *options, *cursor, *param;
+	int ret = 0;
+
+	if (!data)
+		return 0;
+
+	options = kstrdup(data, GFP_KERNEL);
+	if (!options)
+		return -ENOMEM;
+
+	cursor = options;
+	while ((param = sep(&cursor)) != NULL) {
+		char *value = strchr(param, '=');
+
+		if (value) {
+			*value++ = '\0';
+			ret = vfs_parse_fs_string(fc, param, value, strlen(value));
+		} else {
+			ret = vfs_parse_fs_string(fc, param, NULL, 0);
+		}
+		if (ret)
+			break;
+	}
+
+	kfree(options);
+	return ret;
+}
+#endif
+
+/* sb_has_encoding() (6.8+): true iff a super_block carries a Unicode
+ * encoding map for casefold/case-insensitive lookups. Older kernels expose the
+ * same state directly as sb->s_encoding (see include/linux/fs.h in v6.1), so
+ * use that exact field. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+static inline bool sb_has_encoding(struct super_block *sb)
+{
+#if IS_ENABLED(CONFIG_UNICODE)
+	return sb->s_encoding;
+#else
+	return false;
+#endif
+}
 #endif
 
 /* super_block::s_iflags bits used by the 6.12 source that were added later:

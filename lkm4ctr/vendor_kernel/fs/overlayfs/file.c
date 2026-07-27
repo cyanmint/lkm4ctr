@@ -28,7 +28,9 @@
 #include <linux/xattr.h>
 #include <linux/uio.h>
 #include <linux/uaccess.h>
+#include <linux/splice.h>
 #include <linux/security.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 /* [BUILD-COMPAT] backing-file.h only exists >=6.9 (backing_file_read_iter etc.);
  * backing_file_open() lives in <linux/fs.h> on 6.6. */
@@ -36,6 +38,64 @@
 #include <linux/backing-file.h>
 #endif
 #include "overlayfs.h"
+
+#if VNS_OVL_NEED_BACKING_FILE_FALLBACK
+struct ovl_aio_req {
+	struct kiocb iocb;
+	refcount_t ref;
+	struct kiocb *orig_iocb;
+};
+
+static rwf_t ovl_iocb_to_rwf(int ifl)
+{
+	rwf_t flags = 0;
+
+	if (ifl & IOCB_NOWAIT)
+		flags |= RWF_NOWAIT;
+	if (ifl & IOCB_HIPRI)
+		flags |= RWF_HIPRI;
+	if (ifl & IOCB_DSYNC)
+		flags |= RWF_DSYNC;
+	if (ifl & IOCB_SYNC)
+		flags |= RWF_SYNC;
+
+	return flags;
+}
+
+static inline void ovl_aio_put(struct ovl_aio_req *aio_req)
+{
+	if (refcount_dec_and_test(&aio_req->ref)) {
+		fput(aio_req->iocb.ki_filp);
+		kfree(aio_req);
+	}
+}
+
+static void ovl_aio_cleanup_handler(struct ovl_aio_req *aio_req)
+{
+	struct kiocb *iocb = &aio_req->iocb;
+	struct kiocb *orig_iocb = aio_req->orig_iocb;
+
+	if (iocb->ki_flags & IOCB_WRITE) {
+		struct inode *inode = file_inode(orig_iocb->ki_filp);
+
+		kiocb_end_write(iocb);
+		ovl_copyattr(inode);
+	}
+
+	orig_iocb->ki_pos = iocb->ki_pos;
+	ovl_aio_put(aio_req);
+}
+
+static void ovl_aio_rw_complete(struct kiocb *iocb, long res)
+{
+	struct ovl_aio_req *aio_req = container_of(iocb,
+						   struct ovl_aio_req, iocb);
+	struct kiocb *orig_iocb = aio_req->orig_iocb;
+
+	ovl_aio_cleanup_handler(aio_req);
+	orig_iocb->ki_complete(orig_iocb, res);
+}
+#endif
 
 static char ovl_whatisit(struct inode *inode, struct inode *realinode)
 {
@@ -71,8 +131,13 @@ static struct file *ovl_open_realfile(const struct file *file,
 		if (!inode_owner_or_capable(real_idmap, realinode))
 			flags &= ~O_NOATIME;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 		realfile = backing_file_open(file_user_path((struct file *) file),
 					     flags, realpath, current_cred());
+#else
+		realfile = backing_file_open(&file->f_path, flags, realpath,
+					     current_cred());
+#endif
 	}
 	revert_creds(old_cred);
 
@@ -120,7 +185,7 @@ static int ovl_real_fdget_meta(const struct file *file, struct fd *real,
 	struct path realpath;
 	int err;
 
-	real->word = (unsigned long)realfile;
+	*real = vns_ovl_borrowed_fd(realfile);
 
 	if (allow_meta) {
 		ovl_path_real(dentry, &realpath);
@@ -140,7 +205,7 @@ static int ovl_real_fdget_meta(const struct file *file, struct fd *real,
 		struct file *f = ovl_open_realfile(file, &realpath);
 		if (IS_ERR(f))
 			return PTR_ERR(f);
-		real->word = (unsigned long)f | FDPUT_FPUT;
+		*real = vns_ovl_cloned_fd(f);
 		return 0;
 	}
 
@@ -157,7 +222,7 @@ static int ovl_real_fdget(const struct file *file, struct fd *real)
 		struct file *f = ovl_dir_real_file(file, false);
 		if (IS_ERR(f))
 			return PTR_ERR(f);
-		real->word = (unsigned long)f;
+		*real = vns_ovl_borrowed_fd(f);
 		return 0;
 	}
 
@@ -254,10 +319,12 @@ static void ovl_file_modified(struct file *file)
 	ovl_copyattr(file_inode(file));
 }
 
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 static void ovl_file_end_write(struct file *file, loff_t pos, ssize_t ret)
 {
 	ovl_file_modified(file);
 }
+#endif
 
 static void ovl_file_accessed(struct file *file)
 {
@@ -292,11 +359,15 @@ static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *file = iocb->ki_filp;
 	struct fd real;
 	ssize_t ret;
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(file)->i_sb),
 		.user_file = file,
 		.accessed = ovl_file_accessed,
 	};
+#else
+	const struct cred *old_cred;
+#endif
 
 	if (!iov_iter_count(iter))
 		return 0;
@@ -305,8 +376,41 @@ static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	if (ret)
 		return ret;
 
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	ret = backing_file_read_iter(fd_file(real), iter, iocb, iocb->ki_flags,
 				     &ctx);
+#else
+	ret = -EINVAL;
+	if (iocb->ki_flags & IOCB_DIRECT &&
+	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+		goto out_fdput;
+
+	old_cred = ovl_override_creds(file_inode(file)->i_sb);
+	if (is_sync_kiocb(iocb)) {
+		ret = vfs_iter_read(fd_file(real), iter, &iocb->ki_pos,
+				    ovl_iocb_to_rwf(iocb->ki_flags));
+	} else {
+		struct ovl_aio_req *aio_req;
+
+		ret = -ENOMEM;
+		aio_req = kzalloc(sizeof(*aio_req), GFP_KERNEL);
+		if (!aio_req)
+			goto out_revert;
+
+		aio_req->orig_iocb = iocb;
+		kiocb_clone(&aio_req->iocb, iocb, get_file(fd_file(real)));
+		aio_req->iocb.ki_complete = ovl_aio_rw_complete;
+		refcount_set(&aio_req->ref, 2);
+		ret = vfs_iocb_iter_read(fd_file(real), &aio_req->iocb, iter);
+		ovl_aio_put(aio_req);
+		if (ret != -EIOCBQUEUED)
+			ovl_aio_cleanup_handler(aio_req);
+	}
+out_revert:
+	revert_creds(old_cred);
+	ovl_file_accessed(file);
+out_fdput:
+#endif
 	fdput(real);
 
 	return ret;
@@ -319,11 +423,15 @@ static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct fd real;
 	ssize_t ret;
 	int ifl = iocb->ki_flags;
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(inode->i_sb),
 		.user_file = file,
 		.end_write = ovl_file_end_write,
 	};
+#else
+	const struct cred *old_cred;
+#endif
 
 	if (!iov_iter_count(iter))
 		return 0;
@@ -343,8 +451,47 @@ static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	 * Overlayfs doesn't support deferred completions, don't copy
 	 * this property in case it is set by the issuer.
 	 */
+#ifdef IOCB_DIO_CALLER_COMP
 	ifl &= ~IOCB_DIO_CALLER_COMP;
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	ret = backing_file_write_iter(fd_file(real), iter, iocb, ifl, &ctx);
+#else
+	ret = -EINVAL;
+	if (iocb->ki_flags & IOCB_DIRECT &&
+	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+		goto out_fdput;
+
+	old_cred = ovl_override_creds(file_inode(file)->i_sb);
+	if (is_sync_kiocb(iocb)) {
+		file_start_write(fd_file(real));
+		ret = vfs_iter_write(fd_file(real), iter, &iocb->ki_pos,
+				     ovl_iocb_to_rwf(ifl));
+		file_end_write(fd_file(real));
+		ovl_copyattr(inode);
+	} else {
+		struct ovl_aio_req *aio_req;
+
+		ret = -ENOMEM;
+		aio_req = kzalloc(sizeof(*aio_req), GFP_KERNEL);
+		if (!aio_req)
+			goto out_revert;
+
+		aio_req->orig_iocb = iocb;
+		kiocb_clone(&aio_req->iocb, iocb, get_file(fd_file(real)));
+		aio_req->iocb.ki_flags = ifl;
+		aio_req->iocb.ki_complete = ovl_aio_rw_complete;
+		refcount_set(&aio_req->ref, 2);
+		kiocb_start_write(&aio_req->iocb);
+		ret = vfs_iocb_iter_write(fd_file(real), &aio_req->iocb, iter);
+		ovl_aio_put(aio_req);
+		if (ret != -EIOCBQUEUED)
+			ovl_aio_cleanup_handler(aio_req);
+	}
+out_revert:
+	revert_creds(old_cred);
+out_fdput:
+#endif
 	fdput(real);
 
 out_unlock:
@@ -359,17 +506,28 @@ static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
 {
 	struct fd real;
 	ssize_t ret;
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(in)->i_sb),
 		.user_file = in,
 		.accessed = ovl_file_accessed,
 	};
+#else
+	const struct cred *old_cred;
+#endif
 
 	ret = ovl_real_fdget(in, &real);
 	if (ret)
 		return ret;
 
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	ret = backing_file_splice_read(fd_file(real), ppos, pipe, len, flags, &ctx);
+#else
+	old_cred = ovl_override_creds(file_inode(in)->i_sb);
+	ret = generic_file_splice_read(fd_file(real), ppos, pipe, len, flags);
+	revert_creds(old_cred);
+	ovl_file_accessed(in);
+#endif
 	fdput(real);
 
 	return ret;
@@ -389,11 +547,15 @@ static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct file *out,
 	struct fd real;
 	struct inode *inode = file_inode(out);
 	ssize_t ret;
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(inode->i_sb),
 		.user_file = out,
 		.end_write = ovl_file_end_write,
 	};
+#else
+	const struct cred *old_cred;
+#endif
 
 	inode_lock(inode);
 	/* Update mode */
@@ -403,7 +565,16 @@ static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct file *out,
 	if (ret)
 		goto out_unlock;
 
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	ret = backing_file_splice_write(pipe, fd_file(real), ppos, len, flags, &ctx);
+#else
+	old_cred = ovl_override_creds(inode->i_sb);
+	file_start_write(fd_file(real));
+	ret = iter_file_splice_write(pipe, fd_file(real), ppos, len, flags);
+	file_end_write(fd_file(real));
+	ovl_copyattr(inode);
+	revert_creds(old_cred);
+#endif
 	fdput(real);
 
 out_unlock:
@@ -441,13 +612,35 @@ static int ovl_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct file *realfile = file->private_data;
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(file)->i_sb),
 		.user_file = file,
 		.accessed = ovl_file_accessed,
 	};
+#else
+	const struct cred *old_cred;
+	int ret;
+#endif
 
+#if VNS_OVL_HAVE_BACKING_FILE_RW
 	return backing_file_mmap(realfile, vma, &ctx);
+#else
+	if (!realfile->f_op->mmap)
+		return -ENODEV;
+
+	if (WARN_ON(file != vma->vm_file))
+		return -EIO;
+
+	vma_set_file(vma, realfile);
+
+	old_cred = ovl_override_creds(file_inode(file)->i_sb);
+	ret = call_mmap(vma->vm_file, vma);
+	revert_creds(old_cred);
+	ovl_file_accessed(file);
+
+	return ret;
+#endif
 }
 
 static long ovl_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
