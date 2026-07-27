@@ -129,6 +129,11 @@ void vns_ipc_default_exit(void)
 {
 	vns_free_inum(&vns_default_ipc_ns.ns);
 	vns_retire_ipc_sysctls(&vns_default_ipc_ns);
+	/*
+	 * Must run before vns_mqueue_fs_exit()'s kmem_cache_destroy(), see
+	 * vns_mqueue_dev_mounted's comment in vendor_kernel_ipc_mount.c.
+	 */
+	vns_mqueue_dev_teardown();
 	vns_mqueue_fs_exit();
 }
 
