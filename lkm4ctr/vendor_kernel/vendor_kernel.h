@@ -41,6 +41,21 @@
 struct vns_task;
 struct shadow_hook;
 
+/*
+ * [BUILD-COMPAT] bsearch() (kernel/user_namespace.c's uid/gid map lookups)
+ * is EXPORT_SYMBOL'd in every KMI we target, but may still be trimmed from
+ * the running kernel's module symbol table (CONFIG_TRIM_UNUSED_KSYMS,
+ * protected-KMI allow-lists), causing "Unknown symbol bsearch" at insmod.
+ * <linux/bsearch.h> already ships a self-contained, always-inline
+ * equivalent (__inline_bsearch()) purely to let callers avoid the external
+ * call; redirect the bare name to it here instead of resolving the real
+ * kernel symbol via shadow_hook_resolve(), since it needs no kernel-internal
+ * state at all. Requires <linux/bsearch.h> to already be included at each
+ * use site (kernel/user_namespace.c includes it before this header).
+ */
+#define bsearch(key, base, num, size, cmp) \
+	__inline_bsearch((key), (base), (num), (size), (cmp))
+
 #define VNS_TASK_HASH_BITS 10
 #define VNS_CLONE_FLAGS ((unsigned long)(CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNS | \
 				CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWUSER | \

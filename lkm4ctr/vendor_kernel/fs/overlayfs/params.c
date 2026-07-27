@@ -379,7 +379,7 @@ static int ovl_ctx_realloc_lower(struct fs_context *fc)
 
 	nr = min_t(size_t, max(4096 / sizeof(*l), ctx->capacity * 2),
 		   OVL_MAX_STACK);
-	l = krealloc_array(ctx->lower, nr, sizeof(*l), GFP_KERNEL_ACCOUNT);
+	l = vns_ovl_krealloc_array(ctx->lower, nr, sizeof(*l), GFP_KERNEL_ACCOUNT);
 	if (!l)
 		return -ENOMEM;
 

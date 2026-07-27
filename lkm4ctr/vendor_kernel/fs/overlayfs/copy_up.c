@@ -27,7 +27,9 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/file.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 #include <linux/fileattr.h>
+#endif
 #include <linux/splice.h>
 #include <linux/xattr.h>
 #include <linux/security.h>

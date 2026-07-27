@@ -81,6 +81,9 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 
 #include <linux/version.h>
 #include <linux/statfs.h>
+#include <linux/seq_file.h>
+#include <linux/uuid.h>
+#include <linux/fs_context.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
@@ -348,6 +351,19 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 #define VNS_OVL_FILLDIR_T bool
 #endif
 
+/*
+ * [BUILD-COMPAT] d_drop(), uuid_gen(), seq_escape() (reached indirectly via
+ * the seq_show_option() inline in params.c) and ns_capable_noaudit() are all
+ * genuinely EXPORT_SYMBOL'd on every KMI in our support matrix, but -- like
+ * every other name in VNS_OVL_VFS_COMPAT_LIST -- may still be trimmed from a
+ * production GKI build's module symbol table (CONFIG_TRIM_UNUSED_KSYMS,
+ * protected-KMI allow-lists), producing "Unknown symbol" at insmod rather
+ * than a build failure (there is no compile-time signal for this). Resolved
+ * via shadow_hook_resolve() like the rest of this list. vfs_parse_fs_string()
+ * is resolved the same way for MID/OLD, which alone reach the
+ * vfs_parse_monolithic_sep() fallback further down this file that calls it.
+ */
+
 #if VNS_OVL_TIER_NEW
 #define VNS_OVL_VFS_COMPAT_LIST(X) \
 	X(prepare_creds) \
@@ -377,6 +393,10 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(lookup_one_positive_unlocked) \
 	X(lookup_one_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(seq_escape) \
+	X(ns_capable_noaudit) \
 	X(vfs_getattr) \
 	X(generic_fill_statx_attr) \
 	X(vfs_listxattr) \
@@ -468,6 +488,11 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(lookup_one_positive_unlocked) \
 	X(lookup_one_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(seq_escape) \
+	X(ns_capable_noaudit) \
+	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \
 	X(generic_fill_statx_attr) \
 	X(vfs_listxattr) \
@@ -543,6 +568,11 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(lookup_one_len) \
 	X(lookup_one_len_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(seq_escape) \
+	X(ns_capable_noaudit) \
+	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \
 	X(vfs_listxattr) \
 	X(get_acl) \
@@ -1512,6 +1542,44 @@ static inline vfsgid_t i_gid_into_vfsgid(struct user_namespace *mnt_userns,
 	return make_vfsgid(mnt_userns, i_user_ns(inode), inode->i_gid);
 }
 #endif /* < 6.0 */
+
+/* vma_set_file() (<linux/mm.h>) is not linkable/declared on VNS_OVL_TIER_OLD
+ * (<5.12, e.g. android12-5.10/android13-5.10): it was only added alongside
+ * the 5.15-era MID VFS API churn (present on every MID/NEW-tier KMI in our
+ * support matrix). ovl_mmap()'s manual (!VNS_OVL_HAVE_BACKING_FILE_RW)
+ * fallback path in file.c only calls it to atomically swap vma->vm_file for
+ * an already-vma->vm_file-equal file (see the WARN_ON just above the call),
+ * so a local reimplementation of the well known get_file()/fput() swap is
+ * sufficient here. */
+#if VNS_OVL_TIER_OLD
+static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	struct file *old_file = vma->vm_file;
+
+	get_file(file);
+	vma->vm_file = file;
+	if (old_file)
+		fput(old_file);
+}
+#endif
+
+/* krealloc_array() (mainline 5.15) is inconsistently backported within a
+ * single kernel PATCHLEVEL: android12-5.10 has it (include/linux/slab.h),
+ * but android13-5.10 -- otherwise the exact same 5.10.260 base, same
+ * LINUX_VERSION_CODE -- does not, so this cannot be gated by version alone.
+ * Always route ovl_ctx_realloc_lower() (params.c) through this
+ * overflow-checked local helper instead of relying on the raw
+ * krealloc_array() name/prototype being present. */
+#include <linux/overflow.h>
+static inline void *vns_ovl_krealloc_array(void *p, size_t new_n,
+					    size_t new_size, gfp_t flags)
+{
+	size_t bytes;
+
+	if (unlikely(check_mul_overflow(new_n, new_size, &bytes)))
+		return NULL;
+	return krealloc(p, bytes, flags);
+}
 
 /* <linux/fileattr.h>/struct fileattr (5.13+): the generic FS_IOC_GETFLAGS/
  * FS_IOC_FSGETXATTR container type, and the ->fileattr_get/->fileattr_set

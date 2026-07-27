@@ -25,6 +25,7 @@
 #include <linux/xattr.h>
 #include <linux/security.h>
 #include <linux/cred.h>
+#include <linux/capability.h>
 #include <linux/dcache.h>
 #include <linux/mount.h>
 #include <linux/posix_acl.h>
@@ -37,6 +38,7 @@
 #include <linux/seq_file.h>
 #include <linux/parser.h>
 #include <linux/fadvise.h>
+#include <linux/uuid.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
 #include <linux/backing-file.h>
 #endif
