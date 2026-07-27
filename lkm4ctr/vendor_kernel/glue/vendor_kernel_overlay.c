@@ -52,6 +52,14 @@
  * vendored overlayfs support is not a fatal condition for the rest of
  * vendor_kernel, so vns_overlay_init() still returns 0 in that case.
  */
+/*
+ * Lower bound 6.1: vfs_tmpfile_open()/alloc_inode_sb()/vfs_set_acl_prepare()
+ * (all used unconditionally by the vendored sources) are not present before
+ * 6.1. Upper bound 6.3 (exclusive): from 6.3 onward the VFS idmap argument
+ * type changes from struct user_namespace * to struct mnt_idmap * (the
+ * vendored sources are hard-coded to the former), and mnt_user_ns() is
+ * removed in favor of mnt_idmap().
+ */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 
 static struct file_system_type *(*real_get_fs_type)(const char *name);
