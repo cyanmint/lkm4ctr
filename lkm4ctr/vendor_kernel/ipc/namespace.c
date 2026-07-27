@@ -68,7 +68,7 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 	ns->ns.ops = &vns_ipcns_operations;
 
 	vns_ipc_init_ref(ns);
-	ns->user_ns = get_user_ns(user_ns);
+	ns->user_ns = vns_get_user_ns(user_ns); /* [BUILD-COMPAT] */
 	ns->ucounts = ucounts;
 
 	err = mq_init_ns(ns);
@@ -97,7 +97,7 @@ fail_mq:
 	retire_mq_sysctls(ns);
 
 fail_put:
-	put_user_ns(ns->user_ns);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
 fail_free:
 	kfree(ns);
@@ -153,15 +153,34 @@ static void vns_free_ipc_ns(struct ipc_namespace *ns) /* [RENAME] */
 	 * uses synchronize_rcu().
 	 */
 	mq_put_mnt(ns);
-	/* [BUILD-COMPAT] sem_exit_ns is not exported to out-of-tree modules. */
-	/* [BUILD-COMPAT] msg_exit_ns is not exported to out-of-tree modules. */
-	/* [BUILD-COMPAT] shm_exit_ns is not exported to out-of-tree modules. */
+	/*
+	 * sem_exit_ns()/msg_exit_ns()/shm_exit_ns() are not exported by the
+	 * real kernel, but vendor_kernel vendors its own copies of them
+	 * (ipc/sem.c, ipc/msg.c, ipc/shm.c, renamed vns_sem_exit_ns/
+	 * vns_msg_exit_ns/vns_shm_exit_ns via vendor_kernel.h's #define and
+	 * linked into the same lkm4ctr.ko), so they can and must be called
+	 * directly here exactly like the real free_ipc_ns() does. Skipping
+	 * them (as a previous version of this function did) leaks every
+	 * queue/array/segment still registered in @ns, and -- critically --
+	 * never calls percpu_counter_destroy() on msg_exit_ns()'s own
+	 * ns->percpu_msg_bytes/percpu_msg_hdrs (see ipc/msg.c's
+	 * vns_msg_accounting_destroy()), so kfree(ns) below frees memory
+	 * that is still linked into the kernel-wide percpu_counters list,
+	 * corrupting it for any *unrelated* later percpu_counter_init() call
+	 * (observed as "list_add corruption ... kernel BUG at
+	 * lib/list_debug.c:29" from an entirely unrelated real cgroup mkdir
+	 * -> mem_cgroup_css_alloc -> wb_domain_init -> fprop_global_init ->
+	 * __percpu_counter_init call site).
+	 */
+	sem_exit_ns(ns);
+	msg_exit_ns(ns);
+	shm_exit_ns(ns);
 
 	retire_mq_sysctls(ns);
 	retire_ipc_sysctls(ns);
 
 	dec_ipc_namespaces(ns->ucounts);
-	put_user_ns(ns->user_ns);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
 	kfree(ns);
 }

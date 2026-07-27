@@ -66,8 +66,18 @@ extern void (*vns_proc_free_inum_fn)(unsigned int);
 extern struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace *, struct user_namespace *, struct fs_struct *);
 extern void (*vns_put_mnt_ns_fn)(struct mnt_namespace *);
 extern struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *, struct net *);
-extern void (*vns_put_net_ns_fn)(struct net *);
+/*
+ * [BUILD-COMPAT] Real kernel's own (non-exported, non-static) free_nsproxy(),
+ * resolved by name so a *foreign* (non-module-owned) struct nsproxy * whose
+ * refcount we drop to zero (see vns_switch_task_namespaces() in
+ * kernel/nsproxy.c) can be torn down through the real kernel's own path
+ * instead of vendor_kernel's vns_free_nsproxy(), which assumes the object was
+ * allocated from vns_nsproxy_cachep and would otherwise kmem_cache_free() a
+ * real nsproxy_cachep object into the wrong cache (heap corruption).
+ */
+extern void (*vns_real_free_nsproxy_fn)(struct nsproxy *);
 extern bool vendor_kernel_enabled;
+extern bool vns_pidns_runtime_supported;
 
 static inline void vns_count_set(void *count, int value, bool is_refcount)
 {
@@ -84,6 +94,14 @@ static inline bool vns_count_dec_and_test(void *count, bool is_refcount)
 	return atomic_dec_and_test((atomic_t *)count);
 }
 
+static inline void vns_count_inc(void *count, bool is_refcount)
+{
+	if (is_refcount)
+		refcount_inc((refcount_t *)count);
+	else
+		atomic_inc((atomic_t *)count);
+}
+
 #define VNS_COUNT_TYPE_IS_REFCOUNT(ptr) \
 	__builtin_types_compatible_p(typeof(*(ptr)), refcount_t)
 
@@ -93,6 +111,9 @@ static inline bool vns_count_dec_and_test(void *count, bool is_refcount)
 #define vns_put_count(ptr) \
 	vns_count_dec_and_test((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
 
+#define vns_get_count(ptr) \
+	vns_count_inc((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
+
 static inline void vns_zero_stashed(struct ns_common *ns)
 {
 	memset(&ns->stashed, 0, sizeof(ns->stashed));
@@ -100,20 +121,30 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->kref.refcount, 1)
+#define vns_uts_get_ref(obj) vns_get_count(&(obj)->kref.refcount)
+#define vns_uts_put_ref(obj) vns_put_count(&(obj)->kref.refcount)
 #define vns_pid_init_ref(obj) vns_init_count(&(obj)->kref.refcount, 1)
+#define vns_pid_get_ref(obj) vns_get_count(&(obj)->kref.refcount)
 #define vns_pid_put_ref(obj) vns_put_count(&(obj)->kref.refcount)
 #define vns_user_init_ref(obj) vns_init_count(&(obj)->count, 1)
+#define vns_user_get_ref(obj) vns_get_count(&(obj)->count)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
+#define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
 #define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->count, (lock))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
 #else
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
+#define vns_uts_get_ref(obj) vns_get_count(&(obj)->ns.count)
+#define vns_uts_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_pid_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
+#define vns_pid_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_pid_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_user_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
+#define vns_user_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
+#define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_ipc_put_ref_lock(obj, lock) refcount_dec_and_lock(&(obj)->ns.count, (lock))
 #define VNS_TIME_REF_INIT .ns.count = REFCOUNT_INIT(1),
 #endif
@@ -123,6 +154,20 @@ void vns_free_inum(struct ns_common *ns);
 
 struct uts_namespace *vns_copy_utsname(unsigned long flags, struct user_namespace *user_ns, struct uts_namespace *old_ns);
 void vns_free_uts_ns(struct uts_namespace *ns);
+/*
+ * [BUILD-COMPAT] vns_get_uts_ns()/vns_put_uts_ns() are self-contained
+ * replacements for the real kernel's get_uts_ns()/put_uts_ns(), which are
+ * declared in <linux/utsname.h> as a real refcount_inc()/
+ * refcount_dec_and_test()+free_uts_ns() pair when CONFIG_UTS_NS=y, or a
+ * pair of plain no-ops when CONFIG_UTS_NS=n (same pattern as
+ * get_pid_ns()/put_pid_ns() and get_user_ns()/put_user_ns() -- see
+ * vendor_kernel/README.md, "Namespace refcounting is fully
+ * self-contained"). Since vendor_kernel always vendors and installs its
+ * own uts_namespace objects regardless of the target's CONFIG_UTS_NS, every
+ * vendored call site uses these local equivalents instead.
+ */
+struct uts_namespace *vns_get_uts_ns(struct uts_namespace *ns);
+void vns_put_uts_ns(struct uts_namespace *ns);
 extern const struct proc_ns_operations vns_utsns_operations;
 void vns_uts_ns_init(void);
 
@@ -134,6 +179,32 @@ int vns_unshare_nsproxy_namespaces(unsigned long unshare_flags, struct nsproxy *
 void vns_switch_task_namespaces(struct task_struct *p, struct nsproxy *new);
 void vns_exit_task_namespaces(struct task_struct *p);
 long vns_sys_setns(int fd, int flags);
+void vns_nsproxy_cache_init(void);
+/*
+ * vns_task_exit_cleanup() - called from the do_exit() shadow_hook
+ * (glue/vendor_kernel_syscalls.c) for every exiting task, before the real
+ * do_exit() body runs. If @tsk->nsproxy is currently one of vendor_kernel's
+ * own module-owned objects (tracked in vns_nsproxy_set, kernel/nsproxy.c),
+ * swaps it back onto the pinned vns_init_nsproxy singleton and tears the
+ * real vendored object down entirely through vendor_kernel's own
+ * self-contained free path (vns_put_nsproxy()/vns_free_nsproxy()), so the
+ * real kernel's own exit_task_namespaces()/free_nsproxy() never sees a
+ * module-owned object and can never attempt to kmem_cache_free() it
+ * against a real, mismatched kmem_cache. A no-op for any task that never
+ * had a vendor_kernel namespace installed.
+ */
+void vns_task_exit_cleanup(struct task_struct *tsk);
+int vns_exit_hook_init(void);
+void vns_exit_hook_exit(void);
+/*
+ * vns_nsproxy_deferred_flush() - waits for every nsproxy teardown deferred
+ * by vns_task_exit_cleanup() (kernel/nsproxy.c) to finish. Must be called
+ * from vendor_kernel_exit() strictly after vns_exit_hook_exit() has
+ * unregistered the do_exit() kprobe (so no further work can be queued),
+ * and before the module image can be unloaded, or a still-pending
+ * workqueue callback would execute code that has already been unmapped.
+ */
+void vns_nsproxy_deferred_flush(void);
 
 struct ipc_namespace *vns_copy_ipcs(unsigned long flags, struct user_namespace *user_ns, struct ipc_namespace *old_ns);
 void vns_put_ipc_ns(struct ipc_namespace *ns);
@@ -155,6 +226,21 @@ extern const struct proc_ns_operations vns_timens_operations;
 extern const struct proc_ns_operations vns_timens_for_children_operations;
 
 struct pid_namespace *vns_copy_pid_ns(unsigned long flags, struct user_namespace *user_ns, struct pid_namespace *old_ns);
+/*
+ * [BUILD-COMPAT] vns_get_pid_ns()/vns_put_pid_ns() are self-contained
+ * replacements for the real kernel's get_pid_ns()/put_pid_ns(). Unlike the
+ * real ones, they never depend on CONFIG_PID_NS: get_pid_ns() is always a
+ * static inline in kernel headers (a real refcount_inc() when
+ * CONFIG_PID_NS=y, a no-op when =n), and put_pid_ns() is an exported
+ * extern function only when CONFIG_PID_NS=y (absent from vmlinux entirely,
+ * not just unexported, when =n). Because vendor_kernel installs its own
+ * struct pid_namespace objects and must refcount/free them correctly
+ * regardless of the target kernel's CONFIG_PID_NS setting, every vendored
+ * call site uses these local equivalents instead of get_pid_ns()/
+ * put_pid_ns() directly (see vendor_kernel/README.md, "Namespace
+ * refcounting is fully self-contained").
+ */
+struct pid_namespace *vns_get_pid_ns(struct pid_namespace *ns);
 void vns_put_pid_ns(struct pid_namespace *ns);
 void vns_zap_pid_ns_processes(struct pid_namespace *pid_ns);
 int vns_reboot_pid_ns(struct pid_namespace *pid_ns, int cmd);
@@ -164,6 +250,21 @@ void vns_pid_ns_init(void);
 
 int vns_create_user_ns(struct cred *new);
 int vns_unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
+/*
+ * [BUILD-COMPAT] vns_get_user_ns()/vns_put_user_ns() are self-contained
+ * replacements for the real kernel's get_user_ns()/put_user_ns(). Both are
+ * always static inline in kernel headers, but their bodies differ (real
+ * refcounting + __put_user_ns() teardown when CONFIG_USER_NS=y, plain
+ * no-ops returning init_user_ns when =n), and __put_user_ns() itself is an
+ * exported extern function that is entirely absent from vmlinux when
+ * CONFIG_USER_NS=n. vendor_kernel creates its own struct user_namespace
+ * objects and must refcount/free them correctly regardless of the target
+ * kernel's CONFIG_USER_NS setting, so every vendored call site uses these
+ * local equivalents (which route to vns___put_user_ns() below) instead of
+ * get_user_ns()/put_user_ns() directly.
+ */
+struct user_namespace *vns_get_user_ns(struct user_namespace *ns);
+void vns_put_user_ns(struct user_namespace *ns);
 void vns___put_user_ns(struct user_namespace *ns);
 kuid_t vns_make_kuid(struct user_namespace *ns, uid_t uid);
 uid_t vns_from_kuid(struct user_namespace *targ, kuid_t kuid);
@@ -201,32 +302,70 @@ static inline struct ipc_namespace *vns_current_ipc_ns(void)
 }
 
 extern struct shadow_hook *vendor_kernel_core_hooks[];
+extern struct shadow_hook *vendor_kernel_ipc_hooks[];
+extern struct shadow_hook *vendor_kernel_procfs_hooks[];
 
 /* compat layer (glue/vendor_kernel_compat.c) */
 extern struct ucounts vns_ucounts_stub;
 #ifdef CONFIG_CGROUPS
 extern struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 #endif
-#if defined(CONFIG_POSIX_MQUEUE) || defined(CONFIG_SYSVIPC)
+/*
+ * vns_init_ipc_ns_ptr is the best-effort resolved pointer to the *real*
+ * kernel's init_ipc_ns data object (resolved via shadow_hook_resolve() in
+ * glue/vendor_kernel_compat.c). It is only non-NULL on a target kernel that
+ * genuinely ships sysvipc/mqueue (CONFIG_SYSVIPC=y or CONFIG_POSIX_MQUEUE=y)
+ * AND exposes it through kallsyms. On vendor_kernel's primary target
+ * (CONFIG_SYSVIPC=n && CONFIG_POSIX_MQUEUE=n) it is NULL and the vendor-owned
+ * vns_default_ipc_ns singleton is used instead (see glue/vendor_kernel_module.c
+ * and ipc/namespace.c). Declared unconditionally so mqueue/sysvipc support is
+ * always compiled regardless of the target kernel's CONFIG_SYSVIPC/
+ * CONFIG_POSIX_MQUEUE (mirroring the UTS_NS/PID_NS/USER_NS self-containment).
+ */
 extern struct ipc_namespace *vns_init_ipc_ns_ptr;
-#endif
+/*
+ * vns_default_ipc_ns is vendor_kernel's own module-owned default ipc
+ * namespace (defined in ipc/msgutil.c as the vendored init_ipc_ns object,
+ * renamed via the #define below). It is fully initialized and its refcount
+ * pinned at vendor_kernel_init() time (see vns_ipc_default_init()) so it can
+ * serve as the fall-through ipc namespace for every task that never called
+ * unshare(CLONE_NEWIPC), even on a kernel whose own init_nsproxy.ipc_ns is
+ * NULL (CONFIG_IPC_NS=n).
+ */
+extern struct ipc_namespace vns_default_ipc_ns;
+int vns_ipc_default_init(void);
+void vns_ipc_default_exit(void);
+struct ipc_namespace *vns_ipc_active_default(void);
+/*
+ * Module-owned kmem_cache pointers (created via kmem_cache_create() in
+ * vns_uts_ns_init()/vns_nsproxy_cache_init()/vns_pid_ns_init()/
+ * vns_user_ns_init(), NOT resolved from the running kernel). Vendored
+ * namespace allocators use kmem_cache_alloc()/kmem_cache_zalloc() against
+ * these instead of kzalloc()/kfree() purely to mirror upstream's
+ * alloc-vs-zalloc semantics; the real kernel's own exit path is prevented
+ * from ever touching a module-owned object at all (see
+ * vns_task_exit_cleanup(), kernel/nsproxy.c).
+ */
+extern struct kmem_cache *vns_uts_ns_cache;
+extern struct kmem_cache *vns_nsproxy_cachep;
+extern struct kmem_cache *vns_pid_ns_cachep;
+extern struct kmem_cache *vns_user_ns_cachep;
 struct ucounts *vns_inc_ucount(struct user_namespace *ns, kuid_t uid,
 			       enum ucount_type type);
 void vns_dec_ucount(struct ucounts *ucounts, enum ucount_type type);
 bool vns_setup_userns_sysctls(struct user_namespace *ns);
 void vns_retire_userns_sysctls(struct user_namespace *ns);
 void vns_compat_resolve(void);
+void vns_ipc_compat_resolve(void);
 bool vns_compat_ready(void);
 int vns_security_create_user_ns(const struct cred *cred);
 void vns_perf_event_namespaces(struct task_struct *tsk);
 bool vns_setup_mq_sysctls(struct ipc_namespace *ns);
 void vns_mq_clear_sbinfo(struct ipc_namespace *ns);
 void vns_mq_put_mnt(struct ipc_namespace *ns);
-#ifdef CONFIG_SYSVIPC
 int vns_msg_init_ns(struct ipc_namespace *ns);
 void vns_free_ipcs(struct ipc_namespace *ns, struct ipc_ids *ids,
 		 void (*free)(struct ipc_namespace *, struct kern_ipc_perm *));
-#endif
 struct ns_common *vns_from_mnt_ns(struct mnt_namespace *mnt_ns);
 struct pid *vns_pidfd_pid(const struct file *file);
 void vns_set_fs_root(struct fs_struct *fs, const struct path *path);
@@ -246,15 +385,16 @@ int vns_commit_creds(struct cred *new);
 bool vns_file_ns_capable(const struct file *file, struct user_namespace *ns,
 			 int cap);
 void __noreturn vns_do_exit(long error_code);
-#ifdef CONFIG_SYSVIPC
 void vns_sem_init_ns(struct ipc_namespace *ns);
+void vns_sem_exit_ns(struct ipc_namespace *ns);
 void vns_shm_init_ns(struct ipc_namespace *ns);
+void vns_shm_exit_ns(struct ipc_namespace *ns);
 void vns_exit_sem(struct task_struct *tsk);
-#endif
-#ifdef CONFIG_POSIX_MQUEUE
+void vns_prepare_exit_sem(struct task_struct *tsk);
 int vns_mq_init_ns(struct ipc_namespace *ns);
 int vns_mqueue_fs_init(void);
 void vns_mqueue_fs_exit(void);
+void vns_mqueue_dev_ensure(void);
 long vns_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		struct mq_attr __user *u_attr);
 long vns_mq_unlink(const char __user *u_name);
@@ -267,24 +407,27 @@ long vns_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr, size_t msg_len,
 long vns_mq_notify(mqd_t mqdes, const struct sigevent __user *u_notification);
 long vns_mq_getsetattr(mqd_t mqdes, const struct mq_attr __user *u_mqstat,
 		      struct mq_attr __user *u_omqstat);
-#endif
-#ifdef CONFIG_SYSVIPC
 long vns_ksys_msgget(key_t key, int msgflg);
 long vns_msgctl(int msqid, int cmd, struct msqid_ds __user *buf);
 long vns_ksys_msgsnd(int msqid, struct msgbuf __user *msgp, size_t msgsz,
 		    int msgflg);
 long vns_ksys_msgrcv(int msqid, struct msgbuf __user *msgp, size_t msgsz,
 		    long msgtyp, int msgflg);
+int vns_copy_semundo(unsigned long clone_flags, struct task_struct *tsk);
+void vns_msg_exit_ns(struct ipc_namespace *ns);
 long vns_ksys_semget(key_t key, int nsems, int semflg);
 long vns_semctl(int semid, int semnum, int cmd, unsigned long arg);
 long vns_ksys_semtimedop(int semid, struct sembuf __user *tsops,
 			unsigned int nsops,
 			const struct __kernel_timespec __user *timeout);
 long vns_ksys_shmget(key_t key, size_t size, int shmflg);
+void vns_shm_destroy_orphaned(struct ipc_namespace *ns);
 long vns_shmctl(int shmid, int cmd, struct shmid_ds __user *buf);
 long vns_shmat(int shmid, char __user *shmaddr, int shmflg);
 long vns_ksys_shmdt(char __user *shmaddr);
-#endif
+void vns_exit_shm(struct task_struct *task);
+void vns_prepare_exit_shm(struct task_struct *task);
+bool vns_is_file_shm_hugepages(struct file *file);
 
 #ifndef VNS_COMPAT_IMPL
 #define inc_ucount vns_inc_ucount
@@ -296,9 +439,8 @@ long vns_ksys_shmdt(char __user *shmaddr);
 #define setup_mq_sysctls vns_setup_mq_sysctls
 #define mq_clear_sbinfo vns_mq_clear_sbinfo
 #define mq_put_mnt vns_mq_put_mnt
-#ifdef CONFIG_SYSVIPC
 #define msg_init_ns vns_msg_init_ns
-#endif
+#define init_ipc_ns vns_default_ipc_ns
 #define from_mnt_ns vns_from_mnt_ns
 #define pidfd_pid vns_pidfd_pid
 #define set_fs_root vns_set_fs_root
@@ -310,11 +452,12 @@ long vns_ksys_shmdt(char __user *shmaddr);
 #define disable_pid_allocation vns_disable_pid_allocation
 #define proc_ns_file vns_proc_ns_file
 #define retire_mq_sysctls vns_retire_mq_sysctls
-#ifdef CONFIG_SYSVIPC
 #define sem_init_ns vns_sem_init_ns
+#define sem_exit_ns vns_sem_exit_ns
 #define shm_init_ns vns_shm_init_ns
+#define shm_exit_ns vns_shm_exit_ns
 #define exit_sem vns_exit_sem
-#endif
+#define copy_semundo vns_copy_semundo
 #define setup_ipc_sysctls vns_setup_ipc_sysctls
 #define retire_ipc_sysctls vns_retire_ipc_sysctls
 #define set_cred_ucounts vns_set_cred_ucounts
@@ -322,12 +465,14 @@ long vns_ksys_shmdt(char __user *shmaddr);
 #define commit_creds vns_commit_creds
 #define file_ns_capable vns_file_ns_capable
 #define do_exit vns_do_exit
+#define msg_exit_ns vns_msg_exit_ns
+#define shm_destroy_orphaned vns_shm_destroy_orphaned
+#define exit_shm vns_exit_shm
+#define is_file_shm_hugepages vns_is_file_shm_hugepages
 #ifdef CONFIG_USER_NS
 #define in_userns vns_in_userns
 #endif
-#ifdef CONFIG_POSIX_MQUEUE
 #define mq_init_ns vns_mq_init_ns
-#endif
 #ifdef CONFIG_CGROUPS
 #define free_cgroup_ns vns_free_cgroup_ns
 #endif

@@ -9,11 +9,12 @@
  * -----------
  *   ./mnt/global/control          - read: command help. write: "load"
  *                                    (alias "load_all") loads every
- *                                    submodule; "unload" (aliases "1",
- *                                    "remove", "graceful") starts the
- *                                    graceful self-unload sequence; "forceunload"
- *                                    (aliases "force", "force_unload") starts
- *                                    the force self-unload sequence; "force2"
+ *                                    diagfs-managed submodule; "unload"
+ *                                    (aliases "1", "remove", "graceful")
+ *                                    starts the graceful self-unload
+ *                                    sequence; "forceunload" (aliases
+ *                                    "force", "force_unload") starts the
+ *                                    force self-unload sequence; "force2"
  *                                    starts (or escalates an already
  *                                    in-progress unload to) the aggressive
  *                                    force2 sequence -- see
@@ -27,8 +28,8 @@
  *                                    module itself would already be gone.
  *   ./mnt/global/log              - every log line, unfiltered.
  *   ./mnt/global/resources        - best-effort aggregate of live resources
- *                                    already tracked by the namespace, POSIX
- *                                    mqueue, SysV IPC and hook registries.
+ *                                    already tracked by the vendor_kernel and
+ *                                    hook registries.
  *   ./mnt/global/references       - breaks module_refcount() down into diagfs
  *                                    mount count + in-flight shadow_hook
  *                                    calls + unaccounted "other" holders, to
@@ -57,7 +58,7 @@
  *                                    load/unload/forceunload/force2/logcat/
  *                                    references/hot-upgrade/help).
  *
- *   ./mnt/readme.txt                - read-only (0444), a full plain-text
+ *   ./mnt/readme.txt               - read-only (0444), a full plain-text
  *                                    description of this whole diagfs tree
  *                                    and how to use it (contents generated
  *                                    into readme.txt.c as a plain C string,
@@ -82,29 +83,16 @@
  *                                    listing of every currently registered
  *                                    hook across all submodules.
  *
- *   ./mnt/ns/{control,status,hooks,log,namespaces,references}
- *                                  - aggregate shadow_ns lifecycle, hooks,
- *                                    full namespace registry and task-group
- *                                    membership dump.
- *   ./mnt/ns/<type>/{control,status,log,namespaces}
- *                                  - one directory per shadow_ns namespace
- *                                    type (pid/ipc/mnt/net/user/uts/cgroup).
- *                                    shadow_ns still has one shared init()/
- *                                    exit() for the whole subsystem, so each
- *                                    per-type control/status file intentionally
- *                                    reflects that shared backing lifecycle
- *                                    rather than pretending individual types
- *                                    can be independently loaded without a much
- *                                    larger refactor. Each per-type namespaces
- *                                    file is still filtered to only that type's
- *                                    live namespace objects and member tgids.
+ *   ./mnt/vendor_kernel/{control,status,hooks,log,namespaces,msg,resources,references}
+ *                                  - vendor_kernel's lifecycle, hook list,
+ *                                    namespace registry dump, POSIX mqueue
+ *                                    listing and SysV IPC resource listing.
+ *                                    vendor_kernel auto-loads at insmod time,
+ *                                    but its control file can still unload or
+ *                                    reload it later.
  *
- *   ./mnt/sysvipc/{control,status,hooks,resources,log,references}
- *   ./mnt/mqueue/{control,status,hooks,log,msg,references}
  *   ./mnt/cgroupdevices/{control,status,hooks,log,references}
- *                                  - the other runtime-loadable subsystems.
- *                                    mqueue/msg is a live listing file of the
- *                                    current in-memory queue/message state.
+ *                                  - the other runtime-loadable subsystem.
  *                                    references breaks down that submodule's
  *                                    own contribution to module_refcount()
  *                                    the same way global/references does.
@@ -123,7 +111,7 @@
  * open() via seq_file single_open(). That static-tree design is preserved for
  * the new layout too, so categories whose underlying live-object ids are not
  * naturally knowable before mount time (e.g. currently queued mqueue messages
- * or live SysV IPC/shadow_ns objects that may come and go after mount) are
+ * or live vendor_kernel objects that may come and go after mount) are
  * exposed as readable listing files rather than on-demand per-object dentries.
  * This keeps the filesystem simple and race-resistant while still surfacing
  * the underlying registries' current state.
@@ -165,7 +153,6 @@
 #include <linux/kprobes.h>
 
 #include "shadow_hook.h"
-#include "shadow_ns/shadow_ns_internal.h"
 #include "vendor_kernel/vendor_kernel.h"
 #include "lkm4ctr_log.h"
 #include "lkm4ctr_compat.h"
@@ -249,20 +236,9 @@ typedef int (*lkm4ctr_call_usermodehelper_t)(const char *path, char **argv,
 static lkm4ctr_module_refcount_t lkm4ctr_module_refcount_fn;
 static lkm4ctr_call_usermodehelper_t lkm4ctr_call_usermodehelper_fn;
 
-extern size_t shadow_ns_diag_snprintf(char *buf, size_t buflen);
-extern size_t shadow_ns_diag_snprintf_type(u32 type, char *buf, size_t buflen);
-extern size_t shadow_mqueue_diag_snprintf(char *buf, size_t buflen);
-extern size_t shadow_sysvipc_diag_snprintf(char *buf, size_t buflen);
-
-extern int shadow_ns_init(void);
-extern void shadow_ns_exit(void);
 extern int vendor_kernel_init(void);
 extern void vendor_kernel_exit(void);
 extern size_t vendor_kernel_diag_snprintf(char *buf, size_t buflen);
-extern int shadow_sysvipc_init(void);
-extern void shadow_sysvipc_exit(void);
-extern int shadow_mqueue_init(void);
-extern void shadow_mqueue_exit(void);
 extern int shadow_cgdevices_init(void);
 extern void shadow_cgdevices_exit(void);
 extern int shadow_hijack_init(void);
@@ -326,28 +302,10 @@ struct lkm4ctr_diagfs_module {
 	enum lkm4ctr_diagfs_lifecycle_state state;
 };
 
-struct lkm4ctr_diagfs_ns_type {
-	u32		type;
-	const char	*name;
-};
-
 static struct lkm4ctr_diagfs_module lkm4ctr_diagfs_modules[] = {
 	{ "hijack", 		"shadow_hijack", 	false, false, shadow_hijack_init,	shadow_hijack_exit,	LKM4CTR_STATE_ACTIVE },
-	{ "ns", 		"shadow_ns", 		true,  true,  shadow_ns_init,		shadow_ns_exit,		LKM4CTR_STATE_UNLOADED },
-	{ "vendor_kernel", 		"vendor_kernel", 		true,  true,  vendor_kernel_init,		vendor_kernel_exit,	LKM4CTR_STATE_UNLOADED },
-	{ "sysvipc", 		"shadow_sysvipc", 	true,  false, shadow_sysvipc_init,	shadow_sysvipc_exit,	LKM4CTR_STATE_UNLOADED },
-	{ "mqueue", 		"shadow_mqueue", 	true,  false, shadow_mqueue_init,	shadow_mqueue_exit,	LKM4CTR_STATE_UNLOADED },
+	{ "vendor_kernel", 	"vendor_kernel", 	true,  true,  vendor_kernel_init,	vendor_kernel_exit,	LKM4CTR_STATE_ACTIVE },
 	{ "cgroupdevices", 	"shadow_cgdevices", 	true,  false, shadow_cgdevices_init,	shadow_cgdevices_exit,	LKM4CTR_STATE_UNLOADED },
-};
-
-static const struct lkm4ctr_diagfs_ns_type lkm4ctr_diagfs_ns_types[] = {
-	{ SHADOW_NS_TYPE_PID, 	  "pid" },
-	{ SHADOW_NS_TYPE_IPC, 	  "ipc" },
-	{ SHADOW_NS_TYPE_MNT, 	  "mnt" },
-	{ SHADOW_NS_TYPE_NET, 	  "net" },
-	{ SHADOW_NS_TYPE_USER, 	  "user" },
-	{ SHADOW_NS_TYPE_UTS, 	  "uts" },
-	{ SHADOW_NS_TYPE_CGROUP, "cgroup" },
 };
 
 static enum lkm4ctr_diagfs_lifecycle_state lkm4ctr_diagfs_global_state =
@@ -569,17 +527,6 @@ static int lkm4ctr_diagfs_create_checked(struct super_block *sb,
 /* content rendering                                                    */
 /* ------------------------------------------------------------------- */
 
-static const struct lkm4ctr_diagfs_ns_type *lkm4ctr_diagfs_find_ns_type(u32 type)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(lkm4ctr_diagfs_ns_types); i++) {
-		if (lkm4ctr_diagfs_ns_types[i].type == type)
-			return &lkm4ctr_diagfs_ns_types[i];
-	}
-	return NULL;
-}
-
 static size_t lkm4ctr_diagfs_control_snprintf(const struct lkm4ctr_diagfs_info *info,
 					      char *buf, size_t buflen)
 {
@@ -617,14 +564,6 @@ static size_t lkm4ctr_diagfs_control_snprintf(const struct lkm4ctr_diagfs_info *
 			 "  load         - load this subsystem\n"
 			 "  unload       - graceful unload (aliases: remove, graceful)\n"
 			 "  forceunload  - force unload (aliases: force, force_unload)\n");
-	if (info->has_ns_type) {
-		const struct lkm4ctr_diagfs_ns_type *ns_type =
-			lkm4ctr_diagfs_find_ns_type(info->ns_type);
-
-		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
-				 "note: /ns/%s shares the one real shadow_ns lifecycle with every other namespace type; this path only filters the namespace listing.\n",
-				 ns_type ? ns_type->name : "?");
-	}
 	return pos;
 }
 
@@ -661,13 +600,10 @@ static size_t lkm4ctr_diagfs_hooks_snprintf(const struct lkm4ctr_diagfs_info *in
 }
 
 static size_t lkm4ctr_diagfs_namespaces_snprintf(const struct lkm4ctr_diagfs_info *info,
-						 char *buf, size_t buflen)
+					 char *buf, size_t buflen)
 {
-	if (!strcmp(info->tag, "vendor_kernel"))
-		return vendor_kernel_diag_snprintf(buf, buflen);
-	if (info->has_ns_type)
-		return shadow_ns_diag_snprintf_type(info->ns_type, buf, buflen);
-	return shadow_ns_diag_snprintf(buf, buflen);
+	(void)info;
+	return vendor_kernel_diag_snprintf(buf, buflen);
 }
 
 static size_t lkm4ctr_diagfs_log_snprintf(const struct lkm4ctr_diagfs_info *info,
@@ -677,7 +613,7 @@ static size_t lkm4ctr_diagfs_log_snprintf(const struct lkm4ctr_diagfs_info *info
 }
 
 static size_t lkm4ctr_diagfs_global_resources_snprintf(const struct lkm4ctr_diagfs_info *info,
-					       char *buf, size_t buflen)
+				       char *buf, size_t buflen)
 {
 	size_t pos = 0;
 
@@ -685,20 +621,8 @@ static size_t lkm4ctr_diagfs_global_resources_snprintf(const struct lkm4ctr_diag
 	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
 			 "hooks:\n");
 	pos += shadow_hook_registry_snprintf(NULL,
-					 buf + pos,
-					 pos < buflen ? buflen - pos : 0);
-	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
-			 "POSIX mqueue:\n");
-	pos += shadow_mqueue_diag_snprintf(buf + pos,
-					 pos < buflen ? buflen - pos : 0);
-	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
-			 "SysV IPC:\n");
-	pos += shadow_sysvipc_diag_snprintf(buf + pos,
-					 pos < buflen ? buflen - pos : 0);
-	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
-			 "shadow_ns:\n");
-	pos += shadow_ns_diag_snprintf(buf + pos,
-				      pos < buflen ? buflen - pos : 0);
+				 buf + pos,
+				 pos < buflen ? buflen - pos : 0);
 	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
 			 "vendor_kernel:\n");
 	pos += vendor_kernel_diag_snprintf(buf + pos,
@@ -707,19 +631,17 @@ static size_t lkm4ctr_diagfs_global_resources_snprintf(const struct lkm4ctr_diag
 }
 
 static size_t lkm4ctr_diagfs_mqueue_msg_snprintf(const struct lkm4ctr_diagfs_info *info,
-						 char *buf, size_t buflen)
+					 char *buf, size_t buflen)
 {
-	if (!strcmp(info->tag, "vendor_kernel"))
-		return vendor_kernel_diag_snprintf(buf, buflen);
-	return shadow_mqueue_diag_snprintf(buf, buflen);
+	(void)info;
+	return vendor_kernel_diag_snprintf(buf, buflen);
 }
 
 static size_t lkm4ctr_diagfs_sysvipc_resources_snprintf(const struct lkm4ctr_diagfs_info *info,
 							char *buf, size_t buflen)
 {
-	if (!strcmp(info->tag, "vendor_kernel"))
-		return vendor_kernel_diag_snprintf(buf, buflen);
-	return shadow_sysvipc_diag_snprintf(buf, buflen);
+	(void)info;
+	return vendor_kernel_diag_snprintf(buf, buflen);
 }
 
 /*
@@ -805,9 +727,8 @@ static size_t lkm4ctr_diagfs_references_snprintf(const struct lkm4ctr_diagfs_inf
  * Hot reload's own status/log/trigger renderers live in
  * lkm4ctr_hotreload.c (a self-contained subsystem, not gated by the usual
  * per-submodule load/unload lifecycle above); these are thin adapters to
- * the shared lkm4ctr_diagfs_render_fn signature, same pattern as
- * lkm4ctr_diagfs_mqueue_msg_snprintf() wrapping shadow_mqueue_diag_snprintf()
- * above.
+ * the shared lkm4ctr_diagfs_render_fn signature, same pattern as the
+ * vendor_kernel-backed listing renderers above.
  */
 static size_t lkm4ctr_diagfs_hotreload_status_snprintf(const struct lkm4ctr_diagfs_info *info,
 							char *buf, size_t buflen)
@@ -1035,18 +956,6 @@ static int lkm4ctr_diagfs_module_load(struct lkm4ctr_diagfs_module *mod,
 			     "load requested via diagfs control write, but already active; nothing to do");
 		return 0;
 	}
-	if ((!strcmp(mod->tag, "shadow_ns") &&
-	     lkm4ctr_diagfs_module_stable_state(lkm4ctr_diagfs_find_module("vendor_kernel")) != LKM4CTR_STATE_UNLOADED) ||
-	    (!strcmp(mod->tag, "vendor_kernel") &&
-	     (lkm4ctr_diagfs_module_stable_state(lkm4ctr_diagfs_find_module("shadow_ns")) != LKM4CTR_STATE_UNLOADED ||
-	      lkm4ctr_diagfs_module_stable_state(lkm4ctr_diagfs_find_module("shadow_mqueue")) != LKM4CTR_STATE_UNLOADED ||
-	      lkm4ctr_diagfs_module_stable_state(lkm4ctr_diagfs_find_module("shadow_sysvipc")) != LKM4CTR_STATE_UNLOADED)) ||
-	    ((!strcmp(mod->tag, "shadow_mqueue") ||
-	      !strcmp(mod->tag, "shadow_sysvipc")) &&
-	     lkm4ctr_diagfs_module_stable_state(lkm4ctr_diagfs_find_module("vendor_kernel")) != LKM4CTR_STATE_UNLOADED)) {
-		mutex_unlock(&lkm4ctr_unload_lock);
-		return -EBUSY;
-	}
 	mod->state = LKM4CTR_STATE_LOADING;
 	mutex_unlock(&lkm4ctr_unload_lock);
 
@@ -1087,7 +996,7 @@ static bool lkm4ctr_diagfs_other_modules_active(void)
  * lkm4ctr_diagfs_hijack_unload() - shadow_hijack is the shared hook engine
  * every other submodule's hooks are installed through, so it may only
  * become "unloaded" once every other submodule already is: unlike them,
- * unloading it while e.g. shadow_ns still has live hooks installed would
+ * unloading it while e.g. vendor_kernel still has live hooks installed would
  * pull the rug out from under code that is still redirecting real syscalls
  * into this module.
  *
@@ -1891,47 +1800,11 @@ static const struct super_operations lkm4ctr_diagfs_super_ops = {
 	.evict_inode	= lkm4ctr_diagfs_evict_inode,
 };
 
-static int lkm4ctr_diagfs_fill_ns_type_dir(struct super_block *sb,
-					   struct dentry *ns_dir,
-					   const struct lkm4ctr_diagfs_ns_type *ns_type)
-{
-	struct dentry *dir;
-	int ret;
-
-	dir = lkm4ctr_diagfs_mkdir(sb, ns_dir, ns_type->name);
-	if (IS_ERR(dir))
-		return PTR_ERR(dir);
-
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "control", 0644,
-					    LKM4CTR_DIAG_CONTROL,
-					    "shadow_ns", false, true,
-					    ns_type->type);
-	if (ret)
-		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "status", 0444,
-					    LKM4CTR_DIAG_STATUS,
-					    "shadow_ns", false, true,
-					    ns_type->type);
-	if (ret)
-		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "log", 0444,
-					    LKM4CTR_DIAG_LOG,
-					    "shadow_ns", false, true,
-					    ns_type->type);
-	if (ret)
-		return ret;
-	return lkm4ctr_diagfs_create_checked(sb, dir, "namespaces", 0444,
-					    LKM4CTR_DIAG_NAMESPACES,
-					    "shadow_ns", false, true,
-					    ns_type->type);
-}
-
 static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
 					  struct dentry *root,
 					  struct lkm4ctr_diagfs_module *mod)
 {
 	struct dentry *dir;
-	unsigned int i;
 	int ret;
 
 	dir = lkm4ctr_diagfs_mkdir(sb, root, mod->dirname);
@@ -1973,21 +1846,6 @@ static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
 			return ret;
 	}
 
-	if (!strcmp(mod->tag, "shadow_ns")) {
-		ret = lkm4ctr_diagfs_create_checked(sb, dir, "namespaces", 0444,
-					    LKM4CTR_DIAG_NAMESPACES,
-					    mod->tag, false, false, 0);
-		if (ret)
-			return ret;
-		for (i = 0; i < ARRAY_SIZE(lkm4ctr_diagfs_ns_types); i++) {
-			ret = lkm4ctr_diagfs_fill_ns_type_dir(sb, dir,
-						      &lkm4ctr_diagfs_ns_types[i]);
-			if (ret)
-				return ret;
-		}
-		return 0;
-	}
-
 	if (!strcmp(mod->tag, "vendor_kernel")) {
 		ret = lkm4ctr_diagfs_create_checked(sb, dir, "namespaces", 0444,
 					    LKM4CTR_DIAG_NAMESPACES,
@@ -2003,16 +1861,6 @@ static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
 					    LKM4CTR_DIAG_SYSVIPC_RESOURCES,
 					    mod->tag, false, false, 0);
 	}
-
-	if (!strcmp(mod->tag, "shadow_mqueue"))
-		return lkm4ctr_diagfs_create_checked(sb, dir, "msg", 0444,
-					    LKM4CTR_DIAG_MQUEUE_MSG,
-					    mod->tag, false, false, 0);
-
-	if (!strcmp(mod->tag, "shadow_sysvipc"))
-		return lkm4ctr_diagfs_create_checked(sb, dir, "resources", 0444,
-					    LKM4CTR_DIAG_SYSVIPC_RESOURCES,
-					    mod->tag, false, false, 0);
 
 	return 0;
 }

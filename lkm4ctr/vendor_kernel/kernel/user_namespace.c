@@ -4,8 +4,10 @@
  * android14-6.1 branch). CHANGES FROM UPSTREAM:
  *   - [RENAME] All non-static global symbols prefixed with vns_ to avoid
  *     collision with the built-in kernel implementation.
- *   - [BUILD-COMPAT] slab caches replaced with kzalloc/kfree (no kmem_cache_create
- *     in out-of-tree module init context).
+ *   - [BUILD-COMPAT] namespace struct allocated via kmem_cache_alloc/_zalloc
+ *     against the real kernel's private cache, resolved at init via
+ *     shadow_hook_resolve(), so the real kernel's own exit path can
+ *     kmem_cache_free() it safely.
  *   - [BUILD-COMPAT] ns_alloc_inum/ns_free_inum -> vns_alloc_inum/vns_free_inum
  *     (proc_alloc_inum not exported; resolved at init via shadow_hook_resolve).
  *   - [BUILD-COMPAT] __init/__exit removed from non-module-init functions.
@@ -36,7 +38,6 @@
 #include <linux/sort.h>
 #include "../vendor_kernel.h"
 
-/* [BUILD-COMPAT] out-of-tree vendor_kernel uses kzalloc/kfree instead of a slab cache. */
 static DEFINE_MUTEX(userns_state_mutex);
 
 static bool new_idmap_permitted(const struct file *file,
@@ -136,7 +137,11 @@ struct cred *new)
 		goto fail_dec;
 
 	ret = -ENOMEM;
-	ns = kzalloc(sizeof(struct user_namespace), GFP_KERNEL) /* [BUILD-COMPAT] */;
+	/* [BUILD-COMPAT] allocate from the real user_ns_cachep (resolved at
+	 * init) instead of kzalloc, so the real kernel's free_user_ns() can
+	 * safely kmem_cache_free() this object once installed on the real
+	 * task_struct->nsproxy (via cred->user_ns). */
+	ns = kmem_cache_zalloc(vns_user_ns_cachep, GFP_KERNEL) /* [BUILD-COMPAT] */;
 	if (!ns)
 		goto fail_dec;
 
@@ -190,7 +195,7 @@ fail_keyring:
 #endif
 	vns_free_inum(&ns->ns) /* [BUILD-COMPAT] */;
 fail_free:
-	kfree(ns) /* [BUILD-COMPAT] */;
+	kmem_cache_free(vns_user_ns_cachep, ns) /* [BUILD-COMPAT] */;
 fail_dec:
 	dec_user_namespaces(ucounts);
 fail:
@@ -241,7 +246,7 @@ static void free_user_ns(struct work_struct *work)
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		vns_free_inum(&ns->ns) /* [BUILD-COMPAT] */;
-		kfree(ns) /* [BUILD-COMPAT] */;
+		kmem_cache_free(vns_user_ns_cachep, ns) /* [BUILD-COMPAT] */;
 		dec_user_namespaces(ucounts);
 		ns = parent;
 	} while (vns_user_put_ref(parent));
@@ -251,6 +256,31 @@ void vns___put_user_ns( /* [RENAME] */
 struct user_namespace *ns)
 {
 	schedule_work(&ns->work);
+}
+
+/*
+ * [BUILD-COMPAT] Local equivalents of the real kernel's get_user_ns()/
+ * put_user_ns(). Both are always static inline in user_namespace.h, but
+ * their bodies differ based on the *target* kernel's own CONFIG_USER_NS
+ * setting: a real refcount_inc()/refcount_dec_and_test()+__put_user_ns()
+ * pair when CONFIG_USER_NS=y, or plain no-ops (returning init_user_ns,
+ * never freeing anything) when =n. Since vendor_kernel creates and
+ * refcounts its own struct user_namespace objects independently of the
+ * target's CONFIG_USER_NS, these shims always perform the real semantics
+ * and route to vns___put_user_ns() above on the final put. See
+ * vendor_kernel.h for the full rationale.
+ */
+struct user_namespace *vns_get_user_ns(struct user_namespace *ns) /* [BUILD-COMPAT] */
+{
+	if (ns)
+		vns_user_get_ref(ns);
+	return ns;
+}
+
+void vns_put_user_ns(struct user_namespace *ns) /* [BUILD-COMPAT] */
+{
+	if (ns && vns_user_put_ref(ns))
+		vns___put_user_ns(ns);
 }
 
 /**
@@ -1354,7 +1384,7 @@ static struct ns_common *userns_get(struct task_struct *task)
 	struct user_namespace *user_ns;
 
 	rcu_read_lock();
-	user_ns = get_user_ns(__task_cred(task)->user_ns);
+	user_ns = vns_get_user_ns(__task_cred(task)->user_ns); /* [BUILD-COMPAT] */
 	rcu_read_unlock();
 
 	return user_ns ? &user_ns->ns : NULL;
@@ -1362,7 +1392,7 @@ static struct ns_common *userns_get(struct task_struct *task)
 
 static void userns_put(struct ns_common *ns)
 {
-	put_user_ns(to_user_ns(ns));
+	vns_put_user_ns(to_user_ns(ns)); /* [BUILD-COMPAT] */
 }
 
 static int userns_install(struct nsset *nsset, struct ns_common *ns)
@@ -1390,8 +1420,8 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	if (!cred)
 		return -EINVAL;
 
-	put_user_ns(cred->user_ns);
-	set_cred_user_ns(cred, get_user_ns(user_ns));
+	vns_put_user_ns(cred->user_ns); /* [BUILD-COMPAT] */
+	set_cred_user_ns(cred, vns_get_user_ns(user_ns)); /* [BUILD-COMPAT] */
 
 	if (set_cred_ucounts(cred) < 0)
 		return -EINVAL;
@@ -1415,7 +1445,7 @@ struct ns_common *ns)
 		p = p->parent;
 	}
 
-	return &get_user_ns(owner)->ns;
+	return &vns_get_user_ns(owner)->ns; /* [BUILD-COMPAT] */
 }
 
 static struct user_namespace *userns_owner(struct ns_common *ns)
@@ -1435,5 +1465,10 @@ const struct proc_ns_operations vns_userns_operations = { /* [RENAME] */
 
 void vns_user_ns_init(void) /* [RENAME] */
 {
-	/* [BUILD-COMPAT] no per-type slab cache in out-of-tree module */
+	/* [BUILD-COMPAT] module-owned cache: see vendor_kernel/README.md's
+	 * "Slab-cache consistency with the real kernel" for why this no
+	 * longer resolves the real kernel's private user_ns_cachep. */
+	if (!vns_user_ns_cachep)
+		vns_user_ns_cachep = kmem_cache_create("vns_user_namespace",
+			sizeof(struct user_namespace), 0, SLAB_ACCOUNT, NULL);
 }

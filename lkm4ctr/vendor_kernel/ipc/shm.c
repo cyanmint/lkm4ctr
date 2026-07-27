@@ -39,6 +39,7 @@
 #include <linux/capability.h>
 #include <linux/ptrace.h>
 #include <linux/seq_file.h>
+#include <linux/workqueue.h>
 #include <linux/rwsem.h>
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
@@ -48,8 +49,10 @@
 #include <linux/uaccess.h>
 
 #include "../vendor_kernel.h"
-#include "lkm4ctr_compat.h"
 #include "util.h"
+/* [BUILD-COMPAT] VFS/mm helper shims that paper over kernel-version API drift
+ * (do_mmap()/vfs_mmap() argument changes); see common/lkm4ctr_compat.h. */
+#include "lkm4ctr_compat.h"
 
 #undef SYSCALL_METADATA
 #define SYSCALL_METADATA(sname, nb, ...)
@@ -67,6 +70,22 @@
 #define shm_init vns_shm_init
 #define free_ipcs vns_free_ipcs
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+typedef struct user_struct vns_shm_lock_owner_t;
+
+static inline vns_shm_lock_owner_t *vns_current_shm_lock_owner(void)
+{
+	return current_user();
+}
+#else
+typedef struct ucounts vns_shm_lock_owner_t;
+
+static inline vns_shm_lock_owner_t *vns_current_shm_lock_owner(void)
+{
+	return current_ucounts();
+}
+#endif
+
 struct shmid_kernel /* private to the kernel */
 {
 	struct kern_ipc_perm	shm_perm;
@@ -78,7 +97,7 @@ struct shmid_kernel /* private to the kernel */
 	time64_t		shm_ctim;
 	struct pid		*shm_cprid;
 	struct pid		*shm_lprid;
-	struct ucounts		*mlock_ucounts;
+	vns_shm_lock_owner_t	*mlock_ucounts;
 
 	/*
 	 * The task created the shm object, for
@@ -93,6 +112,81 @@ struct shmid_kernel /* private to the kernel */
 	struct list_head	shm_clist;
 	struct ipc_namespace	*ns;
 } __randomize_layout;
+
+#if !defined(CONFIG_SYSVIPC)
+#define VNS_SYSV_SHM_HASH_BITS 8
+
+struct vns_sysvshm_state {
+	struct task_struct	*task;
+	struct list_head	shm_clist;
+	struct hlist_node	node;
+	struct work_struct	exit_work;
+};
+
+static DEFINE_HASHTABLE(vns_sysvshm_state_hash, VNS_SYSV_SHM_HASH_BITS);
+static DEFINE_SPINLOCK(vns_sysvshm_state_lock);
+
+static void vns_sysvshm_exit_work(struct work_struct *work);
+
+static struct vns_sysvshm_state *
+vns_sysvshm_state_lookup_locked(struct task_struct *task)
+{
+	struct vns_sysvshm_state *state;
+
+	hash_for_each_possible(vns_sysvshm_state_hash, state, node,
+			       (unsigned long)task) {
+		if (state->task == task)
+			return state;
+	}
+	return NULL;
+}
+
+static struct vns_sysvshm_state *
+vns_sysvshm_state_get(struct task_struct *task, bool create, gfp_t gfp)
+{
+	struct vns_sysvshm_state *state, *new_state = NULL;
+	unsigned long flags;
+
+	if (create) {
+		new_state = kzalloc(sizeof(*new_state), gfp);
+		if (!new_state)
+			return NULL;
+		get_task_struct(task);
+		new_state->task = task;
+		INIT_LIST_HEAD(&new_state->shm_clist);
+		INIT_WORK(&new_state->exit_work, vns_sysvshm_exit_work);
+	}
+
+	spin_lock_irqsave(&vns_sysvshm_state_lock, flags);
+	state = vns_sysvshm_state_lookup_locked(task);
+	if (!state && new_state) {
+		hash_add(vns_sysvshm_state_hash, &new_state->node,
+			 (unsigned long)task);
+		state = new_state;
+		new_state = NULL;
+	}
+	spin_unlock_irqrestore(&vns_sysvshm_state_lock, flags);
+
+	if (new_state) {
+		put_task_struct(new_state->task);
+		kfree(new_state);
+	}
+	return state;
+}
+
+static struct vns_sysvshm_state *vns_sysvshm_state_detach(struct task_struct *task)
+{
+	struct vns_sysvshm_state *state;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_sysvshm_state_lock, flags);
+	state = vns_sysvshm_state_lookup_locked(task);
+	if (state)
+		hash_del(&state->node);
+	spin_unlock_irqrestore(&vns_sysvshm_state_lock, flags);
+	return state;
+}
+#endif
 
 /* shm_mode upper byte flags */
 #define SHM_DEST	01000	/* segment will be destroyed on last detach */
@@ -455,8 +549,7 @@ void shm_destroy_orphaned(struct ipc_namespace *ns)
 	up_write(&shm_ids(ns).rwsem);
 }
 
-/* Locking assumes this will only be called with task == current */
-void exit_shm(struct task_struct *task)
+static void vns_exit_shm_list(struct task_struct *task, struct list_head *head)
 {
 	for (;;) {
 		struct shmid_kernel *shp;
@@ -464,13 +557,12 @@ void exit_shm(struct task_struct *task)
 
 		task_lock(task);
 
-		if (list_empty(&task->sysvshm.shm_clist)) {
+		if (list_empty(head)) {
 			task_unlock(task);
 			break;
 		}
 
-		shp = list_first_entry(&task->sysvshm.shm_clist, struct shmid_kernel,
-				shm_clist);
+		shp = list_first_entry(head, struct shmid_kernel, shm_clist);
 
 		/*
 		 * 1) Get pointer to the ipc namespace. It is worth to say
@@ -551,6 +643,48 @@ unlink_continue:
 	}
 }
 
+/* Locking assumes this will only be called with task == current */
+void exit_shm(struct task_struct *task)
+{
+#if defined(CONFIG_SYSVIPC)
+	vns_exit_shm_list(task, &task->sysvshm.shm_clist);
+#else
+	struct vns_sysvshm_state *state = vns_sysvshm_state_detach(task);
+
+	if (!state)
+		return;
+	vns_exit_shm_list(task, &state->shm_clist);
+	put_task_struct(state->task);
+	kfree(state);
+#endif
+}
+
+#if !defined(CONFIG_SYSVIPC)
+static void vns_sysvshm_exit_work(struct work_struct *work)
+{
+	struct vns_sysvshm_state *state =
+		container_of(work, struct vns_sysvshm_state, exit_work);
+
+	vns_exit_shm_list(state->task, &state->shm_clist);
+	put_task_struct(state->task);
+	kfree(state);
+}
+
+void vns_prepare_exit_shm(struct task_struct *task)
+{
+	struct vns_sysvshm_state *state = vns_sysvshm_state_detach(task);
+
+	if (!state) {
+		return;
+	}
+	schedule_work(&state->exit_work);
+}
+#else
+void vns_prepare_exit_shm(struct task_struct *task)
+{
+}
+#endif
+
 static vm_fault_t shm_fault(struct vm_fault *vmf)
 {
 	struct file *file = vmf->vma->vm_file;
@@ -559,6 +693,7 @@ static vm_fault_t shm_fault(struct vm_fault *vmf)
 	return sfd->vm_ops->fault(vmf);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 static int shm_may_split(struct vm_area_struct *vma, unsigned long addr)
 {
 	struct file *file = vma->vm_file;
@@ -569,6 +704,7 @@ static int shm_may_split(struct vm_area_struct *vma, unsigned long addr)
 
 	return 0;
 }
+#endif
 
 static unsigned long shm_pagesize(struct vm_area_struct *vma)
 {
@@ -715,7 +851,9 @@ static const struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.fault	= shm_fault,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 	.may_split = shm_may_split,
+#endif
 	.pagesize = shm_pagesize,
 #if defined(CONFIG_NUMA)
 	.set_policy = shm_set_policy,
@@ -783,6 +921,9 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		if (shmflg & SHM_NORESERVE)
 			acctflag = VM_NORESERVE;
 		file = hugetlb_file_setup(name, hugesize, acctflag,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+				&shp->mlock_ucounts,
+#endif
 				HUGETLB_SHMFS_INODE, (shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
 	} else {
 		/*
@@ -814,9 +955,24 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 
 	shp->ns = ns;
 
+#if defined(CONFIG_SYSVIPC)
 	task_lock(current);
 	list_add(&shp->shm_clist, &current->sysvshm.shm_clist);
 	task_unlock(current);
+#else
+	{
+		struct vns_sysvshm_state *state;
+
+		state = vns_sysvshm_state_get(current, true, GFP_KERNEL_ACCOUNT);
+		if (!state) {
+			error = -ENOMEM;
+			goto no_state;
+		}
+		task_lock(current);
+		list_add(&shp->shm_clist, &state->shm_clist);
+		task_unlock(current);
+	}
+#endif
 
 	/*
 	 * shmid gets reported as "inode#" in /proc/pid/maps.
@@ -837,6 +993,12 @@ no_id:
 	fput(file);
 	ipc_rcu_putref(&shp->shm_perm, shm_rcu_free);
 	return error;
+#if !defined(CONFIG_SYSVIPC)
+no_state:
+	shm_destroy(ns, shp);
+	rcu_read_unlock();
+	return error;
+#endif
 no_file:
 	call_rcu(&shp->shm_perm.rcu, shm_rcu_free);
 	return error;
@@ -873,11 +1035,6 @@ long ksys_shmget(key_t key, size_t size, int shmflg)
 	shm_params.u.size = size;
 
 	return ipcget(ns, &shm_ids(ns), &shm_ops, &shm_params);
-}
-
-SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
-{
-	return ksys_shmget(key, size, shmflg);
 }
 
 static inline unsigned long copy_shmid_to_user(void __user *buf, struct shmid64_ds *in, int version)
@@ -1239,7 +1396,7 @@ static int shmctl_do_lock(struct ipc_namespace *ns, int shmid, int cmd)
 		goto out_unlock0;
 
 	if (cmd == SHM_LOCK) {
-		struct ucounts *ucounts = current_ucounts();
+		vns_shm_lock_owner_t *ucounts = vns_current_shm_lock_owner();
 
 		err = shmem_lock(shm_file, 1, ucounts);
 		if (!err && !(shp->shm_perm.mode & SHM_LOCKED)) {
@@ -1324,11 +1481,6 @@ static long ksys_shmctl(int shmid, int cmd, struct shmid_ds __user *buf, int ver
 	}
 }
 
-SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
-{
-	return ksys_shmctl(shmid, cmd, buf, IPC_64);
-}
-
 long vns_shmctl(int shmid, int cmd, struct shmid_ds __user *buf)
 {
 	return ksys_shmctl(shmid, cmd, buf, IPC_64);
@@ -1342,10 +1494,6 @@ long ksys_old_shmctl(int shmid, int cmd, struct shmid_ds __user *buf)
 	return ksys_shmctl(shmid, cmd, buf, version);
 }
 
-SYSCALL_DEFINE3(old_shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
-{
-	return ksys_old_shmctl(shmid, cmd, buf);
-}
 #endif
 
 #ifdef CONFIG_COMPAT
@@ -1525,11 +1673,6 @@ static long compat_ksys_shmctl(int shmid, int cmd, void __user *uptr, int versio
 	return err;
 }
 
-COMPAT_SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, void __user *, uptr)
-{
-	return compat_ksys_shmctl(shmid, cmd, uptr, IPC_64);
-}
-
 #ifdef CONFIG_ARCH_WANT_COMPAT_IPC_PARSE_VERSION
 long compat_ksys_old_shmctl(int shmid, int cmd, void __user *uptr)
 {
@@ -1538,10 +1681,6 @@ long compat_ksys_old_shmctl(int shmid, int cmd, void __user *uptr)
 	return compat_ksys_shmctl(shmid, cmd, uptr, version);
 }
 
-COMPAT_SYSCALL_DEFINE3(old_shmctl, int, shmid, int, cmd, void __user *, uptr)
-{
-	return compat_ksys_old_shmctl(shmid, cmd, uptr);
-}
 #endif
 #endif
 
@@ -1727,18 +1866,6 @@ out:
 	return err;
 }
 
-SYSCALL_DEFINE3(shmat, int, shmid, char __user *, shmaddr, int, shmflg)
-{
-	unsigned long ret;
-	long err;
-
-	err = do_shmat(shmid, shmaddr, shmflg, &ret, SHMLBA);
-	if (err)
-		return err;
-	force_successful_syscall_return();
-	return (long)ret;
-}
-
 long vns_shmat(int shmid, char __user *shmaddr, int shmflg)
 {
 	unsigned long ret;
@@ -1756,17 +1883,6 @@ long vns_shmat(int shmid, char __user *shmaddr, int shmflg)
 #define COMPAT_SHMLBA	SHMLBA
 #endif
 
-COMPAT_SYSCALL_DEFINE3(shmat, int, shmid, compat_uptr_t, shmaddr, int, shmflg)
-{
-	unsigned long ret;
-	long err;
-
-	err = do_shmat(shmid, compat_ptr(shmaddr), shmflg, &ret, COMPAT_SHMLBA);
-	if (err)
-		return err;
-	force_successful_syscall_return();
-	return (long)ret;
-}
 #endif
 
 /*
@@ -1782,7 +1898,11 @@ long ksys_shmdt(char __user *shmaddr)
 #ifdef CONFIG_MMU
 	loff_t size = 0;
 	struct file *file;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+	struct vm_area_struct *next;
+#else
 	VMA_ITERATOR(vmi, mm, addr);
+#endif
 #endif
 
 	if (addr & ~PAGE_MASK)
@@ -1814,6 +1934,34 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 
 #ifdef CONFIG_MMU
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+	vma = find_vma(mm, addr);
+	while (vma) {
+		next = vma->vm_next;
+
+		if ((vma->vm_ops == &shm_vm_ops) &&
+			(vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) {
+			file = vma->vm_file;
+			size = i_size_read(file_inode(vma->vm_file));
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+			retval = 0;
+			vma = next;
+			break;
+		}
+		vma = next;
+	}
+
+	size = PAGE_ALIGN(size);
+	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
+		next = vma->vm_next;
+
+		if ((vma->vm_ops == &shm_vm_ops) &&
+		    ((vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) &&
+		    (vma->vm_file == file))
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+		vma = next;
+	}
+#else
 	for_each_vma(vmi, vma) {
 		/*
 		 * Check if the starting address would match, i.e. it's
@@ -1862,6 +2010,7 @@ long ksys_shmdt(char __user *shmaddr)
 
 		vma = vma_next(&vmi);
 	}
+#endif
 
 #else	/* CONFIG_MMU */
 	vma = vma_lookup(mm, addr);
@@ -1877,11 +2026,6 @@ long ksys_shmdt(char __user *shmaddr)
 
 	mmap_write_unlock(mm);
 	return retval;
-}
-
-SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
-{
-	return ksys_shmdt(shmaddr);
 }
 
 #ifdef CONFIG_PROC_FS

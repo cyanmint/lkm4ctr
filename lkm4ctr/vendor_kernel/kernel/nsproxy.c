@@ -4,8 +4,10 @@
  * android14-6.1 branch). CHANGES FROM UPSTREAM:
  *   - [RENAME] All non-static global symbols prefixed with vns_ to avoid
  *     collision with the built-in kernel implementation.
- *   - [BUILD-COMPAT] slab caches replaced with kzalloc/kfree (no kmem_cache_create
- *     in out-of-tree module init context).
+ *   - [BUILD-COMPAT] namespace struct allocated via kmem_cache_alloc/_zalloc
+ *     against the real kernel's private cache, resolved at init via
+ *     shadow_hook_resolve(), so the real kernel's own exit path can
+ *     kmem_cache_free() it safely.
  *   - [BUILD-COMPAT] ns_alloc_inum/ns_free_inum -> vns_alloc_inum/vns_free_inum
  *     (proc_alloc_inum not exported; resolved at init via shadow_hook_resolve).
  *   - [BUILD-COMPAT] __init/__exit removed from non-module-init functions.
@@ -39,12 +41,104 @@
 #include <linux/syscalls.h>
 #include <linux/cgroup.h>
 #include <linux/perf_event.h>
+#include <linux/hashtable.h>
+#include <linux/spinlock.h>
+#include <linux/kprobes.h>
+#include <linux/llist.h>
+#include <linux/workqueue.h>
 #include "../vendor_kernel.h"
+#include "../include/uapi/vendor_kernel.h"
+#include "../../../common/lkm4ctr_log.h"
 
 /* [BUILD-COMPAT] Forward declaration for vendored time_namespace init object. */
 extern struct time_namespace vns_init_time_ns;
 
-/* [BUILD-COMPAT] out-of-tree vendor_kernel uses kzalloc/kfree instead of a slab cache. */
+/*
+ * [BUILD-COMPAT] vns_nsproxy_set tracks every module-owned struct nsproxy *
+ * currently installed on some task_struct->nsproxy. It exists purely so
+ * that vns_task_exit_cleanup() (invoked from the do_exit() shadow_hook in
+ * glue/vendor_kernel_syscalls.c) can tell, for an arbitrary exiting task,
+ * whether that task's nsproxy is one of vendor_kernel's own vendored
+ * objects (allocated from vns_nsproxy_cachep) as opposed to the real
+ * kernel's init_nsproxy/&vns_init_nsproxy singleton -- without needing any
+ * unexported mm-internal helper such as virt_to_cache(). Membership is a
+ * pointer identity check only; the hash table is a small fixed-size
+ * spinlock-protected chain, sized generously since a device is expected to
+ * have at most a handful of concurrently-live vendored nsproxy objects.
+ */
+static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
+static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
+
+struct vns_nsproxy_set_entry {
+	struct nsproxy *ns;
+	struct hlist_node node;
+};
+
+static void vns_nsproxy_set_add(struct nsproxy *ns)
+{
+	struct vns_nsproxy_set_entry *entry;
+	unsigned long flags;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry) {
+		/*
+		 * Allocation failure here just means vns_task_exit_cleanup()
+		 * will fail to recognize this object later and the real
+		 * kernel's exit path may attempt to free it against its own
+		 * cache. This is exceedingly unlikely (a tiny fixed-size
+		 * allocation) and there is no safe way to fail create_nsproxy()
+		 * at this point without unwinding a fully-populated object, so
+		 * we log and continue rather than leak the whole nsproxy.
+		 */
+		LKM4CTR_WARN(VENDOR_KERNEL_TAG, "vns_nsproxy_set_add: kmalloc failed, exit-safety tracking degraded for %p", ns);
+		return;
+	}
+	entry->ns = ns;
+
+	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	hash_add(vns_nsproxy_set, &entry->node, (unsigned long)ns);
+	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+}
+
+static bool vns_nsproxy_set_remove(struct nsproxy *ns)
+{
+	struct vns_nsproxy_set_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	hash_for_each_possible(vns_nsproxy_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			hash_del(&entry->node);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+
+	if (found)
+		kfree(entry);
+	return found;
+}
+
+static bool vns_nsproxy_set_contains(struct nsproxy *ns)
+{
+	struct vns_nsproxy_set_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	hash_for_each_possible(vns_nsproxy_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+
+	return found;
+}
+
 
 struct nsproxy vns_init_nsproxy = { /* [RENAME] */
 	.count			= ATOMIC_INIT(1),
@@ -73,10 +167,16 @@ static inline struct nsproxy *create_nsproxy(void)
 {
 	struct nsproxy *nsproxy;
 
-	/* [BUILD-COMPAT] no slab cache in the out-of-tree module path. */
-	nsproxy = kzalloc(sizeof(*nsproxy), GFP_KERNEL);
-	if (nsproxy)
+	/* [BUILD-COMPAT] allocate from vendor_kernel's own module-owned
+	 * nsproxy cache (created in vns_nsproxy_cache_init()) instead of the
+	 * real kernel's private nsproxy_cachep. See vns_task_exit_cleanup()
+	 * below for how the real kernel's own exit path is kept from ever
+	 * touching this module-owned object. */
+	nsproxy = kmem_cache_alloc(vns_nsproxy_cachep, GFP_KERNEL);
+	if (nsproxy) {
 		vns_init_count(&nsproxy->count, 1); /* [BUILD-COMPAT] */
+		vns_nsproxy_set_add(nsproxy); /* [BUILD-COMPAT] */
+	}
 	return nsproxy;
 }
 
@@ -133,15 +233,45 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 		goto out_cgroup;
 	}
 
-	/* [BUILD-COMPAT] copy_net_ns is resolved lazily for vendor_kernel. */
+	/*
+	 * [BUILD-COMPAT] copy_net_ns is resolved lazily for vendor_kernel, and
+	 * CLONE_NEWNET is deliberately masked out of the flags passed to it:
+	 * the real kernel's copy_net_ns()/setup_net() path (net_alloc() ->
+	 * ops_init() -> every registered pernet_operations, including
+	 * xfrm4_net_init()'s __percpu_counter_init()) has been observed to
+	 * corrupt the kernel-wide percpu_counters list ("list_add corruption
+	 * ... kernel BUG at lib/list_debug.c:29", Call trace through
+	 * xfrm4_net_init -> __percpu_counter_init -> ops_init -> setup_net ->
+	 * copy_net_ns -> create_new_namespaces [lkm4ctr]) the first time it is
+	 * asked to actually build a brand-new struct net from this call site,
+	 * even though every other vendored namespace type built alongside it
+	 * here (UTS/IPC/PID/CGROUP/TIME) is unaffected. Until that is fully
+	 * root-caused, always take copy_net_ns()'s own safe "just grab another
+	 * reference" fast path (the same one already exercised, without
+	 * incident, by every unshare() call that does *not* request
+	 * CLONE_NEWNET) instead of risking this crash -- i.e. CLONE_NEWNET is
+	 * bookkeeping-only here, matching the checker's STUB result for it and
+	 * the same safety-over-completeness posture already documented for
+	 * MNT_NS in vendor_kernel/README.md.
+	 */
 	if (vns_copy_net_ns_fn) {
-		new_nsp->net_ns = vns_copy_net_ns_fn(flags, user_ns, tsk->nsproxy->net_ns);
+		new_nsp->net_ns = vns_copy_net_ns_fn(flags & ~CLONE_NEWNET, user_ns,
+						      tsk->nsproxy->net_ns);
 		if (IS_ERR(new_nsp->net_ns)) {
 			err = PTR_ERR(new_nsp->net_ns);
 			goto out_net;
 		}
 	} else {
-		new_nsp->net_ns = NULL;
+		/*
+		 * [BUILD-COMPAT] copy_net_ns unresolved (e.g. target kernel
+		 * built with CONFIG_NET_NS=n, so it has no standalone exported
+		 * symbol): net_ns must still never be NULL on a CONFIG_NET=y
+		 * kernel (real kernel code unconditionally dereferences
+		 * nsproxy->net_ns), so just keep sharing the task's existing
+		 * net_ns exactly like the real kernel's own inline fallback
+		 * would.
+		 */
+		new_nsp->net_ns = get_net(tsk->nsproxy->net_ns);
 	}
 
 	new_nsp->time_ns_for_children = vns_copy_time_ns(flags, user_ns, /* [RENAME] */
@@ -155,8 +285,8 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	return new_nsp;
 
 out_time:
-	if (new_nsp->net_ns && vns_put_net_ns_fn)
-		vns_put_net_ns_fn(new_nsp->net_ns); /* [BUILD-COMPAT] */
+	if (new_nsp->net_ns)
+		put_net(new_nsp->net_ns); /* [BUILD-COMPAT] real inline, not resolved by name */
 out_net:
 	vns_put_cgroup_ns(new_nsp->cgroup_ns); /* [RENAME] */
 out_cgroup:
@@ -167,13 +297,13 @@ out_pid:
 		vns_put_ipc_ns(new_nsp->ipc_ns); /* [RENAME] */
 out_ipc:
 	if (new_nsp->uts_ns)
-		put_uts_ns(new_nsp->uts_ns);
+		vns_put_uts_ns(new_nsp->uts_ns); /* [BUILD-COMPAT] */
 out_uts:
 	if (new_nsp->mnt_ns)
 		if (vns_put_mnt_ns_fn)
 			vns_put_mnt_ns_fn(new_nsp->mnt_ns); /* [BUILD-COMPAT] */
 out_ns:
-	kfree(new_nsp); /* [BUILD-COMPAT] */
+	kmem_cache_free(vns_nsproxy_cachep, new_nsp); /* [BUILD-COMPAT] */
 	return ERR_PTR(err);
 }
 
@@ -223,7 +353,7 @@ void vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 		if (vns_put_mnt_ns_fn)
 			vns_put_mnt_ns_fn(ns->mnt_ns); /* [BUILD-COMPAT] */
 	if (ns->uts_ns)
-		put_uts_ns(ns->uts_ns);
+		vns_put_uts_ns(ns->uts_ns); /* [BUILD-COMPAT] */
 	if (ns->ipc_ns)
 		vns_put_ipc_ns(ns->ipc_ns); /* [RENAME] */
 	if (ns->pid_ns_for_children)
@@ -233,10 +363,44 @@ void vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 	if (ns->time_ns_for_children)
 		vns_put_time_ns(ns->time_ns_for_children); /* [RENAME] */
 	vns_put_cgroup_ns(ns->cgroup_ns); /* [RENAME] */
-	if (ns->net_ns && vns_put_net_ns_fn)
-		vns_put_net_ns_fn(ns->net_ns); /* [BUILD-COMPAT] */
-	kfree(ns); /* [BUILD-COMPAT] */
+	if (ns->net_ns)
+		put_net(ns->net_ns); /* [BUILD-COMPAT] real inline, not resolved by name */
+	vns_nsproxy_set_remove(ns); /* [BUILD-COMPAT] */
+	kmem_cache_free(vns_nsproxy_cachep, ns); /* [BUILD-COMPAT] */
 }
+
+/*
+ * [BUILD-COMPAT] Drop a reference to a *foreign* struct nsproxy * -- i.e. one
+ * vendor_kernel did not itself allocate from vns_nsproxy_cachep (tracked via
+ * vns_nsproxy_set_add()/vns_nsproxy_set_contains()). The very first time a
+ * task calls unshare()/setns() through vendor_kernel's hooks, its existing
+ * tsk->nsproxy is still whatever the real kernel installed (its own
+ * init_nsproxy, or a real nsproxy previously built by the real kernel's own,
+ * unhooked create_new_namespaces()); vns_switch_task_namespaces() below must
+ * still release that task's one reference to it, but MUST NOT run it through
+ * vendor_kernel's own vns_free_nsproxy() if the refcount reaches zero: that
+ * function unconditionally ends with
+ * kmem_cache_free(vns_nsproxy_cachep, ns), which for a real, kernel-allocated
+ * nsproxy is a free into the *wrong* kmem_cache and corrupts the slab
+ * allocator (observed as unrelated-looking "list_del corruption"/kernel BUG
+ * crashes much later, e.g. in cleanup_net()'s xfrm4_net_exit ->
+ * percpu_counter_destroy()). Route the real free through the real kernel's
+ * own (resolved-by-name) free_nsproxy() instead; if that could not be
+ * resolved, leak the reference rather than risk corrupting memory.
+ */
+static void vns_put_foreign_nsproxy(struct nsproxy *ns)
+{
+	if (!vns_put_count(&ns->count))
+		return;
+	if (vns_real_free_nsproxy_fn) {
+		vns_real_free_nsproxy_fn(ns);
+		return;
+	}
+	LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+		"vns_put_foreign_nsproxy: free_nsproxy unresolved, leaking foreign nsproxy %p",
+		ns);
+}
+
 
 /*
  * Called from unshare. Unshare all the namespaces part of nsproxy.
@@ -279,8 +443,21 @@ void vns_switch_task_namespaces(struct task_struct *p, struct nsproxy *new) /* [
 	p->nsproxy = new;
 	task_unlock(p);
 
-	if (ns)
+	if (!ns)
+		return;
+	/*
+	 * [BUILD-COMPAT] ns may be a module-owned object from a previous
+	 * vendor_kernel unshare()/setns()/clone(), or -- on the very first
+	 * call for this task -- still the real kernel's own nsproxy (its
+	 * shared init_nsproxy, or one the real, unhooked kernel created
+	 * earlier). Route the release accordingly; see
+	 * vns_put_foreign_nsproxy()'s comment above for why this distinction
+	 * is safety-critical.
+	 */
+	if (vns_nsproxy_set_contains(ns))
 		vns_put_nsproxy(ns); /* [RENAME] */
+	else
+		vns_put_foreign_nsproxy(ns);
 }
 
 void vns_exit_task_namespaces(struct task_struct *p) /* [RENAME] */
@@ -419,7 +596,6 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 		return -ESRCH;
 	}
 
-#ifdef CONFIG_PID_NS
 	if (flags & CLONE_NEWPID) {
 		pid_ns = task_active_pid_ns(tsk);
 		if (unlikely(!pid_ns)) {
@@ -427,14 +603,11 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 			ret = -ESRCH;
 			goto out;
 		}
-		get_pid_ns(pid_ns);
+		vns_get_pid_ns(pid_ns); /* [BUILD-COMPAT] */
 	}
-#endif
 
-#ifdef CONFIG_USER_NS
 	if (flags & CLONE_NEWUSER)
-		user_ns = get_user_ns(__task_cred(tsk)->user_ns);
-#endif
+		user_ns = vns_get_user_ns(__task_cred(tsk)->user_ns); /* [BUILD-COMPAT] */
 	rcu_read_unlock();
 
 	/*
@@ -443,13 +616,11 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 	 * supported on this kernel. We don't report errors here
 	 * if a namespace is requested that isn't supported.
 	 */
-#ifdef CONFIG_USER_NS
 	if (flags & CLONE_NEWUSER) {
 		ret = validate_ns(nsset, &user_ns->ns);
 		if (ret)
 			goto out;
 	}
-#endif
 
 	if (flags & CLONE_NEWNS) {
 		ret = validate_ns(nsset, from_mnt_ns(nsp->mnt_ns));
@@ -473,13 +644,17 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 	}
 #endif
 
-#ifdef CONFIG_PID_NS
+	/*
+	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_PID_NS:
+	 * vendor_kernel always vendors its own pid namespace support (see
+	 * vns_get_pid_ns()/vns_put_pid_ns() above), independent of whether
+	 * the target kernel's own CONFIG_PID_NS is y or n.
+	 */
 	if (flags & CLONE_NEWPID) {
 		ret = validate_ns(nsset, &pid_ns->ns);
 		if (ret)
 			goto out;
 	}
-#endif
 
 #ifdef CONFIG_CGROUPS
 	if (flags & CLONE_NEWCGROUP) {
@@ -507,13 +682,14 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 
 out:
 	if (pid_ns)
-		put_pid_ns(pid_ns);
+		vns_put_pid_ns(pid_ns); /* [BUILD-COMPAT] */
 	if (nsp)
 		vns_put_nsproxy(nsp); /* [RENAME] */
-	put_user_ns(user_ns);
+	vns_put_user_ns(user_ns); /* [BUILD-COMPAT] */
 
 	return ret;
 }
+
 
 /*
  * This is the point of no return. There are just a few namespaces
@@ -529,13 +705,16 @@ static void commit_nsset(struct nsset *nsset)
 	unsigned flags = nsset->flags;
 	struct task_struct *me = current;
 
-#ifdef CONFIG_USER_NS
+	/*
+	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_USER_NS:
+	 * vendor_kernel always vendors its own user namespace support,
+	 * independent of the target kernel's own CONFIG_USER_NS setting.
+	 */
 	if (flags & CLONE_NEWUSER) {
 		/* transfer ownership */
 		commit_creds(nsset_cred(nsset));
 		nsset->cred = NULL;
 	}
-#endif
 
 	/* We only need to commit if we have used a temporary fs_struct. */
 	if ((flags & CLONE_NEWNS) && (flags & ~CLONE_NEWNS)) {
@@ -607,4 +786,206 @@ void vns_put_nsproxy(struct nsproxy *ns) /* [RENAME] */
 {
 	if (ns && vns_put_count(&ns->count))
 		vns_free_nsproxy(ns);
+}
+
+void vns_nsproxy_cache_init(void) /* [BUILD-COMPAT] */
+{
+	/* [BUILD-COMPAT] module-owned cache: see vendor_kernel/README.md's
+	 * "Slab-cache consistency with the real kernel" for why this no
+	 * longer resolves the real kernel's private nsproxy_cachep. */
+	if (!vns_nsproxy_cachep)
+		vns_nsproxy_cachep = kmem_cache_create("vns_nsproxy",
+			sizeof(struct nsproxy), 0,
+			SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT, NULL);
+
+	/*
+	 * Pin vns_init_nsproxy's refcount to a large sentinel value so it can
+	 * never legitimately reach zero and be mistaken for a freeable
+	 * object -- it is a static singleton, never slab-allocated, and is
+	 * only ever used as the safe fallback nsproxy in
+	 * vns_task_exit_cleanup() below.
+	 */
+	vns_init_count(&vns_init_nsproxy.count, 0x40000000);
+}
+
+/*
+ * [BUILD-COMPAT] vns_task_exit_cleanup() runs from a plain pre_handler-only
+ * kprobe on do_exit() (vns_exit_kprobe_pre_handler() below), and kprobe
+ * handlers execute in atomic context (preemption disabled) regardless of
+ * the underlying int3/brk trap mechanism -- see Documentation/trace/kprobes.rst:
+ * "Probes are run with preemption disabled ... you must not do anything
+ * that could cause a sleep". vns_put_nsproxy()/vns_free_nsproxy() can reach
+ * put_mnt_ns() -> namespace_unlock() -> synchronize_rcu_expedited(), which
+ * schedules -- calling that path directly from the kprobe pre_handler
+ * triggers "BUG: scheduling while atomic". So the actual teardown of a
+ * vendored nsproxy is deferred to process context via a workqueue; only the
+ * task_lock()-protected pointer swap (fully atomic-safe: spinlock and plain
+ * refcounting) happens inline in the kprobe handler itself.
+ */
+struct vns_nsproxy_deferred_put {
+	struct llist_node node;
+	struct nsproxy *ns;
+};
+
+static LLIST_HEAD(vns_nsproxy_deferred_list);
+
+static void vns_nsproxy_deferred_put_fn(struct work_struct *work)
+{
+	struct llist_node *node = llist_del_all(&vns_nsproxy_deferred_list);
+	struct vns_nsproxy_deferred_put *entry, *tmp;
+
+	llist_for_each_entry_safe(entry, tmp, node, node) {
+		vns_put_nsproxy(entry->ns); /* [RENAME] */
+		kfree(entry);
+	}
+}
+static DECLARE_WORK(vns_nsproxy_deferred_put_work, vns_nsproxy_deferred_put_fn);
+
+void vns_nsproxy_deferred_flush(void)
+{
+	flush_work(&vns_nsproxy_deferred_put_work);
+}
+
+static void vns_nsproxy_put_deferred(struct nsproxy *ns)
+{
+	struct vns_nsproxy_deferred_put *entry;
+
+	entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
+	if (!entry) {
+		/*
+		 * Atomic allocation failure for a tiny fixed-size object is
+		 * exceedingly unlikely; there is no safe way to free ns
+		 * synchronously here (see the atomic-context comment above),
+		 * so log and leak the reference rather than risk a second
+		 * "scheduling while atomic" crash.
+		 */
+		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+			"vns_nsproxy_put_deferred: kmalloc failed, leaking nsproxy %p", ns);
+		return;
+	}
+	entry->ns = ns;
+	llist_add(&entry->node, &vns_nsproxy_deferred_list);
+	schedule_work(&vns_nsproxy_deferred_put_work);
+}
+
+/*
+ * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
+ * Called from the do_exit() shadow_hook (glue/vendor_kernel_syscalls.c)
+ * for every exiting task, strictly before the real do_exit() body (and
+ * therefore the real exit_task_namespaces()/free_nsproxy()) runs.
+ */
+void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
+{
+	struct nsproxy *ns;
+
+	if (!vns_pidns_runtime_supported) {
+		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
+
+		/*
+		 * [BUILD-COMPAT] task_active_pid_ns() is derived from
+		 * tsk->thread_pid, fixed at fork time, and is untouched by
+		 * the tsk->nsproxy swap further down. If tsk is the last
+		 * live thread of one of vendor_kernel's own module-owned pid
+		 * namespaces (kernel/pid_namespace.c:vns_copy_pid_ns()) and
+		 * also that namespace's pid 1, the real kernel's own
+		 * copy_process() (kernel/fork.c, unconditional of
+		 * CONFIG_PID_NS) has already set pid_ns->child_reaper == tsk.
+		 * Left untouched, the real
+		 * do_exit()->forget_original_parent()->find_child_reaper()
+		 * path (kernel/exit.c) is about to see that and call this
+		 * target kernel's own zap_pid_ns_processes(), an
+		 * unconditional BUG() stub on a CONFIG_PID_NS=n build
+		 * (include/linux/pid_namespace.h). Run the safe half of that
+		 * cascade ourselves right now and then hand the namespace off
+		 * to the real init task as its child_reaper, so the real
+		 * find_child_reaper() takes its "reaper != father" fast path
+		 * moments later in this same do_exit() call instead of ever
+		 * reaching the broken stub. See vns_zap_pid_ns_processes()
+		 * (kernel/pid_namespace.c) for the shadow_ns-style
+		 * reduced-scope cascade this runs.
+		 */
+		if (pid_ns && pid_ns != &init_pid_ns &&
+		    pid_ns->child_reaper == tsk) {
+			vns_zap_pid_ns_processes(pid_ns);
+			pid_ns->child_reaper = init_pid_ns.child_reaper;
+		}
+	}
+
+#if !defined(CONFIG_SYSVIPC)
+	vns_prepare_exit_sem(tsk);
+	vns_prepare_exit_shm(tsk);
+#endif
+
+	task_lock(tsk);
+	ns = tsk->nsproxy;
+	if (!ns || !vns_nsproxy_set_contains(ns)) {
+		task_unlock(tsk);
+		return;
+	}
+	get_nsproxy(&vns_init_nsproxy);
+	tsk->nsproxy = &vns_init_nsproxy;
+	task_unlock(tsk);
+
+	/*
+	 * From here on, the real kernel's own exit_task_namespaces() will
+	 * only ever see &vns_init_nsproxy (pinned, never slab-allocated) on
+	 * this task, and will never call kmem_cache_free() against a
+	 * module-owned object. Tear the vendored object down through
+	 * vendor_kernel's own self-contained free path, deferred to process
+	 * context (see the atomic-context comment above this function).
+	 */
+	vns_nsproxy_put_deferred(ns);
+}
+
+/*
+ * [BUILD-COMPAT] Exit-safety kprobe: a plain pre_handler-only kprobe on
+ * do_exit(), NOT one of the redirecting shadow_hook entries used elsewhere
+ * in vendor_kernel. do_exit() is __noreturn, so hooking it via the
+ * SHADOW_HOOK()/shadow_hijack redirect mechanism (which relies on a
+ * kretprobe firing on the *replacement* function's return to release the
+ * rmmod-safety module reference -- see common/shadow_hook.h's "rmmod
+ * safety" note) would never release that reference, permanently pinning
+ * module_refcount() above zero after the very first process exit on the
+ * whole system. A pre_handler-only kprobe has no such problem: it runs
+ * vns_task_exit_cleanup() and returns normally, letting the original
+ * do_exit() instruction execute completely untouched immediately
+ * afterwards, and register_kprobe()/unregister_kprobe() are already
+ * synchronously safe to install/remove (the same primitive
+ * shadow_hook_resolve() itself relies on for one-shot symbol resolution).
+ */
+static int vns_exit_kprobe_pre_handler(struct kprobe *p, struct pt_regs *regs)
+{
+	vns_task_exit_cleanup(current);
+	return 0;
+}
+
+static struct kprobe vns_exit_kprobe = {
+	.symbol_name	= "do_exit",
+	.pre_handler	= vns_exit_kprobe_pre_handler,
+};
+static bool vns_exit_kprobe_installed;
+
+int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
+{
+	int ret;
+
+	if (vns_exit_kprobe_installed)
+		return 0;
+
+	ret = register_kprobe(&vns_exit_kprobe);
+	if (ret) {
+		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+			"do_exit exit-safety kprobe registration failed (%d)", ret);
+		return ret;
+	}
+	vns_exit_kprobe_installed = true;
+	return 0;
+}
+
+void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
+{
+	if (vns_exit_kprobe_installed) {
+		unregister_kprobe(&vns_exit_kprobe);
+		vns_exit_kprobe_installed = false;
+	}
 }

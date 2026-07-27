@@ -45,7 +45,42 @@ config LKM4CTR_LOG_DMESG
 config LKM4CTR_VENDOR_KERNEL
 	bool "vendor_kernel: Vendored kernel namespace subsystem"
 	depends on LKM4CTR
+	select NAMESPACES
+	select UTS_NS
+	select IPC_NS
+	select PID_NS
+	select USER_NS
+	select NET_NS
+	select CGROUPS
+	select TIME_NS
+	select SYSVIPC
+	select POSIX_MQUEUE
 	help
 	  Vendor the entire Linux kernel namespace subsystem as a parallel
 	  in-module implementation. Hooks all namespace syscalls unconditionally.
-	  Mutually exclusive with shadow_ns at runtime.
+	  Auto-loads at insmod time.
+
+	  vendor_kernel resolves several running kernel's namespace-private
+	  symbols (e.g. pid_ns_cachep, init_ipc_ns) by name at module load
+	  time and silently falls back to bookkeeping-only/no-op behaviour,
+	  or fails specific unshare(2)/clone(2)/setns(2) namespace types with
+	  -EINVAL, for any namespace type whose backing CONFIG_*_NS option is
+	  not built into the running kernel. PID_NS and USER_NS are the
+	  exception: vendor_kernel fully vendors its own pid/user namespace
+	  refcounting (vns_get_pid_ns()/vns_put_pid_ns()/vns_get_user_ns()/
+	  vns_put_user_ns() in vendor_kernel/kernel/pid_namespace.c and
+	  kernel/user_namespace.c) instead of depending on the target
+	  kernel's own get_pid_ns()/put_pid_ns()/get_user_ns()/put_user_ns(),
+	  so unshare(2)/clone(2)/setns(2) for CLONE_NEWPID/CLONE_NEWUSER work
+	  correctly even when the target kernel has CONFIG_PID_NS=n/
+	  CONFIG_USER_NS=n (see vendor_kernel/README.md, "Namespace
+	  refcounting is fully self-contained"). The selects above still
+	  ensure that, once this file is sourced by a real kernel tree,
+	  enabling LKM4CTR_VENDOR_KERNEL forces CONFIG_NAMESPACES,
+	  CONFIG_UTS_NS, CONFIG_IPC_NS, CONFIG_PID_NS, CONFIG_USER_NS,
+	  CONFIG_NET_NS, CONFIG_CGROUPS, CONFIG_TIME_NS, CONFIG_SYSVIPC and
+	  CONFIG_POSIX_MQUEUE to y for consistency and for any other in-tree
+	  code that assumes them, and so that the remaining (non-PID/USER)
+	  namespace types it vendors are actually available on the target
+	  kernel and unshare(2)/clone(2) for IPC/NET namespaces (among
+	  others) do not spuriously fail.

@@ -8,9 +8,7 @@ kernel module.
 The unified module links these internal subsystem source trees together:
 
 * `shadow_hijack/` — shared ftrace/kprobe hook implementation
-* `shadow_ns/` — namespace hooks and fallback simulation
-* `shadow_sysvipc/` — SysV IPC hooks and registry
-* `shadow_mqueue/` — POSIX mqueue hooks and queue engine
+* `vendor_kernel/` — vendored namespace, SysV IPC and POSIX mqueue compatibility
 * `shadow_cgdevices/` — device-open compatibility hooks
 * `lkm4ctr_diagfs.c` — the `lkm4ctr` diagnostics pseudo-filesystem: runtime
   control/status plus hooks/namespaces/log/resource/reference introspection,
@@ -26,19 +24,18 @@ Their sources stay split by subsystem for maintainability, but they now build
 and load only as one module with the single entry point in
 `lkm4ctr_main.c`.
 
-## No submodule is auto-loaded
+## Auto-loaded vs manual submodules
 
-`insmod lkm4ctr.ko` only brings up the shared hook engine (`shadow_hijack`)
-and registers the `lkm4ctr` diagfs filesystem type — none of
-`shadow_ns`/`shadow_sysvipc`/`shadow_mqueue`/`shadow_cgdevices` are started
-automatically. Mount the diagfs and start what you need:
+`insmod lkm4ctr.ko` brings up the shared hook engine (`shadow_hijack`),
+auto-loads `vendor_kernel`, and registers the `lkm4ctr` diagfs filesystem
+type. `shadow_cgdevices` remains manual. Mount the diagfs to inspect state,
+load `shadow_cgdevices`, or manually unload/reload `vendor_kernel` later:
 
 ```sh
 mount -t lkm4ctr diag /mnt
-echo load > /mnt/ns/control          # start just shadow_ns, or:
-echo load > /mnt/global/control      # start every submodule at once
-cat /mnt/ns/status                   # unloaded / loading / active / ...
-cat /mnt/ns/pid/namespaces           # pid-only namespace membership listing
+cat /mnt/vendor_kernel/status          # active right after insmod
+cat /mnt/vendor_kernel/namespaces
+echo load > /mnt/cgroupdevices/control # start the manual subsystem
 ```
 
 Each runtime-loadable submodule exposes `control`, `status`, `log`, and (where
@@ -48,10 +45,7 @@ relevant) `hooks` or a live-state listing file directly under the mount root:
 * `/mnt/global/hotreload/{status,log,do-hot-reload}`
 * `/mnt/helper.sh` (read-only, mode 0555, mount root)
 * `/mnt/hijack/{control,status,log,functions,references}`
-* `/mnt/ns/{control,status,hooks,log,namespaces,references}` plus
-  `/mnt/ns/{pid,ipc,mnt,net,user,uts,cgroup}/...`
-* `/mnt/sysvipc/{control,status,hooks,resources,log,references}`
-* `/mnt/mqueue/{control,status,hooks,log,msg,references}`
+* `/mnt/vendor_kernel/{control,status,hooks,log,namespaces,msg,resources,references}`
 * `/mnt/cgroupdevices/{control,status,hooks,log,references}`
 
 Per-submodule `control` accepts `load`, `unload` (`remove`/`graceful` aliases),
@@ -160,11 +154,11 @@ export lkm4ctr_diagfs=/mnt
 . "$lkm4ctr_diagfs/helper.sh"
 
 lkm4ctr status                       # summarise global + every submodule
-lkm4ctr control ns unload            # write "unload" to ns/control
+lkm4ctr control vendor_kernel unload # write "unload" to vendor_kernel/control
 lkm4ctr load                         # alias for: control global load
 lkm4ctr forceunload hijack           # alias for: control hijack forceunload
 lkm4ctr force2                       # alias for: control global force2
-lkm4ctr logcat sysvipc               # cat sysvipc/log
+lkm4ctr logcat vendor_kernel         # cat vendor_kernel/log
 lkm4ctr references global            # cat global/references
 lkm4ctr hot-upgrade /path/to/new/lkm4ctr.ko
 lkm4ctr help                         # full command list

@@ -61,38 +61,8 @@ lkm4ctr_run_checker_mode() {
 	echo "=== LKM4CTR_QEMU_TEST: mounting lkm4ctr diagfs ==="
 	mkdir -p "$MNT"
 	mount -t lkm4ctr diag "$MNT"
-	echo load > "$MNT"/global/control
-	echo "=== LKM4CTR_QEMU_TEST: diagfs control/status/hooks/namespaces/log ==="
-	for m in hijack ns sysvipc mqueue cgroupdevices; do
-		cat "$MNT/$m/status"
-		if [ -f "$MNT/$m/hooks" ]; then
-			cat "$MNT/$m/hooks"
-		fi
-		if [ -f "$MNT/$m/namespaces" ]; then
-			cat "$MNT/$m/namespaces"
-		fi
-		if [ -f "$MNT/$m/msg" ]; then
-			cat "$MNT/$m/msg"
-		fi
-		if [ -f "$MNT/$m/functions" ]; then
-			cat "$MNT/$m/functions"
-		fi
-		cat "$MNT/$m/log"
-	done
 	cat "$MNT/global/resources"
 	cat "$MNT/global/log"
-	cat "$MNT/ns/pid/namespaces"
-	echo "=== LKM4CTR_QEMU_TEST: diagfs hot upgrade (unload/reload shadow_ns hooks) ==="
-	echo unload > "$MNT/ns/control"
-	echo "post-unload status: $(cat "$MNT/ns/status")"
-	echo load > "$MNT/ns/control"
-	echo "post-reload status: $(cat "$MNT/ns/status")"
-	echo "=== LKM4CTR_QEMU_TEST: deactivating all submodules via diagfs ==="
-	for m in ns sysvipc mqueue cgroupdevices; do
-		echo unload > "$MNT/$m/control"
-		echo "$m/status after unload: $(cat "$MNT/$m/status")"
-	done
-    echo load > "$MNT"/global/control
 	echo "=== LKM4CTR_QEMU_TEST: lkm4ctr_checker (post-insmod) ==="
 	"$CHECKER"
 	echo "=== LKM4CTR_QEMU_TEST: checker mode DONE ==="
@@ -160,6 +130,16 @@ lkm4ctr_init_2() {
 	echo "=== LKM4CTR_QEMU_TEST: running shared checker mode ==="
 	/system/bin/sh /second_init -t /lkm4ctr_checker /lkm4ctr.ko
 
+	# vendor_kernel's ipc/mqueue.c now registers its POSIX mqueue filesystem
+	# type under the real name "mqueue" (see mqueue_fs_type in
+	# lkm4ctr/vendor_kernel/ipc/mqueue.c), and vns_ipc_default_init() (via
+	# glue/vendor_kernel_ipc_mount.c's vns_mqueue_dev_ensure(), mirroring
+	# shadow_mqueue's own proactive /dev/mqueue creation) already mounts a
+	# real, working /dev/mqueue at module load time (insmod). An unmodified
+	# runc/containerd's own mount("mqueue", "/dev/mqueue", "mqueue", ...)
+	# during container init now
+	# finds and uses that real filesystem directly, so no manual /dev/mqueue
+	# premount or --ipc host workaround is needed here any more.
 	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon) ==="
 	dockerd &
 	for i in $(seq 1 30); do

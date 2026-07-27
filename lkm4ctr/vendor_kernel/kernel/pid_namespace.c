@@ -4,8 +4,10 @@
  * android14-6.1 branch). CHANGES FROM UPSTREAM:
  *   - [RENAME] All non-static global symbols prefixed with vns_ to avoid
  *     collision with the built-in kernel implementation.
- *   - [BUILD-COMPAT] slab caches replaced with kzalloc/kfree (no kmem_cache_create
- *     in out-of-tree module init context).
+ *   - [BUILD-COMPAT] namespace struct allocated via kmem_cache_alloc/_zalloc
+ *     against the real kernel's private cache, resolved at init via
+ *     shadow_hook_resolve(), so the real kernel's own exit path can
+ *     kmem_cache_free() it safely.
  *   - [BUILD-COMPAT] ns_alloc_inum/ns_free_inum -> vns_alloc_inum/vns_free_inum
  *     (proc_alloc_inum not exported; resolved at init via shadow_hook_resolve).
  *   - [BUILD-COMPAT] __init/__exit removed from non-module-init functions.
@@ -39,7 +41,6 @@
 #include "../vendor_kernel.h"
 
 static DEFINE_MUTEX(pid_caches_mutex);
-/* [BUILD-COMPAT] out-of-tree vendor_kernel uses kzalloc/kfree instead of a slab cache. */
 /* Write once array, filled from the beginning. */
 static struct kmem_cache *pid_cache[MAX_PID_NS_LEVEL];
 
@@ -102,8 +103,11 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
 		goto out;
 
 	err = -ENOMEM;
-	/* [BUILD-COMPAT] no slab cache in the out-of-tree module path. */
-	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
+	/* [BUILD-COMPAT] allocate from the real pid_ns_cachep (resolved at
+	 * init) instead of kzalloc, so the real kernel's destroy_pid_namespace()
+	 * / delayed_free_pidns() can safely kmem_cache_free() this object once
+	 * installed on the real task_struct->nsproxy. */
+	ns = kmem_cache_zalloc(vns_pid_ns_cachep, GFP_KERNEL);
 	if (ns == NULL)
 		goto out_dec;
 
@@ -122,8 +126,8 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
 
 	vns_pid_init_ref(ns);
 	ns->level = level;
-	ns->parent = get_pid_ns(parent_pid_ns);
-	ns->user_ns = get_user_ns(user_ns);
+	ns->parent = vns_get_pid_ns(parent_pid_ns); /* [BUILD-COMPAT] */
+	ns->user_ns = vns_get_user_ns(user_ns); /* [BUILD-COMPAT] */
 	ns->ucounts = ucounts;
 	ns->pid_allocated = PIDNS_ADDING;
 
@@ -131,7 +135,7 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
 
 out_free_idr:
 	idr_destroy(&ns->idr);
-	kfree(ns); /* [BUILD-COMPAT] */
+	kmem_cache_free(vns_pid_ns_cachep, ns); /* [BUILD-COMPAT] */
 out_dec:
 	dec_pid_namespaces(ucounts);
 out:
@@ -143,9 +147,9 @@ static void delayed_free_pidns(struct rcu_head *p)
 	struct pid_namespace *ns = container_of(p, struct pid_namespace, rcu);
 
 	dec_pid_namespaces(ns->ucounts);
-	put_user_ns(ns->user_ns);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 
-	kfree(ns); /* [BUILD-COMPAT] */
+	kmem_cache_free(vns_pid_ns_cachep, ns); /* [BUILD-COMPAT] */
 }
 
 static void destroy_pid_namespace(struct pid_namespace *ns)
@@ -160,11 +164,54 @@ struct pid_namespace *vns_copy_pid_ns( /* [RENAME] */
 unsigned long flags,
 	struct user_namespace *user_ns, struct pid_namespace *old_ns)
 {
+	/*
+	 * The real fork()/copy_process() path always consumes
+	 * current->nsproxy->pid_ns_for_children for future children, even on a
+	 * kernel built with CONFIG_PID_NS=n. Installing one of vendor_kernel's
+	 * module-owned pid_namespace objects there therefore lets the real
+	 * kernel allocate a task whose task_active_pid_ns() is that fake
+	 * namespace; when that task is the namespace-local pid 1 and exits, the
+	 * real kernel's own copy_process() (kernel/fork.c, unconditional of
+	 * CONFIG_PID_NS) has already set pid_ns->child_reaper = that task, so
+	 * the real do_exit()->find_child_reaper() path (kernel/exit.c) is
+	 * about to call the target's own zap_pid_ns_processes(), which on a
+	 * CONFIG_PID_NS=n build is an unconditional BUG() stub
+	 * (include/linux/pid_namespace.h). Rather than degrade CLONE_NEWPID
+	 * to no-op bookkeeping here and lose real pid namespace isolation
+	 * entirely, always create the module-owned pid_namespace below --
+	 * alloc_pid()/task_active_pid_ns() themselves are unconditional of
+	 * CONFIG_PID_NS, so per-namespace pid virtualization keeps working
+	 * for real regardless. The BUG() is instead defused right before it
+	 * would fire, in vns_task_exit_cleanup() (kernel/nsproxy.c), the same
+	 * do_exit() exit-safety kprobe this module already installs -- see
+	 * that function's comment, and vns_zap_pid_ns_processes() below, for
+	 * the shadow_ns-style reduced-scope cascade (SIGKILL everyone else in
+	 * the namespace, then stop admitting new members; orphan
+	 * reparenting/reaping is left to the host's own genuine parent chain,
+	 * exactly like shadow_ns's documented zap_pid_ns_processes()
+	 * fallback in shadow_ns/shadow_ns_pid.c).
+	 */
 	if (!(flags & CLONE_NEWPID))
-		return get_pid_ns(old_ns);
+		return vns_get_pid_ns(old_ns); /* [BUILD-COMPAT] */
 	if (task_active_pid_ns(current) != old_ns)
 		return ERR_PTR(-EINVAL);
 	return create_pid_namespace(user_ns, old_ns);
+}
+
+/*
+ * [BUILD-COMPAT] Local equivalent of the real kernel's get_pid_ns(), which
+ * is always a static inline in pid_namespace.h whose body differs based on
+ * the *target* kernel's own CONFIG_PID_NS setting (real refcount_inc() vs.
+ * no-op). Since vendor_kernel installs and refcounts its own struct
+ * pid_namespace objects independently of the target's CONFIG_PID_NS, this
+ * shim always performs the real refcount_inc() semantics. See
+ * vendor_kernel.h for the full rationale.
+ */
+struct pid_namespace *vns_get_pid_ns(struct pid_namespace *ns) /* [BUILD-COMPAT] */
+{
+	if (ns != &init_pid_ns)
+		vns_pid_get_ref(ns);
+	return ns;
 }
 
 void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
@@ -182,8 +229,36 @@ void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
 
 void vns_zap_pid_ns_processes(struct pid_namespace *pid_ns) /* [RENAME] */
 {
-	/* [BUILD-COMPAT] out-of-tree vendor_kernel does not vendor pidns teardown internals. */
+	struct task_struct *task;
+	struct pid *pid;
+	int nr;
+
+	/* Don't allow any more processes into the pid namespace. */
 	disable_pid_allocation(pid_ns);
+
+	/*
+	 * [BUILD-COMPAT] The real zap_pid_ns_processes() (kernel/pid_namespace.c)
+	 * also blocks in a kernel_wait4() loop to reap every zombie left
+	 * behind, which requires sleeping and therefore cannot run from
+	 * vns_task_exit_cleanup()'s do_exit() kprobe pre_handler (atomic
+	 * context; see the comment there). Only the safe, non-blocking half
+	 * of the real cascade is reproduced here -- SIGKILL every other task
+	 * this namespace's idr still tracks -- exactly like shadow_ns's own
+	 * reduced-scope zap fallback (shadow_ns/shadow_ns_pid.c: "SIGKILL
+	 * everyone else in the namespace, then stop admitting new members").
+	 * Orphan reparenting/reaping is deliberately left to the host's own
+	 * genuine parent chain, same documented limitation as shadow_ns.
+	 */
+	rcu_read_lock();
+	read_lock(&tasklist_lock);
+	nr = 2;
+	idr_for_each_entry_continue(&pid_ns->idr, pid, nr) {
+		task = pid_task(pid, PIDTYPE_PID);
+		if (task && task != current && !__fatal_signal_pending(task))
+			send_sig(SIGKILL, task, 1);
+	}
+	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 }
 
 #ifdef CONFIG_CHECKPOINT_RESTORE
@@ -272,7 +347,7 @@ static struct ns_common *pidns_get(struct task_struct *task)
 	rcu_read_lock();
 	ns = task_active_pid_ns(task);
 	if (ns)
-		get_pid_ns(ns);
+		vns_get_pid_ns(ns); /* [BUILD-COMPAT] */
 	rcu_read_unlock();
 
 	return ns ? &ns->ns : NULL;
@@ -285,7 +360,7 @@ static struct ns_common *pidns_for_children_get(struct task_struct *task)
 	task_lock(task);
 	if (task->nsproxy) {
 		ns = task->nsproxy->pid_ns_for_children;
-		get_pid_ns(ns);
+		vns_get_pid_ns(ns); /* [BUILD-COMPAT] */
 	}
 	task_unlock(task);
 
@@ -303,7 +378,7 @@ static struct ns_common *pidns_for_children_get(struct task_struct *task)
 
 static void pidns_put(struct ns_common *ns)
 {
-	put_pid_ns(to_pid_ns(ns));
+	vns_put_pid_ns(to_pid_ns(ns)); /* [BUILD-COMPAT] */
 }
 
 static int pidns_install(struct nsset *nsset, struct ns_common *ns)
@@ -333,8 +408,8 @@ static int pidns_install(struct nsset *nsset, struct ns_common *ns)
 	if (ancestor != active)
 		return -EINVAL;
 
-	put_pid_ns(nsproxy->pid_ns_for_children);
-	nsproxy->pid_ns_for_children = get_pid_ns(new);
+	vns_put_pid_ns(nsproxy->pid_ns_for_children); /* [BUILD-COMPAT] */
+	nsproxy->pid_ns_for_children = vns_get_pid_ns(new); /* [BUILD-COMPAT] */
 	return 0;
 }
 
@@ -353,7 +428,7 @@ static struct ns_common *pidns_get_parent(struct ns_common *ns)
 		p = p->parent;
 	}
 
-	return &get_pid_ns(pid_ns)->ns;
+	return &vns_get_pid_ns(pid_ns)->ns; /* [BUILD-COMPAT] */
 }
 
 static struct user_namespace *pidns_owner(struct ns_common *ns)
@@ -384,5 +459,11 @@ const struct proc_ns_operations vns_pidns_for_children_operations = { /* [RENAME
 
 void vns_pid_ns_init(void) /* [RENAME] */
 {
-	/* [BUILD-COMPAT] no per-type slab cache in out-of-tree module */
+	/* [BUILD-COMPAT] module-owned cache: see vendor_kernel/README.md's
+	 * "Slab-cache consistency with the real kernel" for why this no
+	 * longer resolves the real kernel's private pid_ns_cachep. */
+	if (!vns_pid_ns_cachep)
+		vns_pid_ns_cachep = kmem_cache_create("vns_pid_namespace",
+			sizeof(struct pid_namespace), 0,
+			SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT, NULL);
 }

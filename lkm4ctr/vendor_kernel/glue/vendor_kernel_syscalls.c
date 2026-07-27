@@ -9,6 +9,7 @@
 #include <linux/capability.h>
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
+#include <linux/pid.h>
 #include <uapi/linux/sched.h>
 #include <asm/ptrace.h>
 
@@ -88,9 +89,16 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 
 	if (new_cred)
 		commit_creds(new_cred);
-	vns_registry_set_nsproxy(task_tgid_nr(current), new_nsp);
+	/*
+	 * Actually install the newly created namespaces on the calling task,
+	 * exactly like the real unshare(2) does via switch_task_namespaces().
+	 * Ownership of the new_nsp reference is transferred here; without this
+	 * step the rest of the kernel (hostname, /proc, ipc, netns lookups,
+	 * future fork()s, ...) keeps using the task's original nsproxy and
+	 * unshare() degenerates into bookkeeping only.
+	 */
 	if (new_nsp)
-		vns_put_nsproxy(new_nsp);
+		vns_switch_task_namespaces(current, new_nsp);
 	vendor_kernel_registry.stat_unshare++;
 	return 0;
 }
@@ -106,20 +114,46 @@ static long vendor_kernel_hook_setns(const struct pt_regs *regs)
 	return ret;
 }
 
-static void vendor_kernel_clone_track(long ret, unsigned long vns_flags)
+static void vendor_kernel_clone_track(long ret, unsigned long clone_flags,
+				      unsigned long vns_flags)
 {
 	struct nsproxy *new_nsp = NULL;
 
 	if (ret <= 0)
 		return;
 	if (vns_flags) {
+		/*
+		 * clone(CLONE_NEWxxx, ...) requested new namespaces directly
+		 * (rather than unshare()+fork()). The real clone() syscall was
+		 * already invoked with the vns_* flags masked off, so the
+		 * child was created sharing the parent's nsproxy. Build the
+		 * new namespaces now and install them for real on the child
+		 * task (same effect create_new_namespaces()+switch would have
+		 * had, minus pid_ns_for_children applying to the child's own
+		 * struct pid, which is unavoidable without hooking
+		 * copy_process() itself since the child's pid was already
+		 * allocated from the parent's pid namespace by the time this
+		 * hook runs).
+		 */
 		if (!vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, NULL, NULL)) {
-			vns_registry_set_nsproxy((pid_t)ret, new_nsp);
+			struct pid *child_pid = find_get_pid((pid_t)ret);
+
+			if (child_pid) {
+				struct task_struct *child = get_pid_task(child_pid, PIDTYPE_PID);
+
+				if (child) {
+#if !defined(CONFIG_SYSVIPC)
+					copy_semundo(clone_flags, child);
+#endif
+					vns_switch_task_namespaces(child, new_nsp);
+					new_nsp = NULL;
+					put_task_struct(child);
+				}
+				put_pid(child_pid);
+			}
 			if (new_nsp)
 				vns_put_nsproxy(new_nsp);
 		}
-	} else {
-		vns_registry_clone(task_tgid_nr(current), (pid_t)ret);
 	}
 	vendor_kernel_registry.stat_clone++;
 }
@@ -134,7 +168,7 @@ static long vendor_kernel_hook_clone(const struct pt_regs *regs)
 	if (vns_flags)
 		vns_sys_set_arg0(&regs_copy, flags & ~VNS_CLONE_FLAGS);
 	ret = real_sys_clone(vns_flags ? &regs_copy : regs);
-	vendor_kernel_clone_track(ret, vns_flags);
+	vendor_kernel_clone_track(ret, flags, vns_flags);
 	return ret;
 }
 
@@ -161,21 +195,21 @@ static long vendor_kernel_hook_clone3(const struct pt_regs *regs)
 	ret = real_sys_clone3(regs);
 	if (patched && copy_to_user(uargs, &orig_flags, sizeof(orig_flags)))
 		return -EFAULT;
-	vendor_kernel_clone_track(ret, vns_flags);
+	vendor_kernel_clone_track(ret, (unsigned long)orig_flags, vns_flags);
 	return ret;
 }
 
 static long vendor_kernel_hook_fork(const struct pt_regs *regs)
 {
 	long ret = real_sys_fork(regs);
-	vendor_kernel_clone_track(ret, 0);
+	vendor_kernel_clone_track(ret, 0, 0);
 	return ret;
 }
 
 static long vendor_kernel_hook_vfork(const struct pt_regs *regs)
 {
 	long ret = real_sys_vfork(regs);
-	vendor_kernel_clone_track(ret, 0);
+	vendor_kernel_clone_track(ret, 0, 0);
 	return ret;
 }
 

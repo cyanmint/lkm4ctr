@@ -114,6 +114,16 @@ on:
         required: false
         type: string
         default: ''
+      create_release:
+        description: 'Create a GitHub release with lkm4ctr.ko (all built KMIs) and lkm4ctr_checker'
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Tag to use for the created release (blank = auto-generated)'
+        required: false
+        type: string
+        default: ''
 
 env:
   # KMIs published by SukiSU-Ultra's ghcr.io/ylarod/ddk-min image at this
@@ -373,3 +383,58 @@ jobs:
         with:
           name: injected-ramdisk.cpio
           path: injected-ramdisk.cpio
+
+  # Only runs for a manual workflow_dispatch run with the "create_release"
+  # input checked on. Collects lkm4ctr.ko for every KMI built in the "build"
+  # matrix job plus the lkm4ctr_checker binary and publishes them all as
+  # assets on a single GitHub release.
+  release:
+    needs: [prepare, build, build-checker]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download all lkm4ctr.ko artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lkm4ctr-modules-*-arm64
+          path: release-assets
+
+      - name: Download lkm4ctr_checker (arm64)
+        uses: actions/download-artifact@v8
+        with:
+          name: lkm4ctr_checker-arm64
+          path: release-assets/lkm4ctr_checker-arm64
+
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-out
+          for d in release-assets/lkm4ctr-modules-*-arm64/; do
+            name="$(basename "$d")"
+            kmi="${name#lkm4ctr-modules-}"
+            kmi="${kmi%-arm64}"
+            cp "$d/lkm4ctr.ko" "release-out/lkm4ctr-${kmi}-arm64.ko"
+          done
+          cp release-assets/lkm4ctr_checker-arm64/lkm4ctr_checker release-out/lkm4ctr_checker-arm64
+          chmod +x release-out/lkm4ctr_checker-arm64
+          echo "=== release assets ==="
+          ls -la release-out
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          if [ -z "$tag" ]; then
+            tag="lkm4ctr-$(date -u +%Y%m%d%H%M%S)"
+          fi
+          gh release create "$tag" release-out/* \
+            --repo "${{ github.repository }}" \
+            --title "$tag" \
+            --notes "Automated lkm4ctr build (KMIs: ${{ needs.prepare.outputs.matrix }})"

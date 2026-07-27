@@ -4,8 +4,7 @@
 merged `lkm4ctr.ko`. It hosts the
 `shadow_hook_resolve()/install()/remove()/install_all()/remove_all()`
 implementation shared by every syscall-hooking subsystem in the `lkm4ctr`
-family: `shadow_ns`, `shadow_sysvipc`, `shadow_mqueue`
-and `shadow_cgdevices`. See `../../common/shadow_hook.h` for the full ABI
+family: `vendor_kernel` and `shadow_cgdevices`. See `../../common/shadow_hook.h` for the full ABI
 contract (struct layout, `SHADOW_HOOK()` initialiser macro, function
 prototypes) that this subsystem implements and every caller includes.
 

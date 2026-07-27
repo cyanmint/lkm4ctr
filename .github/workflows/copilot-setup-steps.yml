@@ -26,6 +26,7 @@ jobs:
             "$RUNNER_TEMP/kernel-common"
 
       - name: Apply containerd (ctr) patches
+        if: cancelled()
         run: |
           set -euo pipefail
 

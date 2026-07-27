@@ -29,7 +29,11 @@ DEFINE_SPINLOCK(mq_lock);
  * and not CONFIG_IPC_NS.
  */
 struct ipc_namespace init_ipc_ns = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+	.count = REFCOUNT_INIT(1),
+#else
 	.ns.count = REFCOUNT_INIT(1),
+#endif
 	.user_ns = &init_user_ns,
 	.ns.inum = PROC_IPC_INIT_INO,
 #ifdef CONFIG_IPC_NS
