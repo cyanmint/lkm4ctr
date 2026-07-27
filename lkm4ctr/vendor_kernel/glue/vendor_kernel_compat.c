@@ -145,7 +145,11 @@ static do_exit_fn_t               vns_do_exit_real;
  */
 DEFINE_RWLOCK(tasklist_lock);
 
-/* Resolved pointer to the kernel's init_cgroup_ns data object. */
+/* Resolved pointer to the kernel's init_cgroup_ns data object, kept for
+ * cosmetic bookkeeping only: it is never installed onto
+ * vns_init_nsproxy.cgroup_ns, which always points at the module-owned
+ * vns_default_cgroup_ns singleton (kernel/cgroup/namespace.c) instead --
+ * mirroring vns_init_ipc_ns_ptr below. */
 #ifdef CONFIG_CGROUPS
 struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 #endif /* CONFIG_CGROUPS */
@@ -245,11 +249,19 @@ void vns_compat_resolve(void)
 	RESOLVE(vns_file_ns_capable_real,       file_ns_capable);
 	RESOLVE(vns_do_exit_real,               do_exit);
 #ifdef CONFIG_CGROUPS
+	/*
+	 * Best-effort resolve of the *real* kernel's init_cgroup_ns. This is
+	 * used for bookkeeping ONLY (see vns_init_cgroup_ns_ptr's declaration
+	 * above); a failure to resolve it no longer disables cgroup namespace
+	 * bookkeeping, since vns_init_nsproxy.cgroup_ns is always pointed at
+	 * the vendored vns_default_cgroup_ns singleton instead (see
+	 * vendor_kernel_init(), glue/vendor_kernel_module.c).
+	 */
 	vns_init_cgroup_ns_ptr = (struct cgroup_namespace *)(uintptr_t)
 		shadow_hook_resolve("init_cgroup_ns");
 	if (!vns_init_cgroup_ns_ptr)
 		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-			"compat: init_cgroup_ns not resolved (cgroup ns disabled)");
+			"compat: init_cgroup_ns not resolved (bookkeeping only; cgroup ns unaffected)");
 #endif
 	/*
 	 * Best-effort resolve of the *real* kernel's init_ipc_ns. This is now

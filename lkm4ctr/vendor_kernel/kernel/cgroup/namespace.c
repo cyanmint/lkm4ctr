@@ -10,7 +10,14 @@
  *     (proc_alloc_inum not exported; resolved at init via shadow_hook_resolve).
  *   - [BUILD-COMPAT] __init/__exit removed from non-module-init functions.
  *   - [DIAGFS] Statistics incremented via vendor_kernel_registry for diagfs exposure.
- *   Any line NOT marked RENAME/BUILD-COMPAT/DIAGFS is unchanged from upstream.
+ *   - [BUILD-COMPAT] vns_default_cgroup_ns / vns_cgroup_default_init() added
+ *     (new, not upstream): a module-owned default cgroup_namespace singleton
+ *     used unconditionally as vns_init_nsproxy.cgroup_ns instead of resolving
+ *     and pointing at the running kernel's own init_cgroup_ns, mirroring the
+ *     module-owned default already used for ipc_namespace
+ *     (vns_default_ipc_ns, ipc/msgutil.c) and time_namespace
+ *     (vns_init_time_ns, kernel/time/namespace.c).
+ *   Any other line NOT marked RENAME/BUILD-COMPAT/DIAGFS is unchanged from upstream.
  */
 #include <linux/cgroup.h>
 #include <linux/nsproxy.h>
@@ -92,3 +99,35 @@ const struct proc_ns_operations vns_cgroupns_operations = { /* [RENAME] */
 	.install	= vns_cgroupns_install,
 	.owner		= vns_cgroupns_owner,
 };
+
+/*
+ * [BUILD-COMPAT] vns_default_cgroup_ns (new, not upstream) is vendor_kernel's
+ * own module-owned default cgroup_namespace, used unconditionally as
+ * vns_init_nsproxy.cgroup_ns (see glue/vendor_kernel_module.c) instead of
+ * resolving and pointing at the running kernel's real, non-exported
+ * init_cgroup_ns -- mirroring the module-owned default already used for
+ * ipc_namespace (vns_default_ipc_ns) and time_namespace (vns_init_time_ns).
+ * root_cset is deliberately left NULL: vns_copy_cgroup_ns() never actually
+ * builds a brand-new cgroup_namespace (CLONE_NEWCGROUP is bookkeeping-only,
+ * same as CLONE_NEWNET/CLONE_NEWNS -- see vendor_kernel/README.md, "Known
+ * remaining gaps"), so root_cset is never dereferenced by any vendored code
+ * path; a real per-namespace root_cset would require duplicating the
+ * running kernel's non-exported cgroup core (css_set table, cgroup_mutex),
+ * which is out of scope here.
+ */
+struct cgroup_namespace vns_default_cgroup_ns = {
+	.ns.ops		= &vns_cgroupns_operations,
+	.user_ns	= &init_user_ns,
+};
+
+void vns_cgroup_default_init(void) /* [BUILD-COMPAT] */
+{
+	/*
+	 * Pin vns_default_cgroup_ns's refcount to a large sentinel value so
+	 * it can never legitimately reach zero and be mistaken for a
+	 * freeable object -- it is a static singleton, never slab-allocated,
+	 * shared by every task that never unshare(CLONE_NEWCGROUP)'d (same
+	 * pattern as vns_init_nsproxy.count, kernel/nsproxy.c).
+	 */
+	vns_init_count(&vns_default_cgroup_ns.ns.count, 0x40000000);
+}

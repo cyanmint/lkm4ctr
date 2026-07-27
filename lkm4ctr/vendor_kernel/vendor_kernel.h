@@ -235,6 +235,14 @@ extern const struct proc_ns_operations vns_ipcns_operations;
 struct cgroup_namespace *vns_copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns, struct cgroup_namespace *old_cgroup_ns);
 void vns_put_cgroup_ns(struct cgroup_namespace *ns);
 extern const struct proc_ns_operations vns_cgroupns_operations;
+/*
+ * vns_default_cgroup_ns / vns_cgroup_default_init() (kernel/cgroup/namespace.c)
+ * -- module-owned default cgroup_namespace, always used as
+ * vns_init_nsproxy.cgroup_ns regardless of whether the running kernel's own
+ * init_cgroup_ns can be resolved, mirroring vns_default_ipc_ns/vns_init_time_ns.
+ */
+extern struct cgroup_namespace vns_default_cgroup_ns;
+void vns_cgroup_default_init(void);
 
 extern struct time_namespace vns_init_time_ns;
 struct time_namespace *vns_copy_time_ns(unsigned long flags, struct user_namespace *user_ns, struct time_namespace *old_ns);
@@ -329,6 +337,15 @@ extern struct shadow_hook *vendor_kernel_procfs_hooks[];
 
 /* compat layer (glue/vendor_kernel_compat.c) */
 extern struct ucounts vns_ucounts_stub;
+/*
+ * vns_init_cgroup_ns_ptr is the best-effort resolved pointer to the *real*
+ * kernel's init_cgroup_ns data object (resolved via shadow_hook_resolve() in
+ * glue/vendor_kernel_compat.c), kept for cosmetic bookkeeping only -- mirroring
+ * vns_init_ipc_ns_ptr below. It is never installed onto vns_init_nsproxy.cgroup_ns:
+ * that field always points at the module-owned vns_default_cgroup_ns singleton
+ * (kernel/cgroup/namespace.c), regardless of whether the running kernel's own
+ * init_cgroup_ns resolves successfully.
+ */
 #ifdef CONFIG_CGROUPS
 extern struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 #endif

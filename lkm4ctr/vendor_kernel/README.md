@@ -93,7 +93,7 @@ supported fix instead.
 ## Required kernel Kconfig options
 
 `vendor_kernel` resolves a handful of the running kernel's namespace-adjacent
-*function* symbols (e.g. `init_ipc_ns`, `init_cgroup_ns`) by name at module
+*function* symbols (e.g. `init_ipc_ns`) by name at module
 load time via `shadow_hook_resolve()`; the namespace object slab caches
 themselves (`uts_ns_cache`/`nsproxy_cachep`/`pid_ns_cachep`/`user_ns_cachep`)
 are no longer resolved from the running kernel at all -- see "Slab-cache
@@ -102,19 +102,23 @@ backing `CONFIG_*_NS` option is not built into the running kernel, the
 corresponding resolved function does not exist, and `unshare(2)`/
 `clone(2)`/`setns(2)` for that namespace type either falls back to
 bookkeeping-only behaviour or fails with `-EINVAL` (this is the root cause
-of `ns_ipc`/`ns_net` unshare test failures seen on kernels that ship with
-`CONFIG_IPC_NS=n`/`CONFIG_NET_NS=n`, even though `vendor_kernel` itself
-loads and activates successfully). `UTS_NS`, `PID_NS`, and `USER_NS` are the
-exception: as documented above under "Namespace refcounting is fully
-self-contained", vendor_kernel no longer depends on the target's
-`CONFIG_UTS_NS`/`CONFIG_PID_NS`/`CONFIG_USER_NS` at all. The running kernel
+of `ns_net` unshare test failures seen on kernels that ship with
+`CONFIG_NET_NS=n`, even though `vendor_kernel` itself
+loads and activates successfully). `UTS_NS`, `PID_NS`, `USER_NS`, `IPC_NS`,
+and `CGROUP_NS` are the exception: as documented above under "Namespace
+refcounting is fully self-contained" and below under "Module-owned default
+cgroup namespace, always vendored", vendor_kernel no longer depends on the
+target's `CONFIG_UTS_NS`/`CONFIG_PID_NS`/`CONFIG_USER_NS`/`CONFIG_IPC_NS`/
+`CONFIG_CGROUPS` at all for these to install and refcount correctly (real,
+per-task `CLONE_NEWCGROUP` isolation itself remains bookkeeping-only --
+see "Known remaining gaps" below -- but that has never depended on the
+running kernel's `CONFIG_CGROUPS` setting either way). The running kernel
 still must be built with the remaining options for full namespace coverage:
 
 - `CONFIG_NAMESPACES=y`
-- `CONFIG_IPC_NS=y` (also requires `CONFIG_SYSVIPC=y` and/or `CONFIG_POSIX_MQUEUE=y`, since `IPC_NS depends on (SYSVIPC || POSIX_MQUEUE)`)
 - `CONFIG_NET_NS=y`
-- `CONFIG_CGROUPS=y`
 - `CONFIG_TIME_NS=y`
+
 
 Of these, `CONFIG_IPC_NS=n` (and, on kernels that still gate it,
 `CONFIG_PID_NS=n`) are the exceptions that no longer need a diagnostic
@@ -208,10 +212,35 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 - **`/dev/mqueue` availability, without requiring `--ipc host`.** `mqueue_fs_type.name` (`ipc/mqueue.c`) is registered under the real name `"mqueue"`, not a module-private alias, so an unmodified `runc`/`containerd`/`dockerd`'s own `mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC, ...)` during container init finds it through the ordinary `get_fs_type("mqueue")` lookup and just works — no `--ipc host` workaround needed. `register_filesystem()` tolerates losing that name to a real `CONFIG_POSIX_MQUEUE=y` kernel's own builtin mqueue filesystem (`-EBUSY`): `mqueue_fs_type_registered` tracks whether registration actually succeeded, so `vns_mqueue_fs_exit()`/the error path never call `unregister_filesystem()` on a struct that was never linked in, and `mq_create_mount()`'s own `fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT)` (used for the module's own internal ipc_namespace bookkeeping) never depends on the name lookup succeeding either way, since it references the local struct pointer directly. On top of that, `glue/vendor_kernel_ipc_mount.c`'s `vns_mqueue_dev_ensure()` (called from `vns_ipc_default_init()`) proactively creates `/dev/mqueue` and mounts it at module load time, since `lkm4ctr.ko` is typically insmod'd late (e.g. a KernelSU/Magisk post-fs-data module), well after init.rc's own one-shot `mount mqueue mqueue /dev/mqueue ...` line already ran and silently failed with `-ENODEV` (init never retries a failed boot-time mount). It proactively mounts the real, vendored `mqueue` filesystem type first, falling back to `tmpfs` only if that unexpectedly fails. All of the VFS helpers this needs (`path_mount`, `vfs_mkdir`, `kern_path`/`kern_path_create`/`done_path_create`, `path_put`) are resolved at runtime via `shadow_hook_resolve()`, same as the rest of vendor_kernel's non-exported-symbol handling; this step is best-effort and never fails module init.
 - **`sysvsem`/`sysvshm` exit-time state is self-contained too.** Upstream keeps the per-task semaphore-undo list (`task_struct->sysvsem`) and the per-task orphaned-shm-segment list (`task_struct->sysvshm`) as real `task_struct` members, but on a `CONFIG_SYSVIPC=n` target kernel those members don't exist in `struct task_struct` at all. `ipc/sem.c`/`ipc/shm.c` therefore keep this state in vendor_kernel's own per-task side table (the same `struct vns_task` registry `glue/vendor_kernel_module.c` already uses for the per-task `nsproxy` pointer) instead of the real `task_struct` fields: `vns_copy_semundo()`/`vns_prepare_exit_sem()`/`vns_exit_sem()` and `vns_prepare_exit_shm()`/`vns_exit_shm()` are called from the clone/exit paths (`glue/vendor_kernel_syscalls.c`'s `vendor_kernel_clone_track()`, `kernel/nsproxy.c`'s `vns_task_exit_cleanup()`) instead of the upstream `copy_semundo()`/`exit_sem()`/`exit_shm()` call sites baked into the real `fork()`/`do_exit()`. On a target that genuinely ships `CONFIG_SYSVIPC=y` (so `task_struct` does carry real `sysvsem`/`sysvshm`), the real fields are used directly instead, guarded by `#if defined(CONFIG_SYSVIPC)`.
 
+## Module-owned default cgroup namespace, always vendored
+
+`vns_default_cgroup_ns` (`kernel/cgroup/namespace.c`) is a module-owned default
+`cgroup_namespace` singleton, analogous to `vns_default_ipc_ns`/`vns_init_time_ns`.
+`vendor_kernel_init()` calls `vns_cgroup_default_init()` (pinning its refcount to
+a large sentinel, same pattern as `vns_init_nsproxy.count`) and unconditionally
+points `vns_init_nsproxy.cgroup_ns` at it -- **never** at the running kernel's
+real `init_cgroup_ns`, regardless of whether `shadow_hook_resolve("init_cgroup_ns")`
+succeeds. `vns_init_cgroup_ns_ptr` is still resolved for cosmetic bookkeeping only
+(mirroring `vns_init_ipc_ns_ptr`) and is never installed anywhere.
+
+This closes the one remaining case where `vendor_kernel`'s pinned default
+nsproxy depended on the target kernel's own resolved namespace object instead
+of a vendored one, bringing `CGROUP_NS` bookkeeping in line with
+`UTS_NS`/`PID_NS`/`USER_NS`/`IPC_NS`/overlayfs. It does **not** change the
+scope of cgroup namespace *isolation* itself: `vns_copy_cgroup_ns()` still
+unconditionally returns the caller's existing `cgroup_ns` (`get_cgroup_ns(old_ns)`)
+rather than allocating a new one on `unshare(CLONE_NEWCGROUP)`, so
+`vns_default_cgroup_ns.root_cset` is deliberately left `NULL` and never
+dereferenced -- building a real, isolated per-namespace `root_cset` would
+require duplicating the running kernel's non-exported cgroup core (`css_set`
+table, `cgroup_mutex`, `task_css_set()`), which is out of scope for this
+module (see "Known remaining gaps" below).
+
 ## Known remaining gaps
 
 - `SHM_HUGETLB` shared-memory segments are a best-effort gap: `ipc/shm.c` references the running kernel's hugetlb `hstates[]`/`default_hstate_idx`/`size_to_hstate()`, which are not exported and are absent entirely on `CONFIG_HUGETLB_PAGE=n`. `glue/vendor_kernel_ipc_compat.c` defines these as zeroed/NULL-returning stubs, so `shmget(..., SHM_HUGETLB)` fails cleanly with `-EINVAL` (`shm.c` null-checks `hstate_sizelog()`) rather than doing anything unsafe; ordinary (non-hugetlb) `shmget()` is fully functional.
 - `NET_NS` and `MNT_NS` are still resolved via optional function pointers (`vns_copy_net_ns_fn`/`vns_copy_mnt_ns_fn` in `glue/vendor_kernel_module.c`) rather than being fully vendored, so they still silently fall back to bookkeeping-only/no-op behaviour on a target kernel with `CONFIG_NET_NS=n`/`CONFIG_NAMESPACES` MNT support missing.
+- `CGROUP_NS` bookkeeping (`vns_init_nsproxy.cgroup_ns`, `/proc/<pid>/ns/cgroup` refcounting) is fully vendored and independent of the target's `CONFIG_CGROUPS` setting (see "Module-owned default cgroup namespace, always vendored" above), but `unshare(CLONE_NEWCGROUP)` itself remains bookkeeping-only: `vns_copy_cgroup_ns()` always returns the caller's existing `cgroup_namespace` rather than allocating an isolated one, since a real one requires a live `root_cset` from the running kernel's own (non-exported) cgroup hierarchy. Same posture as `NET_NS`/`MNT_NS` above.
 - `CLONE_NEWNET` is *always* bookkeeping-only (`create_new_namespaces()` in `kernel/nsproxy.c` masks `CLONE_NEWNET` out of the flags it passes to the real, resolved `copy_net_ns()`), even on a target kernel that genuinely has `CONFIG_NET_NS=y` and where `copy_net_ns()` resolves successfully. Letting `copy_net_ns()` actually build a brand-new `struct net` from this call site was observed to corrupt the kernel-wide `percpu_counters` list the first time it ran (`kernel BUG at lib/list_debug.c:29`, call trace `xfrm4_net_init` -> `__percpu_counter_init` -> `ops_init` -> `setup_net` -> `copy_net_ns` -> `create_new_namespaces` [lkm4ctr]), even though every other namespace type built alongside it in the same call is unaffected. The exact mechanism was not fully root-caused (no live KASAN/SLUB-debug reproduction was available), so real `NET_NS` isolation is disabled here rather than risk that crash; `unshare(CLONE_NEWNET)`/`ns_net` reports STUB (no real isolation) instead of PASS.
 - `kernel/cgroup/namespace.c` and `kernel/time/namespace.c` store `user_ns` without taking a reference on it (`(void)user_ns;` in their copy functions), unlike `kernel/pid_namespace.c`/`kernel/user_namespace.c`/`kernel/utsname.c`/`ipc/namespace.c` which now use `vns_get_user_ns()`/`vns_put_user_ns()`; this is a pre-existing gap unrelated to `CONFIG_PID_NS`/`CONFIG_USER_NS` and was not changed here.
 - `cred->user_ns` can be freed independently of nsproxy teardown via a deferred RCU callback (`put_cred_rcu()`), decoupled from task exit -- see "Slab-cache consistency with the real kernel" above for why this is an accepted, no-op-leak-only gap.

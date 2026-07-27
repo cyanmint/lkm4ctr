@@ -233,12 +233,17 @@ int vendor_kernel_init(void)
 	vns_ipc_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported ipc/mm/security/audit symbols */
 	if (!vns_compat_ready())
 		return -ENOENT;
-#ifdef CONFIG_CGROUPS
-	/* [BUILD-COMPAT] init_cgroup_ns can't be used in a static initializer
-	 * (not exported); patch vns_init_nsproxy at runtime once resolved. */
-	if (vns_init_cgroup_ns_ptr)
-		vns_init_nsproxy.cgroup_ns = vns_init_cgroup_ns_ptr;
-#endif
+	/*
+	 * [BUILD-COMPAT] Build vendor_kernel's own default cgroup_namespace
+	 * and point vns_init_nsproxy.cgroup_ns at it unconditionally, never
+	 * at the running kernel's real init_cgroup_ns (vns_init_cgroup_ns_ptr
+	 * is resolved for cosmetic bookkeeping only -- see vendor_kernel.h).
+	 * This mirrors the vns_default_ipc_ns/vns_ipc_active_default()
+	 * pattern below, so cgroup namespace support no longer depends on
+	 * whether the running kernel's init_cgroup_ns can be resolved at all.
+	 */
+	vns_cgroup_default_init();
+	vns_init_nsproxy.cgroup_ns = &vns_default_cgroup_ns;
 #if defined(CONFIG_POSIX_MQUEUE) || defined(CONFIG_SYSVIPC)
 	/*
 	 * [BUILD-COMPAT] vns_init_ipc_ns_ptr (the running kernel's real,
