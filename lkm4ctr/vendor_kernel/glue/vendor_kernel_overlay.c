@@ -36,10 +36,23 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/string.h>
+#include <linux/version.h>
 
 #include "../vendor_kernel.h"
 #include "../../../common/shadow_hook.h"
 #include "../../../common/lkm4ctr_log.h"
+
+/*
+ * The vendored fs/overlayfs sources (vendor_kernel/fs/overlayfs, *.c files) are
+ * only compiled for kernels in [6.1, 6.3) -- see the [BUILD-COMPAT] comment
+ * at the top of each of those files. Outside that range, vns_ovl_init(),
+ * vns_ovl_exit() and vns_ovl_fs_type do not even exist (those files compile
+ * to nothing), so the get_fs_type() override must not be installed; the
+ * running kernel's own overlay implementation is used instead. Missing
+ * vendored overlayfs support is not a fatal condition for the rest of
+ * vendor_kernel, so vns_overlay_init() still returns 0 in that case.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 
 static struct file_system_type *(*real_get_fs_type)(const char *name);
 
@@ -97,3 +110,23 @@ size_t vns_overlay_diag_snprintf(char *buf, size_t buflen)
 	return scnprintf(buf, buflen, "overlay_mounts: %d\n",
 			 atomic_read(&vns_ovl_mount_count));
 }
+
+#else /* !(LINUX_VERSION_CODE in [6.1, 6.3)) */
+
+int vns_overlay_init(void)
+{
+	LKM4CTR_INFO("vendor_kernel",
+		     "vendored overlayfs is not supported on this kernel version; running kernel's own overlay implementation is used for \"mount -t overlay ...\"");
+	return 0;
+}
+
+void vns_overlay_exit(void)
+{
+}
+
+size_t vns_overlay_diag_snprintf(char *buf, size_t buflen)
+{
+	return scnprintf(buf, buflen, "overlay_mounts: unsupported\n");
+}
+
+#endif /* LINUX_VERSION_CODE in [6.1, 6.3) */

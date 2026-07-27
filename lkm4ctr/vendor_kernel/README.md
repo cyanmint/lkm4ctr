@@ -315,6 +315,21 @@ out-of-tree-buildable overlay filesystem, with two minimal edits (both in
   surfaced through vendor_kernel's diagfs status
   (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
 
+**KMI support range**: this vendored source was taken from a kernel in the
+`[6.1, 6.3)` VFS API era (idmap arguments typed as `struct user_namespace *`,
+`vfs_tmpfile_open()`, `alloc_inode_sb()`, `vfs_set_acl_prepare()` all
+present; `struct mnt_idmap` not yet introduced). Every `fs/overlayfs/*.c`
+file therefore wraps its whole body in
+`#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE <
+KERNEL_VERSION(6, 3, 0)`, compiling to an empty translation unit outside
+that range instead of failing the build against a mismatched VFS API.
+`glue/vendor_kernel_overlay.c` detects the same range and, outside it,
+`vns_overlay_init()` skips installing the `get_fs_type()` override and
+returns 0 (so the rest of `lkm4ctr.ko` still loads normally); `mount -t
+overlay ...` then falls back to the running kernel's own overlay
+implementation. Of the KMIs in `.github/workflows/build-lkm4ctr.yml`, only
+`android14-6.1` currently falls inside `[6.1, 6.3)`.
+
 ## Helper files
 
 - `vendor_kernel.h` - shared internal declarations
