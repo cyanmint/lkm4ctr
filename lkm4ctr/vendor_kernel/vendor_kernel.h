@@ -474,9 +474,9 @@ void vns_exit_sem(struct task_struct *tsk);
 void vns_prepare_exit_sem(struct task_struct *tsk);
 int vns_mq_init_ns(struct ipc_namespace *ns);
 int vns_mqueue_fs_init(void);
-void vns_mqueue_fs_exit(void);
+void vns_mqueue_fs_exit(bool cache_teardown_unsafe);
 void vns_mqueue_dev_ensure(void);
-void vns_mqueue_dev_teardown(void);
+bool vns_mqueue_dev_teardown(void);
 long vns_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		struct mq_attr __user *u_attr);
 long vns_mq_unlink(const char __user *u_name);

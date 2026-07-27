@@ -121,20 +121,32 @@ int vns_ipc_default_init(void)
 fail_ipc_sysctls:
 	vns_retire_ipc_sysctls(&vns_default_ipc_ns);
 fail_mqueue:
-	vns_mqueue_fs_exit();
+	/*
+	 * vns_mqueue_dev_ensure() (line above, on the success path) has not
+	 * run yet on any path that reaches these labels, so there is no
+	 * proactively-mounted /dev/mqueue whose teardown could still be
+	 * pending -- always safe to destroy the cache here.
+	 */
+	vns_mqueue_fs_exit(false);
 	return err;
 }
 
 void vns_ipc_default_exit(void)
 {
+	bool cache_teardown_unsafe;
+
 	vns_free_inum(&vns_default_ipc_ns.ns);
 	vns_retire_ipc_sysctls(&vns_default_ipc_ns);
 	/*
 	 * Must run before vns_mqueue_fs_exit()'s kmem_cache_destroy(), see
-	 * vns_mqueue_dev_mounted's comment in vendor_kernel_ipc_mount.c.
+	 * vns_mqueue_dev_mounted's comment in vendor_kernel_ipc_mount.c. Its
+	 * return value tells vns_mqueue_fs_exit() whether it actually had to
+	 * detach a namespace-attached mount whose real teardown is deferred
+	 * to task_work (and thus whether destroying the cache right now
+	 * would be unsafe).
 	 */
-	vns_mqueue_dev_teardown();
-	vns_mqueue_fs_exit();
+	cache_teardown_unsafe = vns_mqueue_dev_teardown();
+	vns_mqueue_fs_exit(cache_teardown_unsafe);
 }
 
 /* --- argument accessors (extends the arg0/arg1 pair in

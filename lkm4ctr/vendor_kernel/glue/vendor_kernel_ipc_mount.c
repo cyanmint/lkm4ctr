@@ -228,15 +228,34 @@ void vns_mqueue_dev_ensure(void)
 
 /*
  * vns_mqueue_dev_teardown() - undo vns_mqueue_dev_ensure()'s own mount, if it
- * performed one.
+ * performed one, and report whether it is now unsafe to destroy
+ * mqueue_inode_cachep.
  *
- * Must run, and complete, before vns_mqueue_fs_exit() (ipc/mqueue.c) calls
+ * Must run before vns_mqueue_fs_exit() (ipc/mqueue.c) calls
  * kmem_cache_destroy(mqueue_inode_cachep): see vns_mqueue_dev_mounted's
  * comment above for why an un-torn-down /dev/mqueue mount otherwise leaves a
  * live mqueue_inode_cachep object behind and trips slub's "Objects remaining"
- * BUG. Never called if vns_mqueue_dev_ensure() found /dev/mqueue already
- * mounted (by something else) or never managed to mount it itself -- nothing
- * to undo in either case.
+ * BUG. A no-op (returns false) if vns_mqueue_dev_ensure() found /dev/mqueue
+ * already mounted (by something else) or never managed to mount it itself --
+ * nothing to undo, and nothing of ours pinning the cache, in either case.
+ *
+ * Returns true iff the caller must NOT call kmem_cache_destroy() on
+ * mqueue_inode_cachep right now. This is unconditionally true whenever this
+ * function actually had something of its own to tear down: unlike
+ * ipc/mqueue.c's own kern_unmount(init_ipc_ns.mq_mnt) (an MNT_INTERNAL
+ * kernel-mount, whose final mntput() calls cleanup_mnt() synchronously),
+ * path_umount() on a real, namespace-attached mount (what path_mount()
+ * created in vns_mqueue_dev_ensure()) always defers the actual
+ * superblock/inode teardown (cleanup_mnt() -> deactivate_super()) to
+ * task_work run the next time the *current* task returns to userspace --
+ * regardless of the MNT_DETACH flag, and regardless of whether the
+ * path_umount() call below even succeeds. That can be well after this
+ * function (and the caller's kmem_cache_destroy(), if it ran anyway) returns
+ * -- e.g. only once the insmod/rmmod syscall itself returns -- so
+ * mqueue_inode_cachep may still hold that mount's live root inode by the
+ * time this returns, and destroying the cache regardless would hit the
+ * "Objects remaining" BUG followed by a use-after-free once the deferred
+ * task_work eventually runs against the now-destroyed cache.
  *
  * Best-effort, like vns_mqueue_dev_ensure() itself: a resolve or lookup
  * failure here is logged and left alone rather than propagated, since the
@@ -245,7 +264,7 @@ void vns_mqueue_dev_ensure(void)
  * still-busy /dev/mqueue (e.g. a task with a queue open or cwd inside it)
  * cannot block module unload; the mount is lazily unmounted instead.
  */
-void vns_mqueue_dev_teardown(void)
+bool vns_mqueue_dev_teardown(void)
 {
 	vns_mq_kern_path_fn kern_path_fn;
 	vns_mq_path_umount_fn path_umount_fn;
@@ -253,7 +272,7 @@ void vns_mqueue_dev_teardown(void)
 	int ret;
 
 	if (!vns_mqueue_dev_mounted)
-		return;
+		return false;
 	vns_mqueue_dev_mounted = false;
 
 	kern_path_fn = (vns_mq_kern_path_fn)shadow_hook_resolve("kern_path");
@@ -262,14 +281,14 @@ void vns_mqueue_dev_teardown(void)
 		LKM4CTR_INFO("vendor_kernel",
 			     "mqueue: could not resolve VFS helpers to unmount %s; leaving it mounted",
 			     VNS_MQ_DEV_MQUEUE_PATH);
-		return;
+		return true;
 	}
 
 	ret = kern_path_fn(VNS_MQ_DEV_MQUEUE_PATH, LOOKUP_DIRECTORY, &path);
 	if (ret) {
 		LKM4CTR_INFO("vendor_kernel", "mqueue: kern_path(%s) failed before unmount: %d",
 			     VNS_MQ_DEV_MQUEUE_PATH, ret);
-		return;
+		return true;
 	}
 
 	ret = path_umount_fn(&path, MNT_DETACH);
@@ -278,4 +297,5 @@ void vns_mqueue_dev_teardown(void)
 			     VNS_MQ_DEV_MQUEUE_PATH, ret);
 	else
 		LKM4CTR_INFO("vendor_kernel", "mqueue: unmounted %s", VNS_MQ_DEV_MQUEUE_PATH);
+	return true;
 }
