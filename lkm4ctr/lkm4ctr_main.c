@@ -79,5 +79,22 @@ module_exit(lkm4ctr_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("GKI_KernelSU_SUSFS contributors");
+/*
+ * lkm4ctr statically links vendored kernel-common code (see
+ * vendor_kernel/README.md): fs/overlayfs (Miklos Szeredi <miklos@szeredi.hu>,
+ * credited again by its own MODULE_AUTHOR() in each
+ * vendor_kernel/fs/overlayfs variant's super.c) plus ipc/ and kernel
+ * namespace files
+ * (originally by Krishna Balasubramanian, Manfred Spraul, Krzysztof
+ * Benedyczak, Jakub Jelinek, David S. Miller, Eric Schenk, Bruno Haible,
+ * Arun Sharma, and the wider upstream Linux kernel community -- see each
+ * vendored file's own header comment for the exact original copyright).
+ * This MODULE_AUTHOR() credits those vendored subsystems as a whole; it is
+ * additive to (not a replacement for) the per-file copyright headers and
+ * fs/overlayfs's own MODULE_AUTHOR().
+ */
+MODULE_AUTHOR("Linux kernel contributors (vendored ipc/, kernel/*_namespace.c, kernel/nsproxy.c, fs/overlayfs; see AGENTS.md and vendor_kernel/README.md)");
+MODULE_AUTHOR("cyanmint <https://github.com/cyanmint>");
+MODULE_AUTHOR("GitHub Copilot <https://github.com/copilot>");
 MODULE_DESCRIPTION("Unified lkm4ctr module: shared hook engine plus vendor-kernel and cgroup-device compatibility subsystems");
 MODULE_VERSION(LKM4CTR_VERSION);
