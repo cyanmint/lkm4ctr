@@ -108,6 +108,12 @@ when `CONFIG_FUNCTION_TRACER`/`CONFIG_DYNAMIC_FTRACE` are available, and a
 kprobe-`pre_handler` fallback otherwise — the latter is what runs on stock
 Android GKI kernels, which ship with `CONFIG_FUNCTION_TRACER` disabled.
 
+`vendor_kernel`'s overlayfs support now comes from a single vendored
+`lkm4ctr/vendor_kernel/fs/overlayfs/` tree (android16-6.12 baseline).
+`lkm4ctr/vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.{h,c}` adapts that
+one source tree across the three supported VFS/API tiers: `OLD`
+`[5.10, 5.12)`, `MID` `[5.12, 6.3)`, and `NEW` `[6.3, 6.19)`.
+
 `vendor_kernel`'s procfs and mqueue glue uses `fd_file()`/`fd_empty()`, a
 kernel API that only
 exists from Linux v6.8 onward; `common/lkm4ctr_compat.h` provides shims so

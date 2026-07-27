@@ -248,7 +248,7 @@ module (see "Known remaining gaps" below).
 
 ## Vendoring rules
 
-- upstream sources for `kernel/`, `ipc/`, and `fs/nsfs.c` were copied from `kernel-common` `android14-6.1` (kernel `6.1.124`); the vendored overlayfs sources cover 5 separate KMI eras, each copied verbatim from its own real upstream branch (see "Vendored overlayfs" below)
+- upstream sources for `kernel/`, `ipc/`, and `fs/nsfs.c` were copied from `kernel-common` `android14-6.1` (kernel `6.1.124`); vendored overlayfs is now a single `fs/overlayfs/` tree copied from `android16-6.12`, with `glue/vendor_kernel_ovl_vfs_compat.{h,c}` adapting it across the supported OLD/MID/NEW VFS tiers (see "Vendored overlayfs" below)
 - all non-static global symbols are renamed with a `vns_` prefix
 - slab-cache users for `ipc_namespace`/`cgroup_namespace`/`time_namespace` are `kzalloc`/`kfree` (matches upstream, which also uses plain kzalloc/kmalloc for these); `uts_namespace`/`nsproxy`/`pid_namespace`/`user_namespace` allocate/free through vendor_kernel's own module-owned `kmem_cache_create()` caches (see "Slab-cache consistency with the real kernel" above), never the real kernel's private caches
 - `get_uts_ns()`/`put_uts_ns()`/`get_pid_ns()`/`put_pid_ns()`/`get_user_ns()`/`put_user_ns()` call sites are replaced with `vns_get_uts_ns()`/`vns_put_uts_ns()`/`vns_get_pid_ns()`/`vns_put_pid_ns()`/`vns_get_user_ns()`/`vns_put_user_ns()` (see "Namespace refcounting is fully self-contained" above), and the `#ifdef CONFIG_PID_NS`/`#ifdef CONFIG_USER_NS` blocks gating pid/user namespace installation in `vns_sys_setns()`'s helpers are made unconditional, for the same reason
@@ -272,21 +272,16 @@ module (see "Known remaining gaps" below).
 - `fs/nsfs.c`
 - `kernel/cgroup/namespace.c`
 - `kernel/time/namespace.c`
-- `fs/overlayfs/super.c` (and `namei.c`, `util.c`, `inode.c`, `dir.c`, `readdir.c`, `copy_up.c`, `export.c`, `file.c`, `overlayfs.h`, `ovl_entry.h`) - `[6.1, 6.3)` era (`android14-6.1`)
-- `fs/overlayfs_5_10/*` - same 11 files as above, `[5.10, 5.15)` era (`android12-5.10`, `android13-5.10`)
-- `fs/overlayfs_5_15/*` - same 11 files as above, `[5.15, 6.1)` era (`android13-5.15`, `android14-5.15`)
-- `fs/overlayfs_6_6/*` - same 11 files plus `params.c`/`params.h`, `[6.6, 6.7)` era (`android15-6.6`)
-- `fs/overlayfs_6_12/*` - same 13 files plus `xattrs.c`, `[6.12, 6.13)` era (`android16-6.12`)
+- `fs/overlayfs/{super.c,namei.c,util.c,inode.c,dir.c,readdir.c,copy_up.c,export.c,file.c,params.c,xattrs.c,overlayfs.h,ovl_entry.h,params.h}` - single vendored overlayfs tree from `android16-6.12`, built across multiple KMIs by `glue/vendor_kernel_ovl_vfs_compat.{h,c}`
 
 ### Vendored overlayfs
 
-Each of the 5 directories above (`fs/overlayfs/`, `fs/overlayfs_5_10/`,
-`fs/overlayfs_5_15/`, `fs/overlayfs_6_6/`, `fs/overlayfs_6_12/`) is vendored
-verbatim from kernel-common at the exact upstream branch noted above,
-upstream's own out-of-tree-buildable overlay filesystem, with the same
-minimal edits applied independently in each era's `super.c` (and, for the
-`6.6`/`6.12` eras, `ovl_entry.h`, since `ovl_fs_type` is already declared
-`extern` there rather than `static`):
+`fs/overlayfs/` is now a single vendored copy of upstream's out-of-tree-buildable
+overlay filesystem, taken from the `android16-6.12` branch. The source keeps
+the 6.12-era layout (`params.c`/`params.h`, `xattrs.c`, `ovl_entry.h`, etc.);
+cross-KMI support is provided by `glue/vendor_kernel_ovl_vfs_compat.{h,c}`,
+which lets that one 6.12-shaped tree build across the repository's supported
+Android GKI ranges instead of carrying separate per-era copies.
 
 - `module_init(ovl_init)`/`module_exit(ovl_exit)` were replaced with plain
   `vns_ovl_init()`/`vns_ovl_exit()` functions (renamed from `ovl_init`/
@@ -312,84 +307,34 @@ minimal edits applied independently in each era's `super.c` (and, for the
   new `vns_ovl_kill_sb()` wrapper around `kill_anon_super()`) and is
   surfaced through vendor_kernel's diagfs status
   (`glue/vendor_kernel_diag.c`, via `vns_overlay_diag_snprintf()`).
-- **All 5 eras** (`[5.10, 5.15)`, `[5.15, 6.1)`, `[6.1, 6.3)`, `[6.6, 6.7)`
-  and `[6.12, 6.13)`) resolve the subset of direct VFS/security/exportfs/
-  fileattr helpers they each call, or use as function-pointer values, by
-  name at module load time via kallsyms
-  (`glue/vendor_kernel_ovl_vfs_compat_5_10.{h,c}`,
-  `glue/vendor_kernel_ovl_vfs_compat_5_15.{h,c}`,
-  `glue/vendor_kernel_ovl_vfs_compat.{h,c}`,
-  `glue/vendor_kernel_ovl_vfs_compat_6_6.{h,c}` and
-  `glue/vendor_kernel_ovl_vfs_compat_6_12.{h,c}`), instead of linking against
-  them directly at `vns_ovl_init()` time. This avoids `CONFIG_TRIM_UNUSED_KSYMS`/
-  GKI allow-list "Unknown symbol ... (err -2)" `insmod` failures on kernels
-  that trim those helpers out of the module symbol table despite the
-  underlying functions still existing in vmlinux; each era only resolves the
-  exact subset of helpers its own vendored sources actually reference (the
-  set differs slightly per era as the upstream VFS API evolved). The few
-  compile-time-only initializer helpers (`generic_delete_inode()`,
-  `noop_direct_IO()`) are reimplemented as tiny local wrappers instead of
-  being resolved, since `struct inode_operations`/`struct
-  file_operations` initializers require compile-time constants, not runtime
-  function pointers; `get_acl()` (5.10/5.15/6.1 eras) is resolved but called
-  through its function pointer explicitly rather than blanket-`#define`'d,
-  since it collides with the identically-named `struct
-  inode_operations.get_acl` field; and the 5.10 era's inline
-  `vfs_whiteout()` helper is reimplemented through the already-resolved
-  `vfs_mknod()`.
-- Every era's `super.c` carries `MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);`
-  (present verbatim in the `5.10`/`5.15`/`6.6` upstream sources already; added
-  here to the `6.1` and `6.12` eras, whose upstream snapshots at the time
-  they were vendored predate that symbol namespace being applied to some of
-  the `vfs_*()`/`mount_nodev()`/`clone_private_mount()`/etc. exports
-  overlayfs depends on). Real production device kernels for any of the 5
-  eras may gate these symbols behind that namespace even where our
-  reference `kernel-common` snapshot does not yet; omitting the import
-  causes `insmod` to fail outright with "Unknown symbol ... (err -2)" for
-  every such symbol on a kernel that enforces it, while importing an unused
-  namespace name is always a harmless no-op on a kernel that does not.
+- `glue/vendor_kernel_ovl_vfs_compat.{h,c}` is the single compatibility shim
+  for that unified tree. It resolves the VFS/security/exportfs/fileattr
+  helpers production GKI may trim from the module symbol table, and also
+  bridges the API differences between the 6.12 baseline and older kernels:
 
-**KMI support range**: every KMI in `.github/workflows/build-lkm4ctr.yml`
-is now covered by exactly one of 5 individually verified vendored overlayfs
-eras, each copied verbatim from the real upstream branch noted below and
-compile-tested (`make ... modules`) against that branch's own
-`kernel-common` checkout:
+  | Tier | `LINUX_VERSION_CODE` range | How the 6.12 tree is adapted | KMI(s) covered |
+  |------|----------------------------|-------------------------------|----------------|
+  | `OLD` | `[5.10, 5.12)` | No idmapped mounts yet: real VFS helpers take no idmap argument, so the compat layer drops the threaded idmap parameter and reaches old inode/file callbacks through thin wrapper thunks. | `android12-5.10`, `android13-5.10` |
+  | `MID` | `[5.12, 6.3)` | Idmapped mounts exist but still use `struct user_namespace *`; the compat layer aliases `mnt_idmap` to that type, translates the newer helper surface back to the older equivalents, and uses the manual backing-file I/O fallback. | `android13-5.15`, `android14-5.15`, `android14-6.1` |
+  | `NEW` | `[6.3, 6.19)` | The 6.12 source is mostly native; the shim mainly resolves trim-prone helpers and uses the manual backing-file I/O fallback only on kernels before 6.9. | `android15-6.6`, `android16-6.12`, `android17-6.18` |
 
-| Era directory                | `LINUX_VERSION_CODE` range | Source branch(es)                          | KMI(s) covered                  |
-|-------------------------------|----------------------------|---------------------------------------------|----------------------------------|
-| `fs/overlayfs_5_10/`          | `[5.10, 5.15)`              | `android12-5.10` (byte-identical to `android13-5.10`) | `android12-5.10`, `android13-5.10` |
-| `fs/overlayfs_5_15/`          | `[5.15, 6.1)`               | `android14-5.15` (near-identical to `android13-5.15`) | `android13-5.15`, `android14-5.15` |
-| `fs/overlayfs/`               | `[6.1, 6.3)`                | `android14-6.1`                              | `android14-6.1`                 |
-| `fs/overlayfs_6_6/`           | `[6.6, 6.7)`                | `android15-6.6`                              | `android15-6.6`                 |
-| `fs/overlayfs_6_12/`          | `[6.12, 6.13)`              | `android16-6.12`                             | `android16-6.12`                |
+  The detailed tier rationale lives in the header comment of
+  `glue/vendor_kernel_ovl_vfs_compat.h` and should be treated as the
+  authoritative design note when extending the compat layer.
+- `fs/overlayfs/super.c` carries `MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);`
+  so the vendored overlayfs can link on kernels that place the needed VFS
+  exports in that namespace. Omitting the import causes hard `Unknown
+  symbol ... (err -2)` failures on kernels that enforce it, while importing
+  an unused namespace is harmless.
 
-Every file in every era wraps its whole body in its own
-`#if LINUX_VERSION_CODE >= KERNEL_VERSION(...) && LINUX_VERSION_CODE <
-KERNEL_VERSION(...)` guard (see the `[BUILD-COMPAT]` comment at the top of
-each file), compiling to an empty translation unit outside its range
-instead of failing the build against a mismatched VFS/fs_context API.
-`glue/vendor_kernel_overlay.c` gates its `get_fs_type()` override with the
-union of all 5 ranges above; outside every covered range,
-`vns_overlay_init()` skips installing the override and returns 0 (so the
-rest of `lkm4ctr.ko` still loads normally), and `mount -t overlay ...`
-falls back to the running kernel's own overlay implementation.
-
-The `6.6` and `6.12` eras use the newer `fs_context`-based mount API
-(`.init_fs_context` instead of `.mount`) and gained `params.c`/`params.h`
-(mount-option parsing split out of `super.c`) and, in `6.12`, a separate
-`xattrs.c`; both are otherwise vendored and transformed the same way as the
-other 3 eras. `6.12`'s `namei.c` also replaces its private, non-exported
-`#include "../internal.h"` (used only for the `vfs_path_lookup()`
-prototype, itself `EXPORT_SYMBOL_NS(vfs_path_lookup,
-ANDROID_GKI_VFS_EXPORT_ONLY)`-exported and thus safely linkable) with a
-direct prototype declaration, since out-of-tree modules cannot see private
-kernel headers.
-
-Two ranges are deliberately left unsupported since no KMI in the build
-matrix uses them: `[6.3, 6.6)` and `[6.7, 6.12)`. These are real VFS API
-transitions, but only exact, verified upstream sources are vendored here --
-speculative cross-version porting of unverified intermediate APIs is
-avoided.
+**KMI support range**: the single `fs/overlayfs/` tree is active for
+`LINUX_VERSION_CODE` in `[5.10, 6.19)`. Every vendored overlayfs file shares
+that outer guard, compiling to nothing outside the supported span.
+`glue/vendor_kernel_overlay.c` uses the same range for its `get_fs_type()`
+override and calls one unified `vns_ovl_init()`/`vns_ovl_exit()` path; on
+kernels outside `[5.10, 6.19)`, `vns_overlay_init()` simply skips the
+override and `mount -t overlay ...` falls back to the running kernel's own
+overlay implementation.
 
 ## Helper files
 
@@ -399,7 +344,7 @@ avoided.
 - `glue/vendor_kernel_ipc_syscalls.c` - SysV IPC + POSIX mqueue syscall hooks; module-owned default `ipc_namespace` init/exit
 - `glue/vendor_kernel_ipc_compat.c` - resolves/stubs the non-exported mm/vfs/netlink/audit/security/ucounts symbols the vendored `ipc/*.c` pull in
 - `glue/vendor_kernel_overlay.c` - vendored overlayfs lifecycle + `get_fs_type("overlay")` hook (see "Vendored overlayfs" above)
-- `glue/vendor_kernel_ovl_vfs_compat*.{c,h}` - kallsyms-based VFS helper resolution for the overlayfs eras whose upstream snapshots call non-exported/trimmed helpers directly
+- `glue/vendor_kernel_ovl_vfs_compat.{c,h}` - unified kallsyms-based VFS helper resolution and tiered API bridging for the single vendored overlayfs tree
 - `glue/vendor_kernel_diag.c` - diagfs renderer
 - `include/uapi/vendor_kernel.h` - minimal UAPI marker header
 

@@ -667,6 +667,53 @@ static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
 #define kernel_file_open(path, flags, cred) dentry_open((path), (flags), (cred))
 #endif
 
+/* backing_file_open()/backing_tmpfile_open() (6.6+): open a real file while
+ * presenting the overlay's own (fake) path to the VFS/LSM layer instead of
+ * the real (underlying) one. Pre-6.6 overlayfs achieved the same effect for
+ * regular opens via open_with_fake_path() (see the pre-unification 6.1
+ * file.c's ovl_open_realfile()); it had no O_TMPFILE-via-backing-file
+ * support at all (O_TMPFILE creation through a dedicated realfile helper is
+ * itself a >=6.6 addition), so there is no faithful pre-6.6 fake-path
+ * equivalent for the tmpfile case. Degraded but safe: fall back to
+ * vfs_tmpfile_open(), which opens the tmpfile against its *real* path
+ * instead of the overlay's; the resulting file->f_path points at the
+ * upper/real dentry rather than the overlay dentry on these kernels. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+static inline struct file *backing_file_open(const struct path *user_path, int flags,
+					     const struct path *real_path,
+					     const struct cred *cred)
+{
+	return open_with_fake_path(user_path, flags, d_inode(real_path->dentry), cred);
+}
+static inline struct file *backing_tmpfile_open(const struct path *user_path, int flags,
+						const struct path *real_parentpath,
+						umode_t mode, const struct cred *cred)
+{
+	return vfs_tmpfile_open(ovl_mnt_idmap(real_parentpath->mnt), real_parentpath,
+				mode, flags, cred);
+}
+#endif
+
+/* d_mark_tmpfile() (6.6+) is the 6.12 source's spelling of the older
+ * d_tmpfile(); both take the same (struct file *, struct inode *) pair. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+#define d_mark_tmpfile d_tmpfile
+#endif
+
+/* WRAP_DIR_ITER()/wrap_directory_iterator() (6.5+): generates a
+ * shared_<fn>() wrapper that forces exclusive inode access around an
+ * ->iterate_shared callback that (like overlayfs's) is not actually safe to
+ * call concurrently. Pre-6.5 overlayfs registered its iterate function as
+ * ->iterate_shared directly, with no such wrapper -- because the underlying
+ * VFS locking change wrap_directory_iterator() compensates for is itself
+ * part of the same 6.5 series. So the faithful pre-6.5 equivalent is simply
+ * to call the wrapped function straight through, unwrapped. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
+#define WRAP_DIR_ITER(x) \
+	static int shared_##x(struct file *file, struct dir_context *ctx) \
+	{ return x(file, ctx); }
+#endif
+
 /* fsparam_string_empty() (6.6+): a string mount option that also accepts the
  * empty value ("opt="). Byte-identical to the upstream 6.6 definition, built
  * from the __fsparam()/fs_param_can_be_empty primitives present since 5.x. */
@@ -786,7 +833,90 @@ static inline int vfs_remove_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	return set_posix_acl(idmap, d_inode(dentry), type, NULL);
 #endif
 }
+
+/* Same 6.2 boundary on the get side: get_acl() (inode-op-cache helper) was
+ * renamed get_inode_acl() and gained a name-based vfs_get_acl() wrapper, and
+ * posix_acl_type()/posix_acl_xattr_name() (type<->xattr-name conversion) were
+ * introduced alongside. Provide all four in terms of the pre-6.2 get_acl().
+ * Degraded: skips whatever LSM/security hook 6.2+ vfs_get_acl() may run --
+ * same trade-off already accepted for vfs_set_acl()/vfs_remove_acl() above. */
+static inline int posix_acl_type(const char *acl_name)
+{
+	int type = vns_ovl_acl_type_by_name(acl_name);
+
+	return type < 0 ? ACL_TYPE_ACCESS : type;
+}
+static inline const char *posix_acl_xattr_name(int type)
+{
+	return (type == ACL_TYPE_DEFAULT) ? XATTR_NAME_POSIX_ACL_DEFAULT
+					   : XATTR_NAME_POSIX_ACL_ACCESS;
+}
+static inline struct posix_acl *get_inode_acl(struct inode *inode, int type)
+{
+	return get_acl(inode, type);
+}
+static inline struct posix_acl *vfs_get_acl(struct mnt_idmap *idmap,
+					    struct dentry *dentry,
+					    const char *acl_name)
+{
+	int type = vns_ovl_acl_type_by_name(acl_name);
+
+	if (type < 0)
+		return ERR_PTR(-EOPNOTSUPP);
+	return get_acl(d_inode(dentry), type);
+}
+/* is_posix_acl_xattr() (6.2+) checks whether a xattr name is one of the two
+ * POSIX ACL names. Trivial, ABI-stable comparison; reimplement directly
+ * rather than resolve a kernel symbol (there isn't one to resolve pre-6.2). */
+static inline bool is_posix_acl_xattr(const char *name)
+{
+	return !strcmp(name, XATTR_NAME_POSIX_ACL_ACCESS) ||
+	       !strcmp(name, XATTR_NAME_POSIX_ACL_DEFAULT);
+}
 #endif /* < 6.2 */
+
+/* security_inode_copy_up_xattr() gained a leading `struct dentry *src`
+ * parameter in 6.12 (the source dentry of the copy-up, used by newer LSM
+ * hooks). Pre-6.12 kernels only take the xattr `name`. Wrap the resolved
+ * (pre-6.12-shaped) function pointer in a 2-arg shim that drops `src`;
+ * degraded only for LSMs that would have used `src` (none of the in-tree
+ * hooks on these kernels do -- the parameter is purely additive in 6.12). */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+static inline int vns_ovl_security_inode_copy_up_xattr(struct dentry *src,
+							const char *name)
+{
+	return security_inode_copy_up_xattr(name);
+}
+#undef security_inode_copy_up_xattr
+#define security_inode_copy_up_xattr(src, name) \
+	vns_ovl_security_inode_copy_up_xattr((src), (name))
+#endif
+
+#if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
+/* exportfs_encode_inode_fh() gained a trailing `int flags` parameter in 6.6
+ * (EXPORT_FH_* bits); MID/OLD kernels only resolve the older dentry-based
+ * exportfs_encode_fh(dentry, fid, max_len, connectable) (see
+ * VNS_OVL_VFS_COMPAT_LIST above). Bridge the inode-based 6.12 call by
+ * looking up any dentry alias for the inode. `flags` is dropped: every
+ * ovl_encode_real_fh() call site in this source passes flags=0 (plain,
+ * non-FID-only encoding) with parent either NULL or set, i.e. exactly what
+ * `connectable = !!parent` already reproduces via exportfs_encode_fh(). */
+static inline int vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct fid *fid,
+						   int *max_len, struct inode *parent,
+						   int flags)
+{
+	struct dentry *dentry = d_find_any_alias(inode);
+	int err;
+
+	if (!dentry)
+		return FILEID_INVALID;
+	err = exportfs_encode_fh(dentry, fid, max_len, !!parent);
+	dput(dentry);
+	return err;
+}
+#define exportfs_encode_inode_fh(inode, fid, max_len, parent, flags) \
+	vns_ovl_exportfs_encode_inode_fh((inode), (fid), (max_len), (parent), (flags))
+#endif /* MID || OLD */
 
 #endif /* !VNS_OVL_VFS_COMPAT_IMPL */
 

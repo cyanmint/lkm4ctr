@@ -27,10 +27,10 @@ directory also has its own `README.md` with implementation-specific detail
   - `shadow_hijack/` — shared ftrace/kprobe hook engine used by the other
     subsystems.
   - `vendor_kernel/` — vendored namespace/IPC/mqueue/overlayfs
-    implementation, duplicated per KMI/VFS-API era under
-    `fs/overlayfs`, `fs/overlayfs_5_10`, `fs/overlayfs_5_15`,
-    `fs/overlayfs_6_6`, `fs/overlayfs_6_12` (see "Vendored overlayfs
-    variants" below).
+    implementation. Overlayfs now lives in a single `fs/overlayfs/` tree
+    (android16-6.12 baseline) with `glue/vendor_kernel_ovl_vfs_compat.{h,c}`
+    providing the cross-KMI VFS/fs_context compatibility tiers described
+    below.
   - `shadow_cgdevices/` — cgroup-device compatibility hook shim.
 - `lkm4ctr_checker/` — a plain **userspace** diagnostic binary (not a
   kernel module). No build-time or load-time dependency on `lkm4ctr.ko`.
@@ -45,29 +45,33 @@ directory also has its own `README.md` with implementation-specific detail
   a KMI matrix inside SukiSU-Ultra's DDK container images and boot-tests
   every KMI under QEMU.
 
-## Vendored overlayfs variants — a recurring pitfall
+## Vendored overlayfs compatibility tiers
 
-`vendor_kernel/fs/overlayfs*` contains **five near-duplicate copies** of
-overlayfs, one per VFS-API era:
+`vendor_kernel/fs/overlayfs/` is now a **single** vendored overlayfs tree
+taken from the android16-6.12 upstream snapshot. Cross-KMI support comes
+from `vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.{h,c}`, which adapts
+that 6.12-shaped source across three `LINUX_VERSION_CODE` tiers:
 
-| Directory                          | Kernel version range | KMIs |
-|-------------------------------------|-----------------------|------|
-| `fs/overlayfs_5_10/`                | [5.10, 5.15)          | android12-5.10, android13-5.10 |
-| `fs/overlayfs_5_15/`                | [5.15, 6.1)           | android13-5.15, android14-5.15 |
-| `fs/overlayfs/`                     | [6.1, 6.3)            | android14-6.1 |
-| `fs/overlayfs_6_6/`                 | [6.6, 6.7)            | android15-6.6 |
-| `fs/overlayfs_6_12/`                | [6.12, 6.13)          | android16-6.12 |
+| Tier | Kernel version range | KMIs |
+|------|-----------------------|------|
+| `OLD` | `[5.10, 5.12)` | android12-5.10, android13-5.10 |
+| `MID` | `[5.12, 6.3)` | android13-5.15, android14-5.15, android14-6.1 |
+| `NEW` | `[6.3, 6.19)` | android15-6.6, android16-6.12, android17-6.18 |
 
-A fix or feature change to overlayfs logic almost always needs to be
-applied to **all five** copies (they intentionally diverge only where the
-underlying kernel VFS API itself diverges across these ranges) — check
-`vendor_kernel/glue/vendor_kernel_overlay.c`'s header comment for the
-authoritative range table before editing just one. A `__init`/`__exit`
-annotation must match across all variants for functions with the same
-name/role (e.g. `ovl_aio_request_cache_init`); a mismatch (marking it
-`__init` in one copy but calling it from non-`__init` code) causes a
-modpost "section mismatch" build failure, not a runtime bug — reconcile by
-following whichever variants got it right, don't just silence the warning.
+When changing overlayfs logic, edit `fs/overlayfs/` once, then verify
+whether the change also needs tier-specific bridging in
+`vendor_kernel_ovl_vfs_compat.{h,c}` or the existing version-gated
+compat blocks inside the vendored sources. The compat header's top comment
+is the authoritative description of what each tier translates (OLD drops
+idmap arguments, MID maps `mnt_idmap` onto `user_namespace`-style helpers,
+NEW is mostly native with backing-file fallbacks on older 6.x kernels).
+
+If you add or remove a resolved VFS helper, keep the compat header's
+per-tier declare/redirect lists and `vendor_kernel_ovl_vfs_compat.c`'s
+resolver storage in sync. A bad `__init`/`__exit` annotation can still
+trigger a modpost section-mismatch build failure; reconcile it with the
+surrounding unified source and active tier paths rather than papering it
+over.
 
 ## Building
 
