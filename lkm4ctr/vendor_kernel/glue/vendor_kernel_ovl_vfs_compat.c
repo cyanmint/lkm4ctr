@@ -34,7 +34,9 @@
 #include <linux/splice.h>
 #include <linux/uio.h>
 #include <linux/errseq.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
 #include <linux/fileattr.h>
+#endif
 #include <linux/seq_file.h>
 #include <linux/parser.h>
 #include <linux/fadvise.h>
