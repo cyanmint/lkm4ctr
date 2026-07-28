@@ -208,7 +208,7 @@ static inline struct nsproxy *create_nsproxy(void)
  * including vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe
  * pre_handler callback -- CFI-instrumented and a valid indirect-call target
  * for the real kernel, matching the pattern used elsewhere in this module
- * (see e.g. vendor_kernel_procfs_setgroups.c's vns_setgroups_create_fd()).
+ * (see e.g. vendor_kernel_procfs_userns.c's vns_idmap_create_fd()).
  */
 static __nocfi struct nsproxy *create_new_namespaces(unsigned long flags,
 	struct task_struct *tsk, struct user_namespace *user_ns,
