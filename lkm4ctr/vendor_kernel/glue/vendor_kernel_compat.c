@@ -67,6 +67,7 @@
 #include <linux/sem.h>
 #include <linux/cred.h>
 #include <linux/capability.h>
+#include <linux/rwsem.h>
 
 #define VNS_COMPAT_IMPL
 #include "../vendor_kernel.h"
@@ -111,6 +112,7 @@ typedef pid_t (*pid_nr_ns_fn_t)(struct pid *, struct pid_namespace *);
 typedef void (*key_put_fn_t)(struct key *);
 #endif
 typedef void (*kill_litter_super_fn_t)(struct super_block *);
+typedef void (*generic_shutdown_super_fn_t)(struct super_block *);
 
 static inc_ucount_fn_t            vns_inc_ucount_real;
 static dec_ucount_fn_t            vns_dec_ucount_real;
@@ -145,6 +147,7 @@ static pid_nr_ns_fn_t              vns_pid_nr_ns_real;
 static key_put_fn_t                vns_key_put_real;
 #endif
 static kill_litter_super_fn_t      vns_kill_litter_super_real;
+static generic_shutdown_super_fn_t vns_generic_shutdown_super_real;
 
 /*
  * [BUILD-COMPAT] tasklist_lock (kernel/fork.c, not exported).
@@ -296,6 +299,7 @@ void vns_compat_resolve(void)
 	RESOLVE(vns_key_put_real,               key_put);
 #endif
 	RESOLVE(vns_kill_litter_super_real,     kill_litter_super);
+	RESOLVE(vns_generic_shutdown_super_real, generic_shutdown_super);
 #ifdef CONFIG_CGROUPS
 	/*
 	 * Best-effort resolve of the *real* kernel's init_cgroup_ns. This is
@@ -781,12 +785,23 @@ void __nocfi vns_key_put(struct key *key)
  * [BUILD-COMPAT] kill_litter_super (fs/super.c, "Protected symbol" -- EACCES
  * at insmod -- on some KMIs even though present/exported). Used as the
  * .kill_sb of our vendored ipc/mqueue.c's pseudo-filesystem. Falls back to
- * generic_shutdown_super() (always available) if unresolved: this skips
- * kill_litter_super()'s own d_genocide()/kill_anon_super() bookkeeping
+ * the by-name-resolved real generic_shutdown_super() if unresolved: this
+ * skips kill_litter_super()'s own d_genocide()/kill_anon_super() bookkeeping
  * (forced dentry eviction plus device-number release), but
  * generic_shutdown_super() alone already forcibly evicts the dcache for
  * this anon superblock, so the mount still tears down cleanly at the cost
  * of a harmless bdev-number leak in the rare case this fallback is hit.
+ *
+ * generic_shutdown_super() itself is NOT called directly by name here: CI
+ * observed a live "Unknown symbol generic_shutdown_super" insmod failure
+ * on a KMI where kill_litter_super() also failed to resolve, i.e. it can
+ * be trimmed from a production GKI build's module symbol table too (same
+ * CONFIG_TRIM_UNUSED_KSYMS/protected-KMI-allow-list reasons as every other
+ * name resolved in this file), so it is resolved via shadow_hook_resolve()
+ * like everything else instead of assumed "always available". If neither
+ * resolves, the superblock's dcache/dentry teardown is skipped entirely
+ * (a harmless resource leak on an anon superblock we are already tearing
+ * down) rather than crashing on an unresolved call.
  */
 void __nocfi vns_kill_litter_super(struct super_block *sb)
 {
@@ -794,9 +809,57 @@ void __nocfi vns_kill_litter_super(struct super_block *sb)
 		vns_kill_litter_super_real(sb);
 		return;
 	}
+	if (vns_generic_shutdown_super_real) {
+		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+			     "compat: kill_litter_super unresolved; using generic_shutdown_super() instead");
+		vns_generic_shutdown_super_real(sb);
+		return;
+	}
 	LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-		     "compat: kill_litter_super unresolved; using generic_shutdown_super() instead");
-	generic_shutdown_super(sb);
+		     "compat: kill_litter_super and generic_shutdown_super both unresolved; leaking superblock teardown");
+}
+
+/*
+ * [BUILD-COMPAT] down_write_killable (kernel/locking/rwsem.c). Genuinely
+ * EXPORT_SYMBOL'd on every KMI in our support matrix, but -- like
+ * kill_litter_super()/generic_shutdown_super() above -- CI observed a live
+ * "Unknown symbol down_write_killable" insmod failure on a production GKI
+ * build that trimmed it from the module symbol table
+ * (CONFIG_TRIM_UNUSED_KSYMS).
+ *
+ * Unlike those two, its real callers here are not our own code:
+ * mmap_write_lock_killable()/mmap_write_lock() (<linux/mmap_lock.h>,
+ * reached from our vendored ipc/shm.c's do_shmat()/ksys_shmdt()) are
+ * `static inline` wrappers that call down_write_killable() by name
+ * directly from their already-inlined body, parsed well before this file's
+ * own shadow_hook_resolve()-based redirects could ever intercept the call
+ * -- the same "already-inlined system header" pattern documented on
+ * free_cgroup_ns()/__put_net() above. Providing our own externally-linked
+ * down_write_killable() here satisfies every such caller directly out of
+ * this module's own object files instead of requiring the (possibly
+ * trimmed) vmlinux export.
+ *
+ * This is never resolved via shadow_hook_resolve() at runtime, unlike
+ * kill_litter_super()/generic_shutdown_super() above: once this module is
+ * loaded it *also* exports a global symbol named "down_write_killable"
+ * (this very definition), and kallsyms_lookup_name() (which
+ * register_kprobe()/shadow_hook_resolve() rely on to resolve a
+ * symbol_name) searches loaded modules' own symbol tables in addition to
+ * vmlinux's -- attempting to resolve "down_write_killable" by name here
+ * risks the lookup matching this very definition instead of the real
+ * vmlinux one, which would make a "real" pointer point back at this
+ * function and recurse forever. Always falling back to the always-
+ * available, never name-colliding down_write() avoids that bootstrapping
+ * hazard entirely, mirroring why seq_escape()/free_cgroup_ns()/__put_net()
+ * above never attempt a self-resolve either. The mutual exclusion
+ * down_write_killable()'s rwsem protects is still correctly enforced;
+ * only the "interruptible by a fatal signal while waiting" property is
+ * lost.
+ */
+int down_write_killable(struct rw_semaphore *sem)
+{
+	down_write(sem);
+	return 0;
 }
 
 #ifdef CONFIG_CGROUPS

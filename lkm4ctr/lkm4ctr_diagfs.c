@@ -223,8 +223,18 @@ static lkm4ctr_generic_delete_inode_t lkm4ctr_generic_delete_inode_fn;
  * lkm4ctr_diagfs_resolve() the same way, which sidesteps both enforcement
  * mechanisms uniformly since the reference becomes a runtime indirect call
  * rather than a direct ELF-level one.
+ *
+ * generic_shutdown_super() (fs/super.c, our .kill_sb fallback when
+ * kill_litter_super() itself fails to resolve) is likewise resolved
+ * lazily here rather than called directly by name: although genuinely
+ * EXPORT_SYMBOL'd on every KMI in our support matrix, CI observed a live
+ * "Unknown symbol generic_shutdown_super" insmod failure on a production
+ * GKI build that trimmed it from the module symbol table
+ * (CONFIG_TRIM_UNUSED_KSYMS), the same reason mount_nodev()/
+ * generic_delete_inode() above are resolved lazily instead of imported.
  */
 typedef void (*lkm4ctr_kill_litter_super_t)(struct super_block *sb);
+typedef void (*lkm4ctr_generic_shutdown_super_t)(struct super_block *sb);
 typedef struct dentry *(*lkm4ctr_d_alloc_name_t)(struct dentry *parent,
 						  const char *name);
 typedef struct dentry *(*lkm4ctr_simple_lookup_t)(struct inode *dir,
@@ -232,10 +242,12 @@ typedef struct dentry *(*lkm4ctr_simple_lookup_t)(struct inode *dir,
 						   unsigned int flags);
 
 static lkm4ctr_kill_litter_super_t lkm4ctr_kill_litter_super_fn;
+static lkm4ctr_generic_shutdown_super_t lkm4ctr_generic_shutdown_super_fn;
 static lkm4ctr_d_alloc_name_t lkm4ctr_d_alloc_name_fn;
 static lkm4ctr_simple_lookup_t lkm4ctr_simple_lookup_fn;
 
-static struct dentry *lkm4ctr_diagfs_dir_lookup(struct inode *dir,
+
+static struct dentry *__nocfi lkm4ctr_diagfs_dir_lookup(struct inode *dir,
 						 struct dentry *dentry,
 						 unsigned int flags)
 {
@@ -463,7 +475,7 @@ static struct inode *lkm4ctr_diagfs_make_inode(struct super_block *sb, umode_t m
 	return inode;
 }
 
-static struct dentry *lkm4ctr_diagfs_mkdir(struct super_block *sb,
+static struct dentry *__nocfi lkm4ctr_diagfs_mkdir(struct super_block *sb,
 					    struct dentry *parent,
 					    const char *name)
 {
@@ -491,7 +503,7 @@ static struct dentry *lkm4ctr_diagfs_mkdir(struct super_block *sb,
 	return dentry;
 }
 
-static struct dentry *lkm4ctr_diagfs_create_file(struct super_block *sb,
+static struct dentry *__nocfi lkm4ctr_diagfs_create_file(struct super_block *sb,
 					  struct dentry *parent,
 					  const char *name, umode_t mode,
 					  enum lkm4ctr_diagfs_kind kind,
@@ -1826,7 +1838,7 @@ static void lkm4ctr_diagfs_evict_inode(struct inode *inode)
 	kfree(inode->i_private);
 }
 
-static int lkm4ctr_diagfs_drop_inode(struct inode *inode)
+static int __nocfi lkm4ctr_diagfs_drop_inode(struct inode *inode)
 {
 	if (lkm4ctr_generic_delete_inode_fn)
 		return lkm4ctr_generic_delete_inode_fn(inode);
@@ -2035,7 +2047,7 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 	return 0;
 }
 
-static struct dentry *lkm4ctr_diagfs_mount(struct file_system_type *fs_type,
+static struct dentry *__nocfi lkm4ctr_diagfs_mount(struct file_system_type *fs_type,
 					    int flags, const char *dev_name,
 					    void *data)
 {
@@ -2045,13 +2057,17 @@ static struct dentry *lkm4ctr_diagfs_mount(struct file_system_type *fs_type,
 	return lkm4ctr_mount_nodev_fn(fs_type, flags, data, lkm4ctr_diagfs_fill_super);
 }
 
-static void lkm4ctr_diagfs_kill_sb(struct super_block *sb)
+static void __nocfi lkm4ctr_diagfs_kill_sb(struct super_block *sb)
 {
 	atomic_dec(&lkm4ctr_diagfs_mount_count);
-	if (lkm4ctr_kill_litter_super_fn)
+	if (lkm4ctr_kill_litter_super_fn) {
 		lkm4ctr_kill_litter_super_fn(sb);
-	else
-		generic_shutdown_super(sb);
+	} else if (lkm4ctr_generic_shutdown_super_fn) {
+		lkm4ctr_generic_shutdown_super_fn(sb);
+	} else {
+		LKM4CTR_ERR(LKM4CTR_DIAGFS_TAG,
+			    "kill_litter_super and generic_shutdown_super both unresolved; leaking superblock teardown");
+	}
 }
 
 static struct file_system_type lkm4ctr_diagfs_type = {
@@ -2072,6 +2088,8 @@ int lkm4ctr_diagfs_init(void)
 		(lkm4ctr_generic_delete_inode_t)lkm4ctr_diagfs_resolve("generic_delete_inode");
 	lkm4ctr_kill_litter_super_fn =
 		(lkm4ctr_kill_litter_super_t)lkm4ctr_diagfs_resolve("kill_litter_super");
+	lkm4ctr_generic_shutdown_super_fn =
+		(lkm4ctr_generic_shutdown_super_t)lkm4ctr_diagfs_resolve("generic_shutdown_super");
 	lkm4ctr_d_alloc_name_fn =
 		(lkm4ctr_d_alloc_name_t)lkm4ctr_diagfs_resolve("d_alloc_name");
 	lkm4ctr_simple_lookup_fn =
@@ -2083,7 +2101,10 @@ int lkm4ctr_diagfs_init(void)
 			    "could not resolve mount_nodev/generic_delete_inode/d_alloc_name/simple_lookup; diagfs unavailable");
 		return -ENOSYS;
 	}
-	if (!lkm4ctr_kill_litter_super_fn)
+	if (!lkm4ctr_kill_litter_super_fn && !lkm4ctr_generic_shutdown_super_fn)
+		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
+			     "kill_litter_super and generic_shutdown_super both unresolved; diagfs unmount will leak the superblock");
+	else if (!lkm4ctr_kill_litter_super_fn)
 		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
 			     "kill_litter_super unresolved; falling back to generic_shutdown_super() on unmount");
 

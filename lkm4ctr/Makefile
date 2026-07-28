@@ -85,8 +85,9 @@ ccflags-y += -I$(src)/../common
 # CFI's protection for the rest of the kernel, which is untouched. Applied
 # to every real source object below except the two embedded-text blobs
 # (helper.sh.o/readme.txt.o, plain string data), lkm4ctr_main.o/
-# lkm4ctr_log.o/lkm4ctr_diagfs.o, which never call a symbol resolved this
-# way, and the objects listed below that are intentionally excluded.
+# lkm4ctr_log.o, which never call a symbol resolved this way, and the
+# objects listed below that are intentionally excluded (lkm4ctr_diagfs.o
+# among them, see its bullet below).
 #
 # The following are intentionally EXCLUDED from this list even though they
 # would otherwise qualify by (a)/(b) above, because doing so strips the KCFI
@@ -268,6 +269,25 @@ ccflags-y += -I$(src)/../common
 #     vendor_kernel hands pid namespace creation/teardown off to the real
 #     kernel's own implementation instead of risking a "Wrong slab cache"
 #     mismatch (see the comment on vns_copy_pid_ns() for the full rationale).
+#   - lkm4ctr_diagfs.o: not part of the vendor_kernel/shadow_hook_resolve()
+#     machinery above at all -- it resolves kill_litter_super/
+#     generic_shutdown_super/d_alloc_name/simple_lookup/
+#     generic_delete_inode/mount_nodev itself via its own, otherwise
+#     identical, lkm4ctr_diagfs_resolve() (a register_kprobe() lookup,
+#     same technique, separate implementation since diagfs.o has no
+#     dependency on shadow_hijack.o). Registers file_system_type.mount/
+#     kill_sb, inode_operations.lookup, and super_operations.drop_inode
+#     (lkm4ctr_diagfs_mount/_kill_sb/_dir_lookup/_drop_inode, plus the
+#     fill_super-time-only helpers lkm4ctr_diagfs_mkdir/_create_file),
+#     each of which also makes one of the resolved-pointer calls above; all
+#     are marked __nocfi individually so this object can keep normal CFI
+#     instrumentation and its callback functions remain valid indirect-call
+#     targets. CI observed a live "CFI failure at ... (target:
+#     mount_nodev+...)" panic here on a KMI where insmod itself used to fail
+#     first for an unrelated reason (see vendor_kernel_compat.c's
+#     generic_shutdown_super/down_write_killable comments), which had left
+#     this bug unreached until that other fix let insmod -- and thus this
+#     mount -- succeed.
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_cgdevices/shadow_cgdevices.o \

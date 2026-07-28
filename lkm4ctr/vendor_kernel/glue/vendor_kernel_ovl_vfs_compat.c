@@ -137,4 +137,47 @@ void seq_escape(struct seq_file *m, const char *s, const char *esc)
 }
 #endif /* LINUX_VERSION_CODE < 6.1.0 */
 
+/*
+ * [BUILD-COMPAT] logfc (fs/fs_context.c). Genuinely EXPORT_SYMBOL'd on
+ * every KMI in our support matrix, but -- same as seq_escape() above -- it
+ * can be trimmed from a production GKI build's module symbol table
+ * (CONFIG_TRIM_UNUSED_KSYMS), and CI observed a live "Unknown symbol
+ * logfc" insmod failure on one such KMI.
+ *
+ * Its real callers here are not our own code: the __logfc()/__plog()
+ * macros in <linux/fs_context.h> (backing infof()/warnf()/errorf()/
+ * invalfc() etc., used extensively by our vendored fs/overlayfs/params.c)
+ * call logfc() by name directly from their macro expansion, which is
+ * finalized at each overlayfs call site well before this file's own
+ * shadow_hook_resolve()-based redirects could ever intercept it -- the
+ * same "already-inlined system header" pattern documented on
+ * free_cgroup_ns()/__put_net()/down_write_killable() in
+ * vendor_kernel_compat.c. Providing our own externally-linked logfc()
+ * here satisfies every such caller directly out of this module's own
+ * object files instead of requiring the (possibly trimmed) vmlinux
+ * export.
+ *
+ * logfc()'s only purpose is to append a message to the mount's private
+ * fc_log ring buffer for later retrieval via fsopen()/FSCONFIG_CMD_*
+ * error reporting; it never affects whether a mount/parse operation
+ * itself succeeds or fails. Rather than replicate struct fc_log's ring
+ * buffer bookkeeping (module refcounting, kfree'able-string tracking),
+ * this stub simply surfaces the message to the kernel log instead: mount
+ * failures are still reported correctly to userspace (via the real errno
+ * from the failing overlayfs call), just without the detailed message
+ * text normally readable back through the fscontext fd.
+ */
+void logfc(struct fc_log *log, const char *prefix, char level, const char *fmt, ...)
+{
+	va_list args;
+	char msg[256];
+
+	va_start(args, fmt);
+	vsnprintf(msg, sizeof(msg), fmt, args);
+	va_end(args);
+
+	LKM4CTR_WARN("vendor_kernel", "overlayfs: fs_context: %s%s%s",
+		     prefix ? prefix : "", prefix ? ": " : "", msg);
+}
+
 #endif /* LINUX_VERSION_CODE in [5.10, 6.19) */
