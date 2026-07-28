@@ -47,12 +47,30 @@
  *     exactly like the "before" one, so the diff-based probe cannot observe
  *     vendor_kernel's real, already-working namespace isolation and reports
  *     a false STUB.
+ *   - runc's own nsexec (the C helper forked by `docker exec`/`runc exec`
+ *     to join a *running* container's namespaces via setns(2)) does not
+ *     stat(2) or readlink(2) ".../ns/ipc"/".../ns/pid" at all: it plainly
+ *     open(2)s each entry to obtain the fd it then hands to setns(2). With
+ *     neither the stat(2) nor the open(2) gap closed, this fails with
+ *     `"failed to open /proc/<pid>/ns/ipc: No such file or directory"`,
+ *     surfacing as `"OCI runtime exec failed: ... error executing setns
+ *     process: exit status 1; runc init error(s): ... failed to open
+ *     /proc/<pid>/ns/ipc: No such file or directory"`. Fixing only the
+ *     stat(2)/readlink(2) gaps above is not enough for `docker exec` to
+ *     actually work: open(2) itself needs a real, usable nsfs fd (see the
+ *     open(2)-family fabrication further down this file), not just a
+ *     passing probe.
  *
- * This file closes both observability gaps: hook readlink(2)/readlinkat(2)
- * (for the first gap above) and stat(2)/lstat(2)/newfstatat(2) (for the
- * runc/containerd probe -- see the block comment further down for how that
- * one is implemented), let the real syscall run first, and only when it
- * fails with -ENOENT for a path unambiguously naming ".../ns/ipc" or
+ * This file closes three observability/functionality gaps: hook
+ * readlink(2)/readlinkat(2) (for the first gap above), stat(2)/lstat(2)/
+ * newfstatat(2) (for the runc/containerd probe -- see the block comment
+ * further down for how that one is implemented), and open(2)/openat(2)/
+ * openat2(2) (so a genuine, usable nsfs fd for ".../ns/ipc"/".../ns/pid"
+ * comes back instead of -ENOENT -- see the block comment further down for
+ * how that one is implemented; this is what `docker exec`'s runc
+ * nsexec child actually needs to setns(2) into a running container, not
+ * merely a probe), let the real syscall run first, and only when it fails
+ * with -ENOENT for a path unambiguously naming ".../ns/ipc" or
  * ".../ns/pid" under a procfs-rooted pid directory
  * (".../<pid|self|thread-self>/ns/{ipc,pid}", or a bare "ns/{ipc,pid}"
  * resolved relative to a dfd whose superblock is procfs) do we step in. For
@@ -422,6 +440,118 @@ static long vendor_kernel_hook_readlink(const struct pt_regs *regs)
 }
 
 /*
+ * open(2)/openat(2)/openat2(2) fabrication for /proc/<pid>/ns/{ipc,pid}.
+ *
+ * Unlike the stat(2)-family fabrication below (which only needs the *call*
+ * to succeed, and so can borrow the always-present ns/mnt entry's result),
+ * runc's nsexec plainly open(2)s ".../ns/ipc"/".../ns/pid" to get a real fd
+ * it then setns(2)s into when `docker exec`/`runc exec` joins a running
+ * container -- see this file's own top comment for the exact failure this
+ * closes. That fd has to be a genuine nsfs file: vns_sys_setns()
+ * (vendor/kernel/nsproxy.c, ported near-verbatim from kernel-common) only
+ * accepts it via proc_ns_file(file) (an exact "file->f_op ==
+ * &ns_file_operations" pointer comparison) followed by
+ * get_proc_ns(file_inode(file)) (a plain "return inode->i_private" cast to
+ * struct ns_common *) -- nothing short of a real nsfs dentry/inode pair
+ * satisfies both.
+ *
+ * fs/nsfs.c's ns_get_path() (declared in the already-included
+ * <linux/proc_ns.h>, but -- like ns_get_path()'s own callers in
+ * fs/proc/namespaces.c -- never EXPORT_SYMBOL'd for direct linking) builds
+ * exactly that pair for a given task and ns operations vector: it calls
+ * @ns_ops->get(task) to obtain a struct ns_common (taking a reference the
+ * returned struct path implicitly owns) and stashes it as a fresh nsfs
+ * inode's ->i_private with ->i_fop = &ns_file_operations, memoized on the
+ * namespace object itself (ns->stashed) so repeated opens of the same
+ * namespace share one dentry, exactly like a real CONFIG_IPC_NS=y/
+ * CONFIG_PID_NS=y kernel's own /proc/<pid>/ns/{ipc,pid} would. Passing
+ * vns_ipcns_operations/vns_pidns_operations (ipc/namespace.c,
+ * kernel/pid_namespace.c -- already the real .get()/.put() callbacks
+ * vendor_kernel's own vns_sys_setns()/vns_task_exit_cleanup() paths use)
+ * makes the fabricated fd fully consistent with, and interchangeable with,
+ * every other vendor_kernel namespace entry point. Both ipc/namespace.o and
+ * kernel/pid_namespace.o are already CFI-disabled in vendor/Makefile's
+ * VNS_CFI_UNSAFE_OBJS specifically because their proc_ns_operations structs
+ * are "real-kernel-invoked via /proc/pid/ns/ opens and ns_get_path()" --
+ * this is that call site.
+ *
+ * ns_get_path() is resolved by name via shadow_hook_resolve() (the same
+ * technique used throughout vendor_kernel for non-exported symbols); the
+ * remaining struct path -> fd plumbing (get_unused_fd_flags()/
+ * dentry_open()/fd_install()/path_put()) mirrors ipc/mqueue.c's
+ * vns_mq_open()'s own identical pattern for creating a real fd from a
+ * struct path.
+ */
+typedef int (*vns_ns_get_path_fn)(struct path *path, struct task_struct *task,
+				   const struct proc_ns_operations *ns_ops);
+
+static long vns_ns_open_fd(pid_t rpid, const struct proc_ns_operations *ns_ops)
+{
+	vns_ns_get_path_fn ns_get_path_fn;
+	struct pid *kpid;
+	struct task_struct *task;
+	struct path path;
+	struct file *file;
+	int fd, err;
+
+	ns_get_path_fn = (vns_ns_get_path_fn)shadow_hook_resolve("ns_get_path");
+	if (!ns_get_path_fn)
+		return -ENOENT;
+
+	kpid = find_get_pid(rpid);
+	if (!kpid)
+		return -ENOENT;
+	task = get_pid_task(kpid, PIDTYPE_PID);
+	put_pid(kpid);
+	if (!task)
+		return -ENOENT;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		put_task_struct(task);
+		return fd;
+	}
+
+	err = ns_get_path_fn(&path, task, ns_ops);
+	put_task_struct(task);
+	if (err) {
+		put_unused_fd(fd);
+		return err;
+	}
+
+	file = dentry_open(&path, O_RDONLY, current_cred());
+	path_put(&path);
+	if (IS_ERR(file)) {
+		put_unused_fd(fd);
+		return PTR_ERR(file);
+	}
+
+	fd_install(fd, file);
+	return fd;
+}
+
+/*
+ * vns_ns_open_fallback() - shared -ENOENT fallback for open(2)/openat(2)/
+ * openat2(2): only reached once the real syscall has already failed to
+ * open the caller's original path. Tries ".../ns/ipc" then ".../ns/pid";
+ * returns @ret unchanged if neither matches.
+ */
+static long vns_ns_open_fallback(int dfd, const char __user *upath, long ret)
+{
+	pid_t rpid;
+
+	if (ret != -ENOENT)
+		return ret;
+
+	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_IPC_NAME, &rpid, NULL))
+		return vns_ns_open_fd(rpid, &vns_ipcns_operations);
+	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_PID_NAME, &rpid, NULL))
+		return vns_ns_open_fd(rpid, &vns_pidns_operations);
+
+	return ret;
+}
+
+/*
  * /proc/<pid>/{uid_map,gid_map,projid_map,setgroups} fabrication on kernels
  * genuinely missing CONFIG_USER_NS: fs/proc/base.c only wires up these
  * per-pid dentries "#ifdef CONFIG_USER_NS", so:
@@ -516,6 +646,10 @@ static long vns_open_fallback(int dfd, const char __user *upath, long ret)
 	enum vns_idmap_kind kind;
 	pid_t pid;
 
+	if (ret != -ENOENT)
+		return ret;
+
+	ret = vns_ns_open_fallback(dfd, upath, ret);
 	if (ret != -ENOENT)
 		return ret;
 
