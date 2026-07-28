@@ -155,6 +155,17 @@ ccflags-y += -I$(src)/../common
 #     (user_namespace.o's bsearch() calls resolve to <linux/bsearch.h>'s
 #     self-contained __inline_bsearch() via the macro redirect in
 #     vendor_kernel.h, not a kallsyms-resolved pointer).
+#   - vendor_kernel/glue/vendor_kernel_compat.o: defines
+#     vns_kill_litter_super() (the mqueue_fs_type file_system_type's
+#     kill_sb, macro-redirected from kill_litter_super via vendor_kernel.h)
+#     -- CI observed a live "CFI failure at deactivate_locked_super+...
+#     (target: vns_kill_litter_super+...)" panic here. Nearly every other
+#     function in this file is a thin by-name-resolved compat wrapper
+#     (vns_*_real() function pointers, resolved once at init via
+#     shadow_hook_resolve()) with no real-kernel-invoked callback role of
+#     its own; each of those (and vns_kill_litter_super itself, for its own
+#     vns_kill_litter_super_real() call) is marked __nocfi individually so
+#     the object as a whole can be removed from this list.
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_cgdevices/shadow_cgdevices.o \
@@ -180,9 +191,7 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
 	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
-	vendor_kernel/glue/vendor_kernel_diag.o \
-	vendor_kernel/glue/vendor_kernel_compat.o
-
+	vendor_kernel/glue/vendor_kernel_diag.o
 $(foreach o,$(VNS_CFI_UNSAFE_OBJS),$(eval CFLAGS_REMOVE_$(o) += $(CC_FLAGS_CFI)))
 
 # LKM4CTR_LOG_DMESG - build-time logging switch (see common/lkm4ctr_log.h
