@@ -31,7 +31,7 @@
  * what task->nsproxy->ipc_ns/task_active_pid_ns(task) actually point to:
  * readlink(2) on that path fails with plain -ENOENT.
  *
- * That breaks two independent things:
+ * That breaks three independent things:
  *   - runc/containerd's own namespace-support probe (stat(2), not
  *     readlink(2) -- see the stat(2)-family fabrication further down this
  *     file), which checks /proc/<pid>/ns/{ipc,pid,user,uts,...} as part of a
@@ -61,19 +61,16 @@
  *     open(2)-family fabrication further down this file), not just a
  *     passing probe.
  *
- * This file closes three observability/functionality gaps: hook
- * readlink(2)/readlinkat(2) (for the first gap above), stat(2)/lstat(2)/
- * newfstatat(2) (for the runc/containerd probe -- see the block comment
- * further down for how that one is implemented), and open(2)/openat(2)/
- * openat2(2) (so a genuine, usable nsfs fd for ".../ns/ipc"/".../ns/pid"
- * comes back instead of -ENOENT -- see the block comment further down for
- * how that one is implemented; this is what `docker exec`'s runc
- * nsexec child actually needs to setns(2) into a running container, not
- * merely a probe), let the real syscall run first, and only when it fails
- * with -ENOENT for a path unambiguously naming ".../ns/ipc" or
+ * This file closes three observability/functionality gaps, one hook group
+ * per gap above: readlink(2)/readlinkat(2), stat(2)/lstat(2)/newfstatat(2)
+ * (see the block comment further down for how the runc/containerd probe
+ * fabrication works), and open(2)/openat(2)/openat2(2) (see the block
+ * comment further down for how the real, usable nsfs fd fabrication
+ * works). Each hook lets the real syscall run first, and only steps in on
+ * its -ENOENT, for a path unambiguously naming ".../ns/ipc" or
  * ".../ns/pid" under a procfs-rooted pid directory
  * (".../<pid|self|thread-self>/ns/{ipc,pid}", or a bare "ns/{ipc,pid}"
- * resolved relative to a dfd whose superblock is procfs) do we step in. For
+ * resolved relative to a dfd whose superblock is procfs). For
  * readlink(2)/readlinkat(2) that means fabricating the "ipc:[<ino>]"/
  * "pid:[<ino>]" text real readlink(2) would have produced, mirroring
  * fs/nsfs.c's ns_get_name() format exactly. Any other -ENOENT (including
@@ -645,9 +642,6 @@ static long vns_open_fallback(int dfd, const char __user *upath, long ret)
 {
 	enum vns_idmap_kind kind;
 	pid_t pid;
-
-	if (ret != -ENOENT)
-		return ret;
 
 	ret = vns_ns_open_fallback(dfd, upath, ret);
 	if (ret != -ENOENT)
