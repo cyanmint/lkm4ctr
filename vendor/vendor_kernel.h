@@ -432,9 +432,12 @@ void vns_user_ns_init(void);
  * glue/vendor_kernel_procfs_userns.c: fabricates /proc/<pid>/{uid_map,
  * gid_map,projid_map,setgroups} on kernels genuinely missing
  * CONFIG_USER_NS, wired to the real per-task user_namespace above (unlike
- * a cosmetic probe stub). @pid is the real (host) pid the fabricated
- * descriptor should operate against, resolved by the caller exactly like
- * glue/vendor_kernel_procfs.c's vns_resolve_ns_pid().
+ * a cosmetic probe stub). @pid is the pid the fabricated descriptor should
+ * operate against, resolved by the caller exactly like
+ * glue/vendor_kernel_procfs.c's vns_resolve_ns_pid() -- i.e. suitable for
+ * find_get_pid() (namespace-relative to the resolving task, not a raw/
+ * global pid), since vns_idmap_get_task_userns() looks it back up with
+ * exactly that call.
  */
 enum vns_idmap_kind {
 	VNS_IDMAP_UID,

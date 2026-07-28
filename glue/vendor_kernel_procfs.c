@@ -151,19 +151,40 @@ static bool vns_dfd_is_procfs(int dfd)
 
 /*
  * vns_resolve_ns_pid() - resolve the "self"/"thread-self"/numeric path
- * component immediately preceding "/ns/{ipc,pid}" to the real (host) pid it
- * names. Numeric components are taken to already be real pids: vendor_kernel's
- * vendored PID namespace installs the real task->nsproxy directly, so no
- * separate vpid<->rpid translation table is needed here.
+ * component immediately preceding "/ns/{ipc,pid}" (or, via
+ * vns_path_wants_idmap() below, the pid directory owning a fabricated
+ * uid_map/gid_map/projid_map/setgroups leaf) to the pid every caller of
+ * this function subsequently feeds straight into find_get_pid(): the
+ * number as seen from the *calling task's own* active pid namespace, not
+ * the raw/global (init_pid_ns) number.
+ *
+ * find_get_pid(nr)/find_vpid(nr) always resolve @nr relative to
+ * task_active_pid_ns(current) -- there is no "give me the real/global
+ * pid" variant. "self"/"thread-self" must therefore resolve via
+ * task_tgid_vnr()/task_pid_vnr() (virtual, i.e. relative to the caller's
+ * own namespace), matching task_active_pid_ns(current) exactly, not the
+ * raw task_tgid_nr()/task_pid_nr(). Using the raw number here silently
+ * works while the caller is still running in init_pid_ns (raw == virtual
+ * there), but breaks for any task that has already become PID 1 of its
+ * own pid namespace via clone3(CLONE_NEWPID) -- exactly a container's own
+ * init process -- since find_get_pid() then looks up a large raw/global
+ * number inside a small-numbered idr and finds nothing, making the whole
+ * fabricated fd's later magic-link reopen (".../fd/<n>", which every
+ * modern runc/containerd performs as a defensive "unsafe procfs" check)
+ * fail with -ENOENT even though the original open succeeded.
+ *
+ * Numeric components are passed through unchanged: whoever names a pid
+ * directory by an explicit number is already responsible for using
+ * whatever numbering find_get_pid() expects for their own call context.
  */
 static pid_t vns_resolve_ns_pid(const char *comp)
 {
 	long val;
 
 	if (!strcmp(comp, "self"))
-		return task_tgid_nr(current);
+		return task_tgid_vnr(current);
 	if (!strcmp(comp, "thread-self"))
-		return task_pid_nr(current);
+		return task_pid_vnr(current);
 	if (kstrtol(comp, 10, &val) || val <= 0 || val > INT_MAX)
 		return 0;
 	return (pid_t)val;
@@ -171,9 +192,11 @@ static pid_t vns_resolve_ns_pid(const char *comp)
 
 /*
  * vns_path_is_ns_entry() - does @upath (relative to @dfd) name
- * ".../<piddir>/ns/<ns_name>"? If so, resolves the owning task's real pid
- * into *rpid and returns true. Returns false otherwise (including on any
- * parse failure) -- callers must fall back to the real syscall unchanged.
+ * ".../<piddir>/ns/<ns_name>"? If so, resolves the owning task's pid (see
+ * vns_resolve_ns_pid()'s own comment for the exact raw-vs-virtual pid
+ * semantics that matters here) into *rpid and returns true. Returns false
+ * otherwise (including on any parse failure) -- callers must fall back to
+ * the real syscall unchanged.
  *
  * @ns_name is one of VNS_PROC_NS_IPC_NAME/VNS_PROC_NS_PID_NAME (both
  * exactly 3 bytes, matching vns_swap_leaf_to_mnt()'s assumption below).
