@@ -238,13 +238,38 @@ void vns_compat_resolve(void)
 				"compat: " #sym " not resolved (stub active)"); \
 	} while (0)
 
+/*
+ * setup_mq_sysctls/retire_mq_sysctls (ipc/mq_sysctl.c) and
+ * setup_ipc_sysctls/retire_ipc_sysctls (ipc/ipc_sysctl.c) are only compiled
+ * into vmlinux under CONFIG_POSIX_MQUEUE_SYSCTL / CONFIG_SYSVIPC_SYSCTL
+ * respectively (see kernel-common ipc/Makefile), both of which require their
+ * parent CONFIG_POSIX_MQUEUE / CONFIG_SYSVIPC to be enabled. On
+ * vendor_kernel's primary target (GKI kernels built with
+ * CONFIG_SYSVIPC=n/CONFIG_POSIX_MQUEUE=n -- the whole reason this module
+ * exists), none of the four symbols are ever present in vmlinux at all, so
+ * failing to resolve them is expected rather than a genuine problem: the
+ * corresponding stub is a harmless no-op/allow-all (ipc/mqueue sysctls
+ * simply are not vendored -- see glue/vendor_kernel_ipc_compat.c). Use INFO
+ * instead of WARN so this doesn't look like an error on every boot,
+ * mirroring the real init_ipc_ns resolve below.
+ */
+#define RESOLVE_EXPECTED(var, sym) \
+	do { \
+		(var) = (typeof(var))(uintptr_t)shadow_hook_resolve(#sym); \
+		if (!(var)) \
+			LKM4CTR_INFO(VENDOR_KERNEL_TAG, \
+				"compat: " #sym " not resolved (stub active; expected on " \
+				"CONFIG_SYSVIPC=n/CONFIG_POSIX_MQUEUE=n, ipc/mqueue " \
+				"sysctls are not vendored)"); \
+	} while (0)
+
 	RESOLVE(vns_inc_ucount_real,            inc_ucount);
 	RESOLVE(vns_dec_ucount_real,            dec_ucount);
 	RESOLVE(vns_setup_userns_sysctls_real,  setup_userns_sysctls);
 	RESOLVE(vns_retire_userns_sysctls_real, retire_userns_sysctls);
 	RESOLVE(vns_security_create_user_ns_real, security_create_user_ns);
 	RESOLVE(vns_perf_event_namespaces_real, perf_event_namespaces);
-	RESOLVE(vns_setup_mq_sysctls_real,      setup_mq_sysctls);
+	RESOLVE_EXPECTED(vns_setup_mq_sysctls_real, setup_mq_sysctls);
 	RESOLVE(vns_from_mnt_ns_real,           from_mnt_ns);
 	RESOLVE(vns_pidfd_pid_real,             pidfd_pid);
 	RESOLVE(vns_set_fs_root_real,           set_fs_root);
@@ -255,12 +280,12 @@ void vns_compat_resolve(void)
 	RESOLVE(vns_current_chrooted_real,      current_chrooted);
 	RESOLVE(vns_disable_pid_allocation_real, disable_pid_allocation);
 	RESOLVE(vns_proc_ns_file_real,          proc_ns_file);
-	RESOLVE(vns_retire_ipc_sysctls_real,    retire_ipc_sysctls);
-	RESOLVE(vns_retire_mq_sysctls_real,     retire_mq_sysctls);
+	RESOLVE_EXPECTED(vns_retire_ipc_sysctls_real, retire_ipc_sysctls);
+	RESOLVE_EXPECTED(vns_retire_mq_sysctls_real,  retire_mq_sysctls);
 #ifdef CONFIG_KEYS
 	RESOLVE(vns_key_free_user_ns_real,      key_free_user_ns);
 #endif
-	RESOLVE(vns_setup_ipc_sysctls_real,     setup_ipc_sysctls);
+	RESOLVE_EXPECTED(vns_setup_ipc_sysctls_real, setup_ipc_sysctls);
 	RESOLVE(vns_set_cred_ucounts_real,      set_cred_ucounts);
 	RESOLVE(vns_prepare_creds_real,         prepare_creds);
 	RESOLVE(vns_commit_creds_real,          commit_creds);
@@ -279,12 +304,21 @@ void vns_compat_resolve(void)
 	 * bookkeeping, since vns_init_nsproxy.cgroup_ns is always pointed at
 	 * the vendored vns_default_cgroup_ns singleton instead (see
 	 * vendor_kernel_init(), glue/vendor_kernel_module.c).
+	 *
+	 * init_cgroup_ns is a pure *data* symbol, not a function: like the
+	 * cachep pointers above, shadow_hook_resolve()/register_kprobe() can
+	 * only ever resolve it when the running kernel has
+	 * CONFIG_KALLSYMS_ALL set, which is essentially never true on
+	 * production/GKI kernels. So this resolve failing is the expected,
+	 * common case rather than a genuine problem -- use INFO rather than
+	 * WARN so it doesn't look like an error on every boot.
 	 */
 	vns_init_cgroup_ns_ptr = (struct cgroup_namespace *)(uintptr_t)
 		shadow_hook_resolve("init_cgroup_ns");
 	if (!vns_init_cgroup_ns_ptr)
-		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-			"compat: init_cgroup_ns not resolved (bookkeeping only; cgroup ns unaffected)");
+		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+			"compat: init_cgroup_ns not resolved (bookkeeping only; cgroup ns unaffected; "
+			"expected without CONFIG_KALLSYMS_ALL)");
 #endif
 	/*
 	 * Best-effort resolve of the *real* kernel's init_ipc_ns. This is now
@@ -324,6 +358,7 @@ void vns_compat_resolve(void)
 	 */
 
 #undef RESOLVE
+#undef RESOLVE_EXPECTED
 }
 
 bool vns_compat_ready(void)
