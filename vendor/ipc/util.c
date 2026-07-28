@@ -44,6 +44,14 @@
  *  see sem_lock().
  */
 
+/*
+ * [BUILD-COMPAT] Must be included before any other header:
+ * ipc_update_perm()'s from_kuid_munged()/from_kgid_munged()
+ * (<linux/uidgid.h>, used below) have static inline bodies that reference
+ * the bare overflowuid/overflowgid names directly -- see
+ * ../../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/mm.h>
 #include <linux/shm.h>
 #include <linux/init.h>

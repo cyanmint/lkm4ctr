@@ -23,6 +23,15 @@
  * Pavel Emelianov <xemul@openvz.org>
  */
 
+/*
+ * [BUILD-COMPAT] Must be included before any other header:
+ * sysvipc_msg_proc_show()'s seq_user_ns() (<linux/seq_file.h>, used below)
+ * and from_kuid_munged()/from_kgid_munged() (<linux/uidgid.h>) have static
+ * inline bodies that reference the bare init_user_ns/overflowuid/
+ * overflowgid names directly -- see ../../glue/vendor_kernel_data_syms.h
+ * for the full rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/capability.h>
 #include <linux/msg.h>
 #include <linux/spinlock.h>

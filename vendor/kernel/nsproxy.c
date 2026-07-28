@@ -361,7 +361,21 @@ struct nsproxy *vns_copy_namespaces(unsigned long flags, struct task_struct *tsk
 	return new_ns;
 }
 
-void vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
+/*
+ * [BUILD-COMPAT] __nocfi: like create_new_namespaces() above, this
+ * function's vns_put_mnt_ns_fn() call below is a genuine CFI-unsafe
+ * indirect call through a pointer resolved at runtime via
+ * shadow_hook_resolve("put_mnt_ns") (vendor_kernel_module.c), not known to
+ * the compiler at this call site. On CONFIG_CFI_CLANG=y GKI kernels
+ * (5.15+) this panicked with "CFI failure ... (target: put_mnt_ns+...)"
+ * from inside vns_free_nsproxy() itself (called from
+ * vns_nsproxy_deferred_put_fn()'s workqueue context). Marking just this
+ * function __nocfi keeps the rest of this file -- including
+ * vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe pre_handler
+ * callback -- CFI-instrumented and a valid indirect-call target for the
+ * real kernel.
+ */
+void __nocfi vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 {
 	if (ns->mnt_ns)
 		if (vns_put_mnt_ns_fn)

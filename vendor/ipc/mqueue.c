@@ -13,6 +13,13 @@
  * This file is released under the GPL.
  */
 
+/*
+ * [BUILD-COMPAT] Must be included before any other header:
+ * mq_notify's from_kuid_munged() (<linux/uidgid.h>, used below) has a
+ * static inline body that references the bare overflowuid name directly
+ * -- see ../../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/capability.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
