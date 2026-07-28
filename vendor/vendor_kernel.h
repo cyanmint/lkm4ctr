@@ -38,6 +38,7 @@
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/file.h>
+#include <linux/seq_file.h>
 #include <linux/ipc.h>
 #include <linux/msg.h>
 #include <linux/sem.h>
@@ -400,7 +401,26 @@ bool vns_in_userns(const struct user_namespace *ancestor, const struct user_name
 bool vns_current_in_userns(const struct user_namespace *target_ns);
 struct ns_common *vns_ns_get_owner(struct ns_common *ns);
 extern const struct proc_ns_operations vns_userns_operations;
+extern const struct seq_operations vns_proc_uid_seq_operations;
+extern const struct seq_operations vns_proc_gid_seq_operations;
+extern const struct seq_operations vns_proc_projid_seq_operations;
 void vns_user_ns_init(void);
+
+/*
+ * glue/vendor_kernel_procfs_userns.c: fabricates /proc/<pid>/{uid_map,
+ * gid_map,projid_map,setgroups} on kernels genuinely missing
+ * CONFIG_USER_NS, wired to the real per-task user_namespace above (unlike
+ * a cosmetic probe stub). @pid is the real (host) pid the fabricated
+ * descriptor should operate against, resolved by the caller exactly like
+ * glue/vendor_kernel_procfs.c's vns_resolve_ns_pid().
+ */
+enum vns_idmap_kind {
+	VNS_IDMAP_UID,
+	VNS_IDMAP_GID,
+	VNS_IDMAP_PROJID,
+	VNS_IDMAP_SETGROUPS,
+};
+long vns_idmap_create_fd(pid_t pid, enum vns_idmap_kind kind);
 
 void vns_nsfs_init(void);
 
@@ -419,6 +439,7 @@ static inline struct ipc_namespace *vns_current_ipc_ns(void)
 extern struct shadow_hook *vendor_kernel_core_hooks[];
 extern struct shadow_hook *vendor_kernel_ipc_hooks[];
 extern struct shadow_hook *vendor_kernel_procfs_hooks[];
+extern struct shadow_hook *vendor_kernel_userns_hooks[];
 
 /* compat layer (glue/vendor_kernel_compat.c) */
 extern struct ucounts vns_ucounts_stub;
