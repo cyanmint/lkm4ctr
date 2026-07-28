@@ -91,8 +91,8 @@ MODULE_AUTHOR("GKI_KernelSU_SUSFS contributors");
  * fs/overlayfs's own MODULE_AUTHOR().
  */
 MODULE_AUTHOR("Linux kernel contributors (vendored ipc/, kernel/*_namespace.c, kernel/nsproxy.c, fs/overlayfs; see AGENTS.md and ../README.md)");
-MODULE_AUTHOR("cyanmint <https://github.com/cyanmint>");
+MODULE_AUTHOR("cyanmint <cyanmint@cyanmint.net>");
 MODULE_AUTHOR("GitHub Copilot <https://github.com/copilot>");
-MODULE_DESCRIPTION("Unified lkm4ctr module: shared hook engine plus vendored namespace/IPC/mqueue/overlayfs compatibility");
+MODULE_DESCRIPTION("Unified lkm4ctr module: shared hook engine plus vendored namespace/IPC/mqueue/overlayfs compatibility. For providinig missing features to runnung containers on Android kernels");
 MODULE_VERSION(LKM4CTR_VERSION);
 
