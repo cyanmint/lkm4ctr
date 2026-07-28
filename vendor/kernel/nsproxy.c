@@ -27,12 +27,15 @@
 /*
  * [BUILD-COMPAT] Must be included before any other header: several headers
  * pulled in below (<linux/nsproxy.h>, <linux/cred.h> et al) have static
- * inline helpers (e.g. current_user_ns() on a CONFIG_USER_NS=n target) that
- * reference the bare init_user_ns name directly -- see
+ * inline helpers (e.g. the real current_user_ns() on a CONFIG_USER_NS=n
+ * target) that reference the bare init_user_ns name directly -- see
  * ../../glue/vendor_kernel_data_syms.h for the full rationale. Missing this
- * left vns_unshare_nsproxy_namespaces()/vns_sys_setns()'s current_user_ns()
- * calls referencing the real, unexported init_user_ns symbol ("Unknown
- * symbol init_user_ns" observed at insmod on android12-5.10).
+ * previously left vns_unshare_nsproxy_namespaces()/vns_sys_setns()'s
+ * current_user_ns() calls referencing the real, unexported init_user_ns
+ * symbol ("Unknown symbol init_user_ns" observed at insmod on
+ * android12-5.10); those call sites now use vns_current_user_ns()
+ * (vendor_kernel.h) instead, which never touches current_user_ns() at all,
+ * but this header is kept first regardless as defensive practice.
  */
 #include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/slab.h>
@@ -456,7 +459,7 @@ int vns_unshare_nsproxy_namespaces(unsigned long unshare_flags, /* [RENAME] */
 			       CLONE_NEWTIME)))
 		return 0;
 
-	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
+	user_ns = new_cred ? new_cred->user_ns : vns_current_user_ns(); /* [BUILD-COMPAT] */
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -563,7 +566,7 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 {
 	struct task_struct *me = current;
 
-	nsset->nsproxy = create_new_namespaces(0, me, current_user_ns(), me->fs);
+	nsset->nsproxy = create_new_namespaces(0, me, vns_current_user_ns(), me->fs); /* [BUILD-COMPAT] */
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
 

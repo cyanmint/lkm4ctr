@@ -1548,7 +1548,7 @@ retry:
 		}
 
 		info->notify_owner = get_pid(task_tgid(current));
-		info->notify_user_ns = vns_get_user_ns(current_user_ns()); /* [BUILD-COMPAT] */
+		info->notify_user_ns = vns_get_user_ns(vns_current_user_ns()); /* [BUILD-COMPAT] */
 		lkm4ctr_inode_update_ts(inode);
 	}
 	spin_unlock(&info->lock);

@@ -367,6 +367,28 @@ void vns_pid_ns_init(void);
 int vns_create_user_ns(struct cred *new);
 int vns_unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
 /*
+ * [BUILD-COMPAT] vns_current_user_ns() replaces the real kernel's
+ * current_user_ns() at every vendored/glue call site. current_user_ns()'s
+ * CONFIG_USER_NS=n body ("return &init_user_ns;", <linux/cred.h>) is a
+ * static inline that bakes in the bare init_user_ns name at the point it is
+ * first parsed: if that happens before vendor_kernel_data_syms.h's
+ * init_user_ns redirect is in effect in a given translation unit, the
+ * result is an unresolved "init_user_ns" relocation at insmod (observed on
+ * android12-5.10); if it happens after (the common case, since cred.h is
+ * transitively included by this header below), the redirect instead
+ * folds "&init_user_ns" down to "&(*vns_real_init_user_ns)" ==
+ * vns_real_init_user_ns -- a fixed value, identical for every caller,
+ * regardless of the calling task's own cred->user_ns. Either way,
+ * current_user_ns() must never be called directly: this helper (defined in
+ * glue/vendor_kernel_compat.c, declared here as a plain function rather
+ * than a static inline so every .c file that only includes
+ * vendor_kernel_data_syms.h -- not the whole of this header -- can still
+ * call it) reads current_cred()->user_ns instead, which is always the
+ * calling task's real user_ns and never touches the init_user_ns macro at
+ * all.
+ */
+struct user_namespace *vns_current_user_ns(void);
+/*
  * [BUILD-COMPAT] vns_get_user_ns()/vns_put_user_ns() are self-contained
  * replacements for the real kernel's get_user_ns()/put_user_ns(). Both are
  * always static inline in kernel headers, but their bodies differ (real

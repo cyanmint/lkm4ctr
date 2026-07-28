@@ -1202,8 +1202,8 @@ __nocfi static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 	if (err)
 		return err;
 
-	if (!kuid_has_mapping(current_user_ns(), ctx.stat.uid) ||
-	    !kgid_has_mapping(current_user_ns(), ctx.stat.gid))
+	if (!kuid_has_mapping(vns_current_user_ns(), ctx.stat.uid) || /* [BUILD-COMPAT] */
+	    !kgid_has_mapping(vns_current_user_ns(), ctx.stat.gid)) /* [BUILD-COMPAT] */
 		return -EOVERFLOW;
 
 	/*

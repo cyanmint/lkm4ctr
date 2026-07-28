@@ -1429,7 +1429,7 @@ __nocfi int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	int err;
 
 	err = -EIO;
-	if (WARN_ON(fc->user_ns != current_user_ns()))
+	if (WARN_ON(fc->user_ns != vns_current_user_ns())) /* [BUILD-COMPAT] */
 		goto out_err;
 
 	sb->s_d_op = &ovl_dentry_operations;

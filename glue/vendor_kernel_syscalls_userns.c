@@ -30,7 +30,7 @@
  *     vns_make_kuid()/vns_make_kgid() *before* calling the real syscall
  *     unchanged, so every one of the real syscall's own privilege/
  *     capability checks (security_task_fix_setuid(), CAP_SETUID/CAP_SETGID
- *     against current_user_ns(), etc. -- none of which are gated by
+ *     against vns_current_user_ns(), etc. -- none of which are gated by
  *     CONFIG_USER_NS) still runs, just against the already-translated
  *     value; the real (no-op) make_kuid()/make_kgid() it then applies
  *     internally is a further identity pass-through that changes nothing.
@@ -103,7 +103,7 @@ static void vns_userns_set_arg2(struct pt_regs *regs, unsigned long v) { regs->d
 static long vendor_kernel_hook_getuid(const struct pt_regs *regs)
 {
 	long ret = real_sys_getuid(regs);
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 
 	if (ns == vns_real_init_user_ns)
 		return ret;
@@ -113,7 +113,7 @@ static long vendor_kernel_hook_getuid(const struct pt_regs *regs)
 static long vendor_kernel_hook_geteuid(const struct pt_regs *regs)
 {
 	long ret = real_sys_geteuid(regs);
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 
 	if (ns == vns_real_init_user_ns)
 		return ret;
@@ -123,7 +123,7 @@ static long vendor_kernel_hook_geteuid(const struct pt_regs *regs)
 static long vendor_kernel_hook_getgid(const struct pt_regs *regs)
 {
 	long ret = real_sys_getgid(regs);
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 
 	if (ns == vns_real_init_user_ns)
 		return ret;
@@ -133,7 +133,7 @@ static long vendor_kernel_hook_getgid(const struct pt_regs *regs)
 static long vendor_kernel_hook_getegid(const struct pt_regs *regs)
 {
 	long ret = real_sys_getegid(regs);
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 
 	if (ns == vns_real_init_user_ns)
 		return ret;
@@ -149,7 +149,7 @@ static long vendor_kernel_hook_getresuid(const struct pt_regs *regs)
 
 	if (ret)
 		return ret;
-	ns = current_user_ns();
+	ns = vns_current_user_ns();
 	if (ns == vns_real_init_user_ns)
 		return ret;
 
@@ -178,7 +178,7 @@ static long vendor_kernel_hook_getresgid(const struct pt_regs *regs)
 
 	if (ret)
 		return ret;
-	ns = current_user_ns();
+	ns = vns_current_user_ns();
 	if (ns == vns_real_init_user_ns)
 		return ret;
 
@@ -203,7 +203,7 @@ static long vendor_kernel_hook_getresgid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setuid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	kuid_t kuid;
 
 	if (ns == vns_real_init_user_ns)
@@ -219,7 +219,7 @@ static long vendor_kernel_hook_setuid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setgid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	kgid_t kgid;
 
 	if (ns == vns_real_init_user_ns)
@@ -235,7 +235,7 @@ static long vendor_kernel_hook_setgid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setreuid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	uid_t ruid = (uid_t)vns_userns_arg0(regs);
 	uid_t euid = (uid_t)vns_userns_arg1(regs);
 	kuid_t k;
@@ -261,7 +261,7 @@ static long vendor_kernel_hook_setreuid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setregid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	gid_t rgid = (gid_t)vns_userns_arg0(regs);
 	gid_t egid = (gid_t)vns_userns_arg1(regs);
 	kgid_t k;
@@ -287,7 +287,7 @@ static long vendor_kernel_hook_setregid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setresuid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	uid_t ruid = (uid_t)vns_userns_arg0(regs);
 	uid_t euid = (uid_t)vns_userns_arg1(regs);
 	uid_t suid = (uid_t)vns_userns_arg2(regs);
@@ -320,7 +320,7 @@ static long vendor_kernel_hook_setresuid(const struct pt_regs *regs)
 static long vendor_kernel_hook_setresgid(const struct pt_regs *regs)
 {
 	struct pt_regs regs_copy = *regs;
-	struct user_namespace *ns = current_user_ns();
+	struct user_namespace *ns = vns_current_user_ns();
 	gid_t rgid = (gid_t)vns_userns_arg0(regs);
 	gid_t egid = (gid_t)vns_userns_arg1(regs);
 	gid_t sgid = (gid_t)vns_userns_arg2(regs);
