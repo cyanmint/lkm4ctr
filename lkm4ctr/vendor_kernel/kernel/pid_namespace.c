@@ -181,6 +181,10 @@ out:
  * eliminating a real kernel panic; pid namespaces are created far less
  * frequently than individual tasks, so the leak is not expected to be
  * operationally significant.
+ *
+ * NOTE: despite the (upstream-matching, kept for diffability) name, this no
+ * longer actually destroys/frees @ns -- it only releases the two references
+ * (ucounts, user_ns) that are safe to release immediately. See above.
  */
 static void destroy_pid_namespace(struct pid_namespace *ns)
 {
