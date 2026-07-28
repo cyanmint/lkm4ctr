@@ -139,7 +139,21 @@ lkm4ctr_init_2() {
 	# during container init now
 	# finds and uses that real filesystem directly, so no manual /dev/mqueue
 	# premount or --ipc host workaround is needed here any more.
-	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon) ==="
+	# Force the overlay2 storage driver explicitly. image1.ext4 ships its
+	# own /etc/docker/daemon.json pinning "storage-driver": "vfs", and
+	# dockerd's default driver auto-probe also treats overlay2 support
+	# failures (graphdriver.ErrNotSupported) as non-fatal and silently
+	# falls back to the much slower vfs driver -- either of which would
+	# hide any regression in the vendored overlayfs. Rewrite daemon.json
+	# (rather than also passing --storage-driver=overlay2) to avoid
+	# dockerd's fatal "specified both as a flag and in the configuration
+	# file" error, so an unsupported/broken overlay2 becomes a hard
+	# dockerd startup failure instead, and this test actually exercises
+	# (and can catch breakage in) vendor_kernel's vendored overlayfs.
+	mkdir -p /etc/docker
+	echo '{"storage-driver": "overlay2"}' > /etc/docker/daemon.json
+
+	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon, storage-driver=overlay2) ==="
 	dockerd &
 	for i in $(seq 1 30); do
 		[ -S /var/run/docker.sock ] && break
