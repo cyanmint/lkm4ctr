@@ -134,7 +134,7 @@ it, and `docker exec`/`docker run` could not even *probe* namespace support
 at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only registers those
 procfs entries `#ifdef CONFIG_IPC_NS`/`#ifdef CONFIG_PID_NS`, a decision
 baked into the running `vmlinux` that no syscall hook can undo.
-`glue/vendor_kernel_procfs.c` closes this observability gap in two parts:
+`glue/vendor_kernel_procfs.c` closes this observability gap in three parts:
 - Hooking `readlink(2)`/`readlinkat(2)`: the real syscall always runs
   first, and only on its `-ENOENT` for a path unambiguously naming
   `.../<pid|self|thread-self>/ns/ipc` or `.../<pid|self|thread-self>/ns/pid`
@@ -158,6 +158,27 @@ baked into the running `vmlinux` that no syscall hook can undo.
   it is always present, and every caller of this stat(2) family only cares
   whether the call succeeds (see above), not which namespace's numbers come
   back.
+- Hooking `open(2)`/`openat(2)`/`openat2(2)`: closing the stat(2)/
+  readlink(2) gaps above is enough for `docker run`/`docker exec`'s own
+  namespace-support *probe* to pass, but `runc`'s `nsexec` C helper (forked
+  to actually join a running container's namespaces when `docker exec`
+  joins one) does not probe at all -- it plainly `open(2)`s
+  `.../ns/ipc`/`.../ns/pid` to obtain a real fd to `setns(2)` into. Without
+  this third hook, that `open(2)` still fails with plain `-ENOENT` even
+  with both fabrications above in place, and `docker exec` aborts with
+  `"OCI runtime exec failed: ... error executing setns process: exit
+  status 1; runc init error(s): ... failed to open /proc/<pid>/ns/ipc: No
+  such file or directory"`. Since the resulting fd is later handed to
+  `setns(2)` (`vns_sys_setns()`, `vendor/kernel/nsproxy.c`), which only
+  accepts a genuine nsfs file (`proc_ns_file()`'s exact `file->f_op ==
+  &ns_file_operations` check, followed by `get_proc_ns()`'s
+  `inode->i_private` read), this hook cannot get away with a stat(2)-style
+  substitution: it calls `fs/nsfs.c`'s own (non-exported, resolved the same
+  way as every other vendor_kernel symbol lookup) `ns_get_path()` with
+  `vns_ipcns_operations`/`vns_pidns_operations` (the same `proc_ns_operations`
+  vectors `vns_sys_setns()` itself already uses), producing a real,
+  interchangeable nsfs fd for the target task's actual vendored IPC/PID
+  namespace.
 
 Both hook groups are installed best-effort/non-fatal (a resolution failure
 only logs a warning): they are purely an observability enhancement, so they
@@ -490,6 +511,38 @@ override and calls one unified `vns_ovl_init()`/`vns_ovl_exit()` path; on
 kernels outside `[5.10, 6.19)`, `vns_overlay_init()` simply skips the
 override and `mount -t overlay ...` falls back to the running kernel's own
 overlay implementation.
+
+**Known limitation: case-insensitive-capable (casefold) backing filesystems.**
+`fs/overlayfs/params.c`'s unmodified `ovl_mount_dir_check()` rejects any
+layer path (`upperdir=`/`workdir=`/`lowerdir=`) whose backing superblock has
+`sb_has_encoding()` set, i.e. any filesystem mounted with `CONFIG_UNICODE`
+case-insensitive/casefold support enabled at mkfs time -- returning
+`-EINVAL` with `"case-insensitive capable filesystem on %s not supported"`,
+logged via this module's `pr_warn`/diagfs log wiring. This is unmodified,
+faithfully-vendored upstream behavior (a deliberate safety check, not a
+vendoring bug): a casefold-enabled superblock can hand back dentries
+without the expected `d_op`, which overlayfs cannot safely reconcile, so
+this check must not be weakened or bypassed here.
+
+On real Android devices this bites when a container runtime's data root
+(e.g. Docker/containerd's `graphroot`, or Termux's
+`$PREFIX/var/lib/docker`) lives directly on `/data`, since many Android
+`userdata` partitions (notably F2FS) have casefold support enabled at the
+whole-partition level even when no individual directory actually opts into
+case-insensitive lookups -- `sb_has_encoding()` only sees the superblock
+flag, not per-directory usage. `mount -t overlay` (and therefore
+`dockerd --storage-driver=overlay2`) then fails outright for every layer
+path under `/data`, regardless of this module being loaded and otherwise
+fully able to service `overlay` mounts.
+
+**Workaround**: point the container runtime's data root at a filesystem
+without casefold support instead of directly at `/data` -- e.g. a
+loopback-mounted ext4 (or non-casefold F2FS) image file, exactly as this
+repository's own `qemu_test.sh`/`testsuite.zip` test harness already does
+via `image1.ext4`. There is no in-kernel fix available for a data root that
+must remain directly on a casefold-enabled superblock; the
+`overlay2`/`vfs` storage-driver auto-probe in `dockerd` already falls back
+to `vfs` silently in that case if `overlay2` isn't explicitly forced.
 
 ## Helper files
 

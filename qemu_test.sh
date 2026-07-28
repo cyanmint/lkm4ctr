@@ -139,7 +139,8 @@ lkm4ctr_init_2() {
 	# during container init now
 	# finds and uses that real filesystem directly, so no manual /dev/mqueue
 	# premount or --ipc host workaround is needed here any more.
-	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon) ==="
+
+	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon, storage-driver=overlay2) ==="
 	dockerd &
 	for i in $(seq 1 30); do
 		[ -S /var/run/docker.sock ] && break
