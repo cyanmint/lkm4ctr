@@ -63,6 +63,71 @@ OBJECT_FILES_NON_STANDARD_vendor_kernel/kernel/pid_namespace.o := y
 
 ccflags-y += -I$(src)/../common
 
+# [BUILD-COMPAT] Disable Clang CFI (CONFIG_CFI_CLANG, -fsanitize=(k)cfi) for
+# every object that either (a) resolves a kernel symbol at runtime via
+# shadow_hook_resolve()'s register_kprobe() trick and then calls through the
+# resulting raw function pointer (shadow_hijack.c's hook->original(), every
+# glue/vendor_kernel_*_compat.c real-name wrapper's r_<name>(...) call, the
+# vendored overlayfs sources' vns_ovl_vfsc_<name> macro-redirected calls via
+# glue/vendor_kernel_ovl_vfs_compat.h), or (b) is itself the ftrace/kprobe
+# hook engine redirecting control flow into a replacement function chosen at
+# runtime (shadow_hijack.c/shadow_cgdevices.c). None of these call sites can
+# ever satisfy kernel CFI's compile-time type-hash check (the callee's real
+# compiled identity is looked up by name at runtime, not known to the
+# compiler at the call site), so the check is a guaranteed, fatal false
+# positive here -- observed as "Kernel panic - not syncing: CFI failure"
+# during vendor_kernel_init() on CONFIG_CFI_CLANG=y GKI kernels (5.15+).
+# This mirrors upstream's own CFLAGS_REMOVE_ftrace.o/insn.o (arch/arm64/
+# kernel/Makefile): code that must jump to an address only known at runtime
+# is expected to opt out of CFI instrumentation for itself, not to defeat
+# CFI's protection for the rest of the kernel, which is untouched. Applied
+# to every real source object below except the two embedded-text blobs
+# (helper.sh.o/readme.txt.o, plain string data) and lkm4ctr_main.o/
+# lkm4ctr_log.o/lkm4ctr_diagfs.o, which never call a symbol resolved this
+# way.
+VNS_CFI_UNSAFE_OBJS := \
+	lkm4ctr_hotreload.o \
+	shadow_hijack/shadow_hijack.o \
+	shadow_cgdevices/shadow_cgdevices.o \
+	vendor_kernel/kernel/utsname.o \
+	vendor_kernel/kernel/nsproxy.o \
+	vendor_kernel/kernel/pid_namespace.o \
+	vendor_kernel/kernel/user_namespace.o \
+	vendor_kernel/ipc/namespace.o \
+	vendor_kernel/ipc/util.o \
+	vendor_kernel/ipc/msgutil.o \
+	vendor_kernel/ipc/msg.o \
+	vendor_kernel/ipc/sem.o \
+	vendor_kernel/ipc/shm.o \
+	vendor_kernel/ipc/mqueue.o \
+	vendor_kernel/ipc/compat.o \
+	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
+	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
+	vendor_kernel/glue/vendor_kernel_ipc_compat.o \
+	vendor_kernel/fs/nsfs.o \
+	vendor_kernel/fs/overlayfs/super.o \
+	vendor_kernel/fs/overlayfs/namei.o \
+	vendor_kernel/fs/overlayfs/util.o \
+	vendor_kernel/fs/overlayfs/inode.o \
+	vendor_kernel/fs/overlayfs/dir.o \
+	vendor_kernel/fs/overlayfs/readdir.o \
+	vendor_kernel/fs/overlayfs/copy_up.o \
+	vendor_kernel/fs/overlayfs/export.o \
+	vendor_kernel/fs/overlayfs/file.o \
+	vendor_kernel/fs/overlayfs/params.o \
+	vendor_kernel/fs/overlayfs/xattrs.o \
+	vendor_kernel/kernel/cgroup/namespace.o \
+	vendor_kernel/kernel/time/namespace.o \
+	vendor_kernel/glue/vendor_kernel_module.o \
+	vendor_kernel/glue/vendor_kernel_syscalls.o \
+	vendor_kernel/glue/vendor_kernel_procfs.o \
+	vendor_kernel/glue/vendor_kernel_overlay.o \
+	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
+	vendor_kernel/glue/vendor_kernel_diag.o \
+	vendor_kernel/glue/vendor_kernel_compat.o
+
+$(foreach o,$(VNS_CFI_UNSAFE_OBJS),$(eval CFLAGS_REMOVE_$(o) += $(CC_FLAGS_CFI)))
+
 # LKM4CTR_LOG_DMESG - build-time logging switch (see common/lkm4ctr_log.h
 # and lkm4ctr/Kconfig's CONFIG_LKM4CTR_LOG_DMESG for the full rationale).
 # This is a standalone out-of-tree module: it is never actually built as

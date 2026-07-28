@@ -236,6 +236,43 @@ require duplicating the running kernel's non-exported cgroup core (`css_set`
 table, `cgroup_mutex`, `task_css_set()`), which is out of scope for this
 module (see "Known remaining gaps" below).
 
+## Clang CFI (`CONFIG_CFI_CLANG`) compatibility
+
+Production Android GKI kernels (5.15+) are typically built with
+`CONFIG_CFI_CLANG=y`, which instruments every indirect call with a
+compile-time type-hash check. `vendor_kernel`/`shadow_hijack` fundamentally
+call kernel-internal functions by resolving their runtime address via
+`shadow_hook_resolve()` (the `register_kprobe()` trick) and invoking them
+through a function pointer; since the compiler never sees a real
+declaration/definition pair for these indirect calls the way CFI's checker
+expects, every one of them is a guaranteed, fatal false positive under CFI
+(observed as `Kernel panic - not syncing: CFI failure` during
+`vendor_kernel_init()`, e.g. inside `vns_mqueue_fs_init()`'s call to the
+resolved `fs_context_for_mount()`). `lkm4ctr/Makefile` disables CFI
+instrumentation (`CFLAGS_REMOVE_*.o += $(CC_FLAGS_CFI)`) for every object
+that performs this kind of call -- `shadow_hijack.c`/`shadow_cgdevices.c`
+(the hook engines themselves), every `glue/vendor_kernel_*_compat.c`
+real-name wrapper, and the vendored overlayfs sources (whose
+`glue/vendor_kernel_ovl_vfs_compat.h` macro-redirects every VFS helper call
+site directly to a resolved pointer) -- mirroring how upstream's own
+`arch/arm64/kernel/Makefile` disables `CC_FLAGS_FTRACE` for `ftrace.o`/
+`insn.o` for the same underlying reason (code that must transfer control to
+an address only known at runtime cannot satisfy a compile-time check). CFI
+protection for the rest of the running kernel is entirely unaffected.
+
+## `lookup_one` symbol resolution (KMI >= 6.3)
+
+`common/lkm4ctr_compat.h`'s `lkm4ctr_lookup_one_len()` calls the
+idmap-taking `lookup_one()` directly by name on kernels >= 6.3, since that
+replaced the older `lookup_one_len()` API `ipc/mqueue.c` needs here.
+Unlike `lookup_one_len()` (already wrapped) `lookup_one()` had no
+module-local real-name override, so on any KMI where
+`CONFIG_TRIM_UNUSED_KSYMS` drops it from the exported symbol table (e.g.
+android15-6.6+) `insmod` failed with `Unknown symbol lookup_one`.
+`glue/vendor_kernel_ipc_compat.c` now defines a real-name `lookup_one()`
+wrapper, resolved via `shadow_hook_resolve()` like `inode_permission()`/
+`vfs_unlink()` right next to it.
+
 ## Known remaining gaps
 
 - `SHM_HUGETLB` shared-memory segments are a best-effort gap: `ipc/shm.c` references the running kernel's hugetlb `hstates[]`/`default_hstate_idx`/`size_to_hstate()`, which are not exported and are absent entirely on `CONFIG_HUGETLB_PAGE=n`. `glue/vendor_kernel_ipc_compat.c` defines these as zeroed/NULL-returning stubs, so `shmget(..., SHM_HUGETLB)` fails cleanly with `-EINVAL` (`shm.c` null-checks `hstate_sizelog()`) rather than doing anything unsafe; ordinary (non-hugetlb) `shmget()` is fully functional.

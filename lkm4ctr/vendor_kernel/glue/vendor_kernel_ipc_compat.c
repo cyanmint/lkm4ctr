@@ -27,7 +27,7 @@
  *   - timeout/timespec helpers: schedule_hrtimeout_range{,_clock},
  *     get_timespec64, get_old_timespec32
  *   - mqueue/VFS helpers: shmem_kernel_file_setup, getname{,_flags},
- *     putname, mnt_want_write, lookup_one_len, mntget, vfs_mkobj,
+ *     putname, mnt_want_write, lookup_one_len, lookup_one, mntget, vfs_mkobj,
  *     inode_permission, dentry_open, path_put, mnt_drop_write, vfs_unlink,
  *     fs_context_for_mount, fc_mount, put_fs_context, get_tree_nodev,
  *     get_tree_keyed, simple_lookup
@@ -167,6 +167,10 @@ typedef struct file *(*shmem_kernel_file_setup_fn_t)(const char *, loff_t,
 	unsigned long);
 typedef int (*mnt_want_write_fn_t)(struct vfsmount *);
 typedef struct dentry *(*lookup_one_len_fn_t)(const char *, struct dentry *, int);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+typedef struct dentry *(*lookup_one_fn_t)(struct mnt_idmap *, const char *,
+	struct dentry *, int);
+#endif
 typedef struct vfsmount *(*mntget_fn_t)(struct vfsmount *);
 typedef int (*vfs_mkobj_fn_t)(struct dentry *, umode_t,
 	int (*)(struct dentry *, umode_t, void *), void *);
@@ -299,6 +303,9 @@ static putname_fn_t             r_putname;
 static shmem_kernel_file_setup_fn_t r_shmem_kernel_file_setup;
 static mnt_want_write_fn_t      r_mnt_want_write;
 static lookup_one_len_fn_t      r_lookup_one_len;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+static lookup_one_fn_t          r_lookup_one;
+#endif
 static mntget_fn_t              r_mntget;
 static vfs_mkobj_fn_t           r_vfs_mkobj;
 static inode_permission_fn_t    r_inode_permission;
@@ -397,6 +404,9 @@ void vns_ipc_compat_resolve(void)
 	R(r_shmem_kernel_file_setup, shmem_kernel_file_setup);
 	R(r_mnt_want_write, mnt_want_write);
 	R(r_lookup_one_len, lookup_one_len);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	R(r_lookup_one, lookup_one);
+#endif
 	R(r_mntget, mntget);
 	R(r_vfs_mkobj, vfs_mkobj);
 	R(r_inode_permission, inode_permission);
@@ -617,6 +627,27 @@ struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
 		return r_lookup_one_len(name, base, len);
 	return ERR_PTR(-ENOSYS);
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+/*
+ * [BUILD-COMPAT] common/lkm4ctr_compat.h's lkm4ctr_lookup_one_len() calls the
+ * idmap-taking lookup_one() directly (real kernel name, real prototype) on
+ * this KMI range, since that -- not the older lookup_one_len() above -- is
+ * the API ipc/mqueue.c's callers need here. Unlike lookup_one_len, which was
+ * already wrapped, lookup_one() had no module-local override, so any KMI
+ * that trims it from the exported symbol table (CONFIG_TRIM_UNUSED_KSYMS)
+ * failed insmod with "Unknown symbol lookup_one". Define it here under its
+ * real name, forwarding to the kallsyms-resolved pointer, exactly like
+ * inode_permission()/vfs_unlink() below.
+ */
+struct dentry *lookup_one(struct mnt_idmap *idmap, const char *name,
+			  struct dentry *base, int len)
+{
+	if (r_lookup_one)
+		return r_lookup_one(idmap, name, base, len);
+	return ERR_PTR(-ENOSYS);
+}
+#endif
 
 struct vfsmount *mntget(struct vfsmount *mnt)
 {

@@ -94,6 +94,24 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
+/*
+ * [BUILD-COMPAT] init_user_ns is a DATA symbol (register_kprobe() based
+ * shadow_hook_resolve() cannot resolve it -- kprobes only attach to code
+ * addresses), and CONFIG_TRIM_UNUSED_KSYMS has been observed to drop its
+ * module symbol table entry entirely on some GKI KMIs ("Unknown symbol
+ * init_user_ns" at insmod). xattrs.c's ovl_can_list() (all tiers) and the
+ * MID/OLD-tier nop_mnt_idmap alias below reference it directly, but this
+ * file (unlike the vendored overlayfs .c sources) never includes
+ * vendor_kernel.h, whose own identical redirect (see that header's
+ * init_user_ns comment) therefore never applies here. Redirect the bare
+ * name to the same module-owned vns_real_init_user_ns pointer that
+ * glue/vendor_kernel_module.c's vendor_kernel_init() populates from
+ * current_user_ns() at load time, so no relocation to the (possibly
+ * trimmed) real symbol is ever emitted from this header's includers.
+ */
+extern struct user_namespace *vns_real_init_user_ns;
+#define init_user_ns (*vns_real_init_user_ns)
+
 #define VNS_OVL_TIER_NEW (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0))
 #define VNS_OVL_TIER_MID (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0) && \
 			  LINUX_VERSION_CODE <  KERNEL_VERSION(6, 3, 0))
