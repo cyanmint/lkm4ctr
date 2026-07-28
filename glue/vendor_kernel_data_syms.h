@@ -14,10 +14,13 @@
  * init_user_ns is fixed up without ever needing the real symbol at all:
  * vns_real_init_user_ns is populated once, at the very start of
  * vendor_kernel_init() (glue/vendor_kernel_module.c), from
- * current_user_ns() -- itself just a static-inline read of
- * current_cred()->user_ns, never an unresolved symbol -- which, since
- * insmod always runs from a real top-level process context, is the exact
- * same object the running kernel's own init_user_ns symbol would have
+ * vns_current_user_ns() (vendor_kernel.h) -- a plain read of
+ * current_cred()->user_ns, never an unresolved symbol (unlike the real
+ * kernel's own current_user_ns(), whose CONFIG_USER_NS=n body bakes in the
+ * bare init_user_ns name; see vendor_kernel.h's vns_current_user_ns()
+ * comment) -- which, since insmod always runs from a real top-level
+ * process context, is the exact same object the running kernel's own
+ * init_user_ns symbol would have
  * pointed at. Every source reference to init_user_ns is therefore
  * redirected to dereference that captured pointer instead, so no
  * relocation to the (possibly trimmed) real symbol is ever emitted.
@@ -57,6 +60,17 @@ struct user_namespace;
 
 extern struct user_namespace *vns_real_init_user_ns;
 #define init_user_ns (*vns_real_init_user_ns)
+
+/*
+ * vns_current_user_ns() (defined in glue/vendor_kernel_compat.c) must be
+ * used instead of the real kernel's current_user_ns() everywhere: see
+ * vendor_kernel.h's vns_current_user_ns() comment for why the real one can
+ * never be called directly (either an unresolved init_user_ns symbol, or a
+ * silently task-independent return value, depending on include order).
+ * Declared here (not just in vendor_kernel.h) so .c files that only include
+ * this header can still call it.
+ */
+struct user_namespace *vns_current_user_ns(void);
 
 extern int vns_local_overflowgid;
 extern int vns_local_overflowuid;

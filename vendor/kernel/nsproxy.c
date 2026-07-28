@@ -24,6 +24,20 @@
  *             Pavel Emelianov <xemul@openvz.org>
  */
 
+/*
+ * [BUILD-COMPAT] Must be included before any other header: several headers
+ * pulled in below (<linux/nsproxy.h>, <linux/cred.h> et al) have static
+ * inline helpers (e.g. the real current_user_ns() on a CONFIG_USER_NS=n
+ * target) that reference the bare init_user_ns name directly -- see
+ * ../../glue/vendor_kernel_data_syms.h for the full rationale. Missing this
+ * previously left vns_unshare_nsproxy_namespaces()/vns_sys_setns()'s
+ * current_user_ns() calls referencing the real, unexported init_user_ns
+ * symbol ("Unknown symbol init_user_ns" observed at insmod on
+ * android12-5.10); those call sites now use vns_current_user_ns()
+ * (vendor_kernel.h) instead, which never touches current_user_ns() at all,
+ * but this header is kept first regardless as defensive practice.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
@@ -197,7 +211,7 @@ static inline struct nsproxy *create_nsproxy(void)
  * including vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe
  * pre_handler callback -- CFI-instrumented and a valid indirect-call target
  * for the real kernel, matching the pattern used elsewhere in this module
- * (see e.g. vendor_kernel_procfs_setgroups.c's vns_setgroups_create_fd()).
+ * (see e.g. vendor_kernel_procfs_userns.c's vns_idmap_create_fd()).
  */
 static __nocfi struct nsproxy *create_new_namespaces(unsigned long flags,
 	struct task_struct *tsk, struct user_namespace *user_ns,
@@ -361,7 +375,21 @@ struct nsproxy *vns_copy_namespaces(unsigned long flags, struct task_struct *tsk
 	return new_ns;
 }
 
-void vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
+/*
+ * [BUILD-COMPAT] __nocfi: like create_new_namespaces() above, this
+ * function's vns_put_mnt_ns_fn() call below is a genuine CFI-unsafe
+ * indirect call through a pointer resolved at runtime via
+ * shadow_hook_resolve("put_mnt_ns") (vendor_kernel_module.c), not known to
+ * the compiler at this call site. On CONFIG_CFI_CLANG=y GKI kernels
+ * (5.15+) this panicked with "CFI failure ... (target: put_mnt_ns+...)"
+ * from inside vns_free_nsproxy() itself (called from
+ * vns_nsproxy_deferred_put_fn()'s workqueue context). Marking just this
+ * function __nocfi keeps the rest of this file -- including
+ * vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe pre_handler
+ * callback -- CFI-instrumented and a valid indirect-call target for the
+ * real kernel.
+ */
+void __nocfi vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 {
 	if (ns->mnt_ns)
 		if (vns_put_mnt_ns_fn)
@@ -431,7 +459,7 @@ int vns_unshare_nsproxy_namespaces(unsigned long unshare_flags, /* [RENAME] */
 			       CLONE_NEWTIME)))
 		return 0;
 
-	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
+	user_ns = new_cred ? new_cred->user_ns : vns_current_user_ns(); /* [BUILD-COMPAT] */
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -538,7 +566,7 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 {
 	struct task_struct *me = current;
 
-	nsset->nsproxy = create_new_namespaces(0, me, current_user_ns(), me->fs);
+	nsset->nsproxy = create_new_namespaces(0, me, vns_current_user_ns(), me->fs); /* [BUILD-COMPAT] */
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
 

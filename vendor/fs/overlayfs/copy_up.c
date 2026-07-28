@@ -3,6 +3,14 @@
  *
  * Copyright (C) 2011 Novell Inc.
  */
+/*
+ * Must be included before any other header: <linux/cred.h>'s
+ * current_user_ns() (reached transitively via <linux/fs.h> et al, pulled
+ * in below) has a static inline body that references the bare init_user_ns
+ * name directly on a CONFIG_USER_NS=n target -- see
+ * ../../../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../../glue/vendor_kernel_data_syms.h"
 #include <linux/version.h>
 #include <linux/compiler_types.h>
 
@@ -1194,8 +1202,8 @@ __nocfi static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 	if (err)
 		return err;
 
-	if (!kuid_has_mapping(current_user_ns(), ctx.stat.uid) ||
-	    !kgid_has_mapping(current_user_ns(), ctx.stat.gid))
+	if (!kuid_has_mapping(vns_current_user_ns(), ctx.stat.uid) || /* [BUILD-COMPAT] */
+	    !kgid_has_mapping(vns_current_user_ns(), ctx.stat.gid)) /* [BUILD-COMPAT] */
 		return -EOVERFLOW;
 
 	/*

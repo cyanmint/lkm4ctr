@@ -37,7 +37,7 @@ change anything). See `vendor/README.md` for the full rationale.
 |-------------------------------------|-----------------|-----|
 | `vendor_kernel` — UTS namespace      | **Real**        | `uname()`/`sethostname()` after `unshare(CLONE_NEWUTS)` observe a genuinely separate nodename/domainname per vendored namespace. |
 | `vendor_kernel` — PID namespace      | **Real**        | vpid remapping plus `/proc` integration mean `getpid()` and procfs inside a vendored PID namespace show namespace-local PIDs distinct from the host ones. |
-| `vendor_kernel` — USER namespace     | **Real**        | uid/gid remapping gives genuinely different credential mapping inside vs. outside the vendored namespace. |
+| `vendor_kernel` — USER namespace     | **Real**        | A real per-task `user_namespace` is installed after `unshare(CLONE_NEWUSER)`, with genuinely wired `/proc/<pid>/{uid_map,gid_map,projid_map,setgroups}` (`glue/vendor_kernel_procfs_userns.c`) and `getuid`/`setuid`/etc. syscall hooks (`glue/vendor_kernel_syscalls_userns.c`) that remap through it, so credentials genuinely differ inside vs. outside the vendored namespace even on kernels lacking `CONFIG_USER_NS`. |
 | `vendor_kernel` — IPC namespace      | **Real**        | A vendored `ipc_namespace` is installed on `task_struct->nsproxy`, and the hooked SysV IPC and POSIX mqueue syscalls operate on that namespace-scoped state instead of the host default. |
 | `vendor_kernel` — NET namespace      | **Bookkeeping** | A separate namespace id/refcount is tracked, but no network-stack partitioning is provided. |
 | `vendor_kernel` — CGROUP namespace   | **Kernel-provided or bookkeeping-only** | Uses the real kernel cgroup namespace support when present; on kernels lacking it, only bookkeeping remains. |

@@ -38,6 +38,7 @@
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/file.h>
+#include <linux/seq_file.h>
 #include <linux/ipc.h>
 #include <linux/msg.h>
 #include <linux/sem.h>
@@ -232,6 +233,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_get_ref(obj) vns_get_count(&(obj)->count)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
+#define vns_ipc_pin_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
 #define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
@@ -247,6 +249,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_user_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_user_put_ref(obj) vns_put_count(&(obj)->ns.count)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
+#define vns_ipc_pin_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
 #define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->ns.count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
@@ -364,6 +367,28 @@ void vns_pid_ns_init(void);
 int vns_create_user_ns(struct cred *new);
 int vns_unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
 /*
+ * [BUILD-COMPAT] vns_current_user_ns() replaces the real kernel's
+ * current_user_ns() at every vendored/glue call site. current_user_ns()'s
+ * CONFIG_USER_NS=n body ("return &init_user_ns;", <linux/cred.h>) is a
+ * static inline that bakes in the bare init_user_ns name at the point it is
+ * first parsed: if that happens before vendor_kernel_data_syms.h's
+ * init_user_ns redirect is in effect in a given translation unit, the
+ * result is an unresolved "init_user_ns" relocation at insmod (observed on
+ * android12-5.10); if it happens after (the common case, since cred.h is
+ * transitively included by this header below), the redirect instead
+ * folds "&init_user_ns" down to "&(*vns_real_init_user_ns)" ==
+ * vns_real_init_user_ns -- a fixed value, identical for every caller,
+ * regardless of the calling task's own cred->user_ns. Either way,
+ * current_user_ns() must never be called directly: this helper (defined in
+ * glue/vendor_kernel_compat.c, declared here as a plain function rather
+ * than a static inline so every .c file that only includes
+ * vendor_kernel_data_syms.h -- not the whole of this header -- can still
+ * call it) reads current_cred()->user_ns instead, which is always the
+ * calling task's real user_ns and never touches the init_user_ns macro at
+ * all.
+ */
+struct user_namespace *vns_current_user_ns(void);
+/*
  * [BUILD-COMPAT] vns_get_user_ns()/vns_put_user_ns() are self-contained
  * replacements for the real kernel's get_user_ns()/put_user_ns(). Both are
  * always static inline in kernel headers, but their bodies differ (real
@@ -398,7 +423,29 @@ bool vns_in_userns(const struct user_namespace *ancestor, const struct user_name
 bool vns_current_in_userns(const struct user_namespace *target_ns);
 struct ns_common *vns_ns_get_owner(struct ns_common *ns);
 extern const struct proc_ns_operations vns_userns_operations;
+extern const struct seq_operations vns_proc_uid_seq_operations;
+extern const struct seq_operations vns_proc_gid_seq_operations;
+extern const struct seq_operations vns_proc_projid_seq_operations;
 void vns_user_ns_init(void);
+
+/*
+ * glue/vendor_kernel_procfs_userns.c: fabricates /proc/<pid>/{uid_map,
+ * gid_map,projid_map,setgroups} on kernels genuinely missing
+ * CONFIG_USER_NS, wired to the real per-task user_namespace above (unlike
+ * a cosmetic probe stub). @pid is the pid the fabricated descriptor should
+ * operate against, resolved by the caller exactly like
+ * glue/vendor_kernel_procfs.c's vns_resolve_ns_pid() -- i.e. suitable for
+ * find_get_pid() (namespace-relative to the resolving task, not a raw/
+ * global pid), since vns_idmap_get_task_userns() looks it back up with
+ * exactly that call.
+ */
+enum vns_idmap_kind {
+	VNS_IDMAP_UID,
+	VNS_IDMAP_GID,
+	VNS_IDMAP_PROJID,
+	VNS_IDMAP_SETGROUPS,
+};
+long vns_idmap_create_fd(pid_t pid, enum vns_idmap_kind kind);
 
 void vns_nsfs_init(void);
 
@@ -417,6 +464,7 @@ static inline struct ipc_namespace *vns_current_ipc_ns(void)
 extern struct shadow_hook *vendor_kernel_core_hooks[];
 extern struct shadow_hook *vendor_kernel_ipc_hooks[];
 extern struct shadow_hook *vendor_kernel_procfs_hooks[];
+extern struct shadow_hook *vendor_kernel_userns_hooks[];
 
 /* compat layer (glue/vendor_kernel_compat.c) */
 extern struct ucounts vns_ucounts_stub;

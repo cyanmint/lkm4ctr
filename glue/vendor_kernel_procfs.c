@@ -151,19 +151,48 @@ static bool vns_dfd_is_procfs(int dfd)
 
 /*
  * vns_resolve_ns_pid() - resolve the "self"/"thread-self"/numeric path
- * component immediately preceding "/ns/{ipc,pid}" to the real (host) pid it
- * names. Numeric components are taken to already be real pids: vendor_kernel's
- * vendored PID namespace installs the real task->nsproxy directly, so no
- * separate vpid<->rpid translation table is needed here.
+ * component immediately preceding "/ns/{ipc,pid}" (or, via
+ * vns_path_wants_idmap() below, the pid directory owning a fabricated
+ * uid_map/gid_map/projid_map/setgroups leaf) to the pid every caller of
+ * this function subsequently feeds straight into find_get_pid(): the
+ * number as seen from the *calling task's own* active pid namespace, not
+ * the raw/global (init_pid_ns) number.
+ *
+ * find_get_pid(nr)/find_vpid(nr) always resolve @nr relative to
+ * task_active_pid_ns(current) -- there is no "give me the real/global
+ * pid" variant. "self"/"thread-self" must therefore resolve via
+ * task_tgid_vnr()/task_pid_vnr() (virtual, i.e. relative to the caller's
+ * own namespace), matching task_active_pid_ns(current) exactly, not the
+ * raw task_tgid_nr()/task_pid_nr(). Using the raw number here silently
+ * works while the caller is still running in init_pid_ns (raw == virtual
+ * there), but breaks for any task that has already become PID 1 of its
+ * own pid namespace via clone3(CLONE_NEWPID) -- exactly a container's own
+ * init process -- since find_get_pid() then looks up a large raw/global
+ * number inside a small-numbered idr and finds nothing, making the whole
+ * fabricated fd's later magic-link reopen (".../fd/<n>", which every
+ * modern runc/containerd performs as a defensive "unsafe procfs" check)
+ * fail with -ENOENT even though the original open succeeded.
+ *
+ * Numeric components are passed through unchanged, matching the same
+ * "already namespace-relative to the resolving task" contract:
+ * find_get_pid() is later called by that same task, so a caller naming a
+ * pid directory by an explicit number is expected to already be using
+ * whatever numbering its own task's active pid namespace observes (e.g. a
+ * numeric /proc/<pid>/... path typed from inside a container names a pid
+ * relative to that container's own pid namespace, exactly like the real
+ * kernel's own procfs would resolve it there). This is a pre-existing
+ * limitation carried over unchanged from before this fix, not something
+ * newly introduced by switching "self"/"thread-self" to the vnr() forms
+ * above.
  */
 static pid_t vns_resolve_ns_pid(const char *comp)
 {
 	long val;
 
 	if (!strcmp(comp, "self"))
-		return task_tgid_nr(current);
+		return task_tgid_vnr(current);
 	if (!strcmp(comp, "thread-self"))
-		return task_pid_nr(current);
+		return task_pid_vnr(current);
 	if (kstrtol(comp, 10, &val) || val <= 0 || val > INT_MAX)
 		return 0;
 	return (pid_t)val;
@@ -171,9 +200,11 @@ static pid_t vns_resolve_ns_pid(const char *comp)
 
 /*
  * vns_path_is_ns_entry() - does @upath (relative to @dfd) name
- * ".../<piddir>/ns/<ns_name>"? If so, resolves the owning task's real pid
- * into *rpid and returns true. Returns false otherwise (including on any
- * parse failure) -- callers must fall back to the real syscall unchanged.
+ * ".../<piddir>/ns/<ns_name>"? If so, resolves the owning task's pid (see
+ * vns_resolve_ns_pid()'s own comment for the exact raw-vs-virtual pid
+ * semantics that matters here) into *rpid and returns true. Returns false
+ * otherwise (including on any parse failure) -- callers must fall back to
+ * the real syscall unchanged.
  *
  * @ns_name is one of VNS_PROC_NS_IPC_NAME/VNS_PROC_NS_PID_NAME (both
  * exactly 3 bytes, matching vns_swap_leaf_to_mnt()'s assumption below).
@@ -391,37 +422,40 @@ static long vendor_kernel_hook_readlink(const struct pt_regs *regs)
 }
 
 /*
- * /proc/<pid>/setgroups fabrication on kernels genuinely missing
- * CONFIG_USER_NS: fs/proc/base.c only wires up the "setgroups" per-pid dentry
- * "#ifdef CONFIG_USER_NS", so modern runc/containerd's unconditional
- * open()/openat2() sanity-check of "self/setgroups" as part of its "is this
- * really an unrestricted procfs" probe fails with plain -ENOENT and aborts
- * container creation with "unsafe procfs detected", independent of whether
- * the container itself asked for a new user namespace.
+ * /proc/<pid>/{uid_map,gid_map,projid_map,setgroups} fabrication on kernels
+ * genuinely missing CONFIG_USER_NS: fs/proc/base.c only wires up these
+ * per-pid dentries "#ifdef CONFIG_USER_NS", so:
+ *   - modern runc/containerd's unconditional open()/openat2() sanity-check
+ *     of "self/setgroups" as part of its "is this really an unrestricted
+ *     procfs" probe fails with plain -ENOENT and aborts container creation
+ *     with "unsafe procfs detected", independent of whether the container
+ *     itself asked for a new user namespace;
+ *   - every container runtime's classic "0 <host-id> 1" uid_map/gid_map
+ *     write (the actual mechanism establishing a container's uid/gid
+ *     remap) fails outright with -ENOENT before it can even open the file.
  *
- * The fabricated descriptor stores a simple one-way "allow" -> "deny" latch
- * on its own private inode (via anon_inode_getfd_secure(), resolved through
- * shadow_hook_resolve() for the same CONFIG_TRIM_UNUSED_KSYMS reasons as the
- * rest of this file), rather than being wired to vendor_kernel's own real
- * per-task user_namespace
- * (kernel/user_namespace.c's vns_proc_setgroups_show()/_write(), reachable
- * via current_cred()->user_ns) -- reproducing the exact allow/deny/
- * gid-map-set interactions real setgroups(7) has with a specific
- * unshare(CLONE_NEWUSER)'d namespace is unnecessary complexity for what
- * every observed caller only ever treats as a one-shot defensive probe.
+ * All four fabricated descriptors are wired to vendor_kernel's own real
+ * per-task user_namespace (kernel/user_namespace.c's
+ * vns_proc_{uid,gid,projid}_seq_operations / vns_proc_*_map_write() /
+ * vns_proc_setgroups_show()/_write(), reachable via the target task's
+ * cred->user_ns) rather than a cosmetic probe stub: unlike setgroups(7) in
+ * isolation, uid_map/gid_map content is not merely probed, it is the
+ * mechanism itself, and new_idmap_permitted()'s unprivileged single-mapping
+ * rule depends on setgroups' real ns->flags (CVE-2014-8989) too, so
+ * setgroups must be real here for uid_map/gid_map to behave correctly at
+ * all when written by an unprivileged caller.
  *
  * The actual file_operations callbacks (open/read/write) and
- * vns_setgroups_create_fd() itself live in
- * glue/vendor_kernel_procfs_setgroups.c, a separate translation unit kept
- * out of lkm4ctr/Makefile's VNS_CFI_UNSAFE_OBJS: unlike the
- * newfstatat/stat/lstat hooks below, those callbacks are called back into
- * indirectly by the kernel's own (KCFI-checked) VFS and must keep ordinary
- * CFI instrumentation to remain valid indirect-call targets. See that
- * file's header comment for the full rationale.
+ * vns_idmap_create_fd() itself live in glue/vendor_kernel_procfs_userns.c,
+ * a separate translation unit kept out of lkm4ctr/Makefile's
+ * VNS_CFI_UNSAFE_OBJS: unlike the newfstatat/stat/lstat hooks below, those
+ * callbacks are called back into indirectly by the kernel's own
+ * (KCFI-checked) VFS and must keep ordinary CFI instrumentation to remain
+ * valid indirect-call targets. See that file's header comment for the full
+ * rationale.
  */
-long vns_setgroups_create_fd(void);
-
-static bool vns_path_wants_setgroups(int dfd, const char __user *upath)
+static bool vns_path_wants_idmap(int dfd, const char __user *upath,
+				  enum vns_idmap_kind *out_kind, pid_t *out_pid)
 {
 	char buf[192];
 	long n;
@@ -436,16 +470,35 @@ static bool vns_path_wants_setgroups(int dfd, const char __user *upath)
 
 	slash = strrchr(buf, '/');
 	base = slash ? slash + 1 : buf;
-	if (strcmp(base, "setgroups"))
+	if (!strcmp(base, "uid_map"))
+		*out_kind = VNS_IDMAP_UID;
+	else if (!strcmp(base, "gid_map"))
+		*out_kind = VNS_IDMAP_GID;
+	else if (!strcmp(base, "projid_map"))
+		*out_kind = VNS_IDMAP_PROJID;
+	else if (!strcmp(base, "setgroups"))
+		*out_kind = VNS_IDMAP_SETGROUPS;
+	else
 		return false;
 
+	/*
+	 * A bare leaf name (no directory prefix) would need to be resolved
+	 * relative to whatever pid directory @dfd itself is already open on
+	 * -- rare in practice (every observed caller uses a full
+	 * "/proc/<pid>/..." path) and not worth the extra dentry-to-pid
+	 * lookup complexity; fall through to the real -ENOENT for that case.
+	 */
 	if (!slash)
-		return vns_dfd_is_procfs(dfd);
+		return false;
 
 	*slash = '\0';
 	dir_last = strrchr(buf, '/');
 	dir_last = dir_last ? dir_last + 1 : buf;
-	return vns_component_is_pid_dir(dir_last);
+	if (!vns_component_is_pid_dir(dir_last))
+		return false;
+
+	*out_pid = vns_resolve_ns_pid(dir_last);
+	return *out_pid > 0;
 }
 
 static long (*real_sys_openat2)(const struct pt_regs *regs);
@@ -455,16 +508,19 @@ static long (*real_sys_open)(const struct pt_regs *regs);
 /*
  * vns_open_fallback() - shared -ENOENT fallback for openat2/openat/open:
  * only reached once the real syscall has already failed to open the path.
- * Fabricates the "setgroups" leaf when the path matches; returns @ret
- * unchanged otherwise.
+ * Fabricates the uid_map/gid_map/projid_map/setgroups leaves when the path
+ * matches; returns @ret unchanged otherwise.
  */
 static long vns_open_fallback(int dfd, const char __user *upath, long ret)
 {
+	enum vns_idmap_kind kind;
+	pid_t pid;
+
 	if (ret != -ENOENT)
 		return ret;
 
-	if (vns_path_wants_setgroups(dfd, upath))
-		return vns_setgroups_create_fd();
+	if (vns_path_wants_idmap(dfd, upath, &kind, &pid))
+		return vns_idmap_create_fd(pid, kind);
 
 	return ret;
 }

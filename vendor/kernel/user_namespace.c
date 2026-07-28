@@ -90,7 +90,7 @@ static unsigned long enforced_nproc_rlimit(void)
 
 	/* Is RLIMIT_NPROC currently enforced? */
 	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID) ||
-	    (current_user_ns() != &init_user_ns))
+	    (vns_current_user_ns() != &init_user_ns)) /* [BUILD-COMPAT] */
 		limit = rlimit(RLIMIT_NPROC);
 
 	return limit;
@@ -1380,7 +1380,7 @@ const struct user_namespace *ancestor,
 bool vns_current_in_userns( /* [RENAME] */
 const struct user_namespace *target_ns)
 {
-	return vns_in_userns(target_ns, current_user_ns());
+	return vns_in_userns(target_ns, vns_current_user_ns()); /* [BUILD-COMPAT] */
 }
 
 static inline struct user_namespace *to_user_ns(struct ns_common *ns)
@@ -1412,7 +1412,7 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	/* Don't allow gaining capabilities by reentering
 	 * the same user namespace.
 	 */
-	if (user_ns == current_user_ns())
+	if (user_ns == vns_current_user_ns()) /* [BUILD-COMPAT] */
 		return -EINVAL;
 
 	/* Tasks that share a thread group must share a user namespace */
@@ -1441,7 +1441,7 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 struct ns_common *vns_ns_get_owner( /* [RENAME] */
 struct ns_common *ns)
 {
-	struct user_namespace *my_user_ns = current_user_ns();
+	struct user_namespace *my_user_ns = vns_current_user_ns(); /* [BUILD-COMPAT] */
 	struct user_namespace *owner, *p;
 
 	/* See if the owner is in the current user namespace */

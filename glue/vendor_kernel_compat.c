@@ -176,12 +176,28 @@ struct ipc_namespace *vns_init_ipc_ns_ptr;
 /* [BUILD-COMPAT] The real kernel's init_user_ns, captured (never resolved
  * via kallsyms/kprobe -- it is a data symbol, see
  * glue/vendor_kernel_data_syms.h's init_user_ns macro comment) from
- * current_user_ns() at the very start of vendor_kernel_init(). NULL until
- * then. overflowgid/overflowuid have no real-kernel dependency at all: they
- * are just the standard kernel.overflow{u,g}id defaults. */
+ * vns_current_user_ns() (vendor_kernel.h) at the very start of
+ * vendor_kernel_init(). NULL until then. overflowgid/overflowuid have no
+ * real-kernel dependency at all: they are just the standard kernel.overflow{u,g}id defaults. */
 struct user_namespace *vns_real_init_user_ns;
 int vns_local_overflowgid = 65534;
 int vns_local_overflowuid = 65534;
+
+/*
+ * [BUILD-COMPAT] vns_current_user_ns() -- see vendor_kernel_data_syms.h's
+ * and vendor_kernel.h's own comments for the full rationale. Deliberately a
+ * plain function (not a static inline in a header), defined in this one
+ * translation unit only, which does NOT include vendor_kernel_data_syms.h
+ * as its first header (see this file's own #include block above): that
+ * keeps the real current_user_ns()/current_cred() macros/inlines from
+ * <linux/cred.h> exactly as the running kernel defines them here, so this
+ * always reads the calling task's genuine current_cred()->user_ns rather
+ * than folding down to a fixed, task-independent value.
+ */
+struct user_namespace *vns_current_user_ns(void)
+{
+	return current_cred()->user_ns;
+}
 
 /*
  * [BUILD-COMPAT] Module-owned kmem_cache pointers for the four namespace-

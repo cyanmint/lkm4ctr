@@ -237,15 +237,18 @@ int vendor_kernel_init(void)
 
 	/*
 	 * [BUILD-COMPAT] Capture the real init_user_ns before anything else
-	 * runs: current_user_ns() is a plain read of current_cred()->user_ns
-	 * (no unresolved symbol involved), and insmod always executes from a
-	 * real top-level process context, so this is the same object the
-	 * running kernel's own (data-symbol, kprobe-unresolvable, sometimes
-	 * trimmed) init_user_ns points at. See vendor_kernel.h's init_user_ns
-	 * macro for why every other reference to init_user_ns in this module
-	 * is redirected to dereference this pointer instead of the real symbol.
+	 * runs: vns_current_user_ns() is a plain read of
+	 * current_cred()->user_ns (no unresolved symbol involved -- unlike
+	 * the real kernel's own current_user_ns(), see vendor_kernel.h's
+	 * vns_current_user_ns() comment for why that one must never be
+	 * called directly), and insmod always executes from a real
+	 * top-level process context, so this is the same object the running
+	 * kernel's own (data-symbol, kprobe-unresolvable, sometimes trimmed)
+	 * init_user_ns points at. See vendor_kernel.h's init_user_ns macro
+	 * for why every other reference to init_user_ns in this module is
+	 * redirected to dereference this pointer instead of the real symbol.
 	 */
-	vns_real_init_user_ns = current_user_ns();
+	vns_real_init_user_ns = vns_current_user_ns();
 	if (!vns_real_init_user_ns) {
 		LKM4CTR_ERR("vendor_kernel", "failed to capture init_user_ns from current task");
 		return -ENOENT;
@@ -364,8 +367,28 @@ int vendor_kernel_init(void)
 	else
 		total_hooked += hooked;
 
+	/*
+	 * Best-effort only: without these, getuid()/setuid()/etc. simply
+	 * observe/mutate the raw global id unchanged on a kernel genuinely
+	 * missing CONFIG_USER_NS (same as before these hooks existed)
+	 * instead of being remapped through the real per-task
+	 * user_namespace vendor_kernel_hook_unshare()/vns_unshare_userns()
+	 * already installs -- a missing observability/self-containment
+	 * nicety, not a functional regression to unshare(CLONE_NEWUSER)
+	 * itself, so a failure to resolve these syscalls by name must not
+	 * abort the whole submodule's load.
+	 */
+	hooked = shadow_hook_install_all(vendor_kernel_userns_hooks, "vendor_kernel_userns");
+	if (hooked < 0)
+		LKM4CTR_WARN("vendor_kernel",
+			     "failed to install uid/gid getter/setter syscall hooks (%d); unshare(CLONE_NEWUSER) + uid_map/gid_map still install a real user_namespace, only getuid()/setuid()/etc. observability is affected",
+			     hooked);
+	else
+		total_hooked += hooked;
+
 	hooked = vns_overlay_init();
 	if (hooked) {
+		shadow_hook_remove_all(vendor_kernel_userns_hooks);
 		shadow_hook_remove_all(vendor_kernel_procfs_hooks);
 		shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 		shadow_hook_remove_all(vendor_kernel_core_hooks);
@@ -419,6 +442,7 @@ void vendor_kernel_exit(void)
 		return;
 	vendor_kernel_enabled = false;
 	vns_overlay_exit();
+	shadow_hook_remove_all(vendor_kernel_userns_hooks);
 	shadow_hook_remove_all(vendor_kernel_procfs_hooks);
 	shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
