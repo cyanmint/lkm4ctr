@@ -20,6 +20,20 @@
  * -- see ../../glue/vendor_kernel_data_syms.h for the full rationale.
  */
 #include "../../glue/vendor_kernel_data_syms.h"
+
+/*
+ * [BUILD-COMPAT] get_user_ns()/put_user_ns() call sites below are replaced
+ * with vns_get_user_ns()/vns_put_user_ns() (see kernel/user_namespace.c),
+ * same as every other vendored get_user_ns()/put_user_ns() call site (see
+ * vendor/README.md, "Namespace refcounting is fully self-contained"): the
+ * real get_user_ns()/put_user_ns() are always static inline
+ * (<linux/user_namespace.h>), and on a CONFIG_USER_NS=n target (this
+ * module's primary use case) get_user_ns() unconditionally returns
+ * "&init_user_ns" by name, requiring the real (often CONFIG_TRIM_UNUSED_KSYMS
+ * -trimmed) init_user_ns data symbol at insmod time regardless of the
+ * vendor_kernel_data_syms.h redirect above ("Unknown symbol init_user_ns"
+ * observed at insmod on android12-5.10).
+ */
 #include <linux/capability.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
@@ -536,8 +550,8 @@ static int mqueue_init_fs_context(struct fs_context *fc)
 		return -ENOMEM;
 
 	ctx->ipc_ns = get_ipc_ns(vns_current_ipc_ns());
-	put_user_ns(fc->user_ns);
-	fc->user_ns = get_user_ns(ctx->ipc_ns->user_ns);
+	vns_put_user_ns(fc->user_ns); /* [BUILD-COMPAT] */
+	fc->user_ns = vns_get_user_ns(ctx->ipc_ns->user_ns); /* [BUILD-COMPAT] */
 	fc->fs_private = ctx;
 	fc->ops = &mqueue_fs_context_ops;
 	return 0;
@@ -561,8 +575,8 @@ static struct vfsmount *mq_create_mount(struct ipc_namespace *ns)
 	ctx->newns = true;
 	put_ipc_ns(ctx->ipc_ns);
 	ctx->ipc_ns = get_ipc_ns(ns);
-	put_user_ns(fc->user_ns);
-	fc->user_ns = get_user_ns(ctx->ipc_ns->user_ns);
+	vns_put_user_ns(fc->user_ns); /* [BUILD-COMPAT] */
+	fc->user_ns = vns_get_user_ns(ctx->ipc_ns->user_ns); /* [BUILD-COMPAT] */
 
 	mnt = fc_mount(fc);
 	put_fs_context(fc);
@@ -946,7 +960,7 @@ static void __do_notify(struct mqueue_inode_info *info)
 		}
 		/* after notification unregisters process */
 		put_pid(info->notify_owner);
-		put_user_ns(info->notify_user_ns);
+		vns_put_user_ns(info->notify_user_ns); /* [BUILD-COMPAT] */
 		info->notify_owner = NULL;
 		info->notify_user_ns = NULL;
 	}
@@ -971,7 +985,7 @@ static void remove_notification(struct mqueue_inode_info *info)
 		netlink_sendskb(info->notify_sock, info->notify_cookie);
 	}
 	put_pid(info->notify_owner);
-	put_user_ns(info->notify_user_ns);
+	vns_put_user_ns(info->notify_user_ns); /* [BUILD-COMPAT] */
 	info->notify_owner = NULL;
 	info->notify_user_ns = NULL;
 }
@@ -1534,7 +1548,7 @@ retry:
 		}
 
 		info->notify_owner = get_pid(task_tgid(current));
-		info->notify_user_ns = get_user_ns(current_user_ns());
+		info->notify_user_ns = vns_get_user_ns(current_user_ns()); /* [BUILD-COMPAT] */
 		lkm4ctr_inode_update_ts(inode);
 	}
 	spin_unlock(&info->lock);

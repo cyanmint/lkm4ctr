@@ -82,6 +82,23 @@ int vns_ipc_default_init(void)
 	 * (see vendor_kernel.h); can't be a static initializer, so set here. */
 	vns_default_ipc_ns.user_ns = vns_real_init_user_ns;
 
+	/*
+	 * Pin vns_default_ipc_ns's refcount to a large sentinel value so it
+	 * can never legitimately reach zero and be mistaken for a freeable
+	 * object -- it is a static singleton, never slab-allocated, and is
+	 * installed unconditionally as vns_init_nsproxy.ipc_ns (shared by
+	 * every task that never unshare(CLONE_NEWIPC)'d), same pattern as
+	 * vns_init_nsproxy.count (kernel/nsproxy.c) and
+	 * vns_default_cgroup_ns's refcount (kernel/cgroup/namespace.c).
+	 * Without this, vns_free_nsproxy()'s vns_put_ipc_ns(ns->ipc_ns) call
+	 * on task exit decrements this namespace's never-initialised
+	 * refcount, eventually underflowing it ("refcount_t: underflow;
+	 * use-after-free") and, once mistaken for a last-reference drop,
+	 * schedule_work()'ing free_ipc() to kfree() this static object --
+	 * observed as a kfree() page fault on android15-6.6.
+	 */
+	vns_ipc_pin_ref(&vns_default_ipc_ns, 0x40000000);
+
 	err = vns_mqueue_fs_init();
 	if (err)
 		return err;

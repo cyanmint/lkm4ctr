@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Must be included before any other header: <linux/cred.h>'s
+ * current_user_ns() (reached transitively via <linux/fs.h> et al, pulled
+ * in below) has a static inline body that references the bare init_user_ns
+ * name directly on a CONFIG_USER_NS=n target -- see
+ * ../../../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../../glue/vendor_kernel_data_syms.h"
 #include <linux/version.h>
 
 /*

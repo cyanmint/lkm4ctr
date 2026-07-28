@@ -6,6 +6,14 @@
  *
  * Copyright (C) 2017-2018 CTERA Networks. All Rights Reserved.
  */
+/*
+ * Must be included before any other header: <linux/cred.h>'s
+ * current_user_ns() (reached transitively via <linux/fs.h> et al, pulled
+ * in below) has a static inline body that references the bare init_user_ns
+ * name directly on a CONFIG_USER_NS=n target -- see
+ * ../../../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../../glue/vendor_kernel_data_syms.h"
 #include <linux/version.h>
 #include <linux/compiler_types.h>
 

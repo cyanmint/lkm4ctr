@@ -24,6 +24,17 @@
  *             Pavel Emelianov <xemul@openvz.org>
  */
 
+/*
+ * [BUILD-COMPAT] Must be included before any other header: several headers
+ * pulled in below (<linux/nsproxy.h>, <linux/cred.h> et al) have static
+ * inline helpers (e.g. current_user_ns() on a CONFIG_USER_NS=n target) that
+ * reference the bare init_user_ns name directly -- see
+ * ../../glue/vendor_kernel_data_syms.h for the full rationale. Missing this
+ * left vns_unshare_nsproxy_namespaces()/vns_sys_setns()'s current_user_ns()
+ * calls referencing the real, unexported init_user_ns symbol ("Unknown
+ * symbol init_user_ns" observed at insmod on android12-5.10).
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
