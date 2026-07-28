@@ -512,6 +512,38 @@ kernels outside `[5.10, 6.19)`, `vns_overlay_init()` simply skips the
 override and `mount -t overlay ...` falls back to the running kernel's own
 overlay implementation.
 
+**Known limitation: case-insensitive-capable (casefold) backing filesystems.**
+`fs/overlayfs/params.c`'s unmodified `ovl_mount_dir_check()` rejects any
+layer path (`upperdir=`/`workdir=`/`lowerdir=`) whose backing superblock has
+`sb_has_encoding()` set, i.e. any filesystem mounted with `CONFIG_UNICODE`
+case-insensitive/casefold support enabled at mkfs time -- returning
+`-EINVAL` with `"case-insensitive capable filesystem on %s not supported"`,
+logged via this module's `pr_warn`/diagfs log wiring. This is unmodified,
+faithfully-vendored upstream behavior (a deliberate safety check, not a
+vendoring bug): a casefold-enabled superblock can hand back dentries
+without the expected `d_op`, which overlayfs cannot safely reconcile, so
+this check must not be weakened or bypassed here.
+
+On real Android devices this bites when a container runtime's data root
+(e.g. Docker/containerd's `graphroot`, or Termux's
+`$PREFIX/var/lib/docker`) lives directly on `/data`, since many Android
+`userdata` partitions (notably F2FS) have casefold support enabled at the
+whole-partition level even when no individual directory actually opts into
+case-insensitive lookups -- `sb_has_encoding()` only sees the superblock
+flag, not per-directory usage. `mount -t overlay` (and therefore
+`dockerd --storage-driver=overlay2`) then fails outright for every layer
+path under `/data`, regardless of this module being loaded and otherwise
+fully able to service `overlay` mounts.
+
+**Workaround**: point the container runtime's data root at a filesystem
+without casefold support instead of directly at `/data` -- e.g. a
+loopback-mounted ext4 (or non-casefold F2FS) image file, exactly as this
+repository's own `qemu_test.sh`/`testsuite.zip` test harness already does
+via `image1.ext4`. There is no in-kernel fix available for a data root that
+must remain directly on a casefold-enabled superblock; the
+`overlay2`/`vfs` storage-driver auto-probe in `dockerd` already falls back
+to `vfs` silently in that case if `overlay2` isn't explicitly forced.
+
 ## Helper files
 
 - `vendor_kernel.h` - shared internal declarations

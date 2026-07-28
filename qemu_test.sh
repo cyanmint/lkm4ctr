@@ -150,8 +150,18 @@ lkm4ctr_init_2() {
 	# file" error, so an unsupported/broken overlay2 becomes a hard
 	# dockerd startup failure instead, and this test actually exercises
 	# (and can catch breakage in) vendor_kernel's vendored overlayfs.
+	# Also pin iptables=false/bridge=none: QEMU's guest networking setup
+	# here (ifconfig lo up only, no real bridge/iptables rule management)
+	# would otherwise make dockerd's own network initialization fail or
+	# hang before the storage driver is even exercised.
 	mkdir -p /etc/docker
-	echo '{"storage-driver": "overlay2"}' > /etc/docker/daemon.json
+	cat > /etc/docker/daemon.json <<-'EOF'
+	{
+	  "storage-driver": "overlay2",
+	  "iptables": false,
+	  "bridge": "none"
+	}
+	EOF
 
 	echo "=== LKM4CTR_QEMU_TEST: starting dockerd (daemon, storage-driver=overlay2) ==="
 	dockerd &
