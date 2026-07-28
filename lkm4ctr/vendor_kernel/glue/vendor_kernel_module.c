@@ -247,6 +247,7 @@ int vendor_kernel_init(void)
 	vns_resolve_symbols();
 	vns_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported kernel symbols */
 	vns_ipc_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported ipc/mm/security/audit symbols */
+	vns_ipc_lookup_resolve(); /* [BUILD-COMPAT] resolve simple_lookup()/security_*_associate() (own CFI-safe translation unit) */
 	if (!vns_compat_ready())
 		return -ENOENT;
 	/*

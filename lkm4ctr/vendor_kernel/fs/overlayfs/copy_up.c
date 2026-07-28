@@ -4,6 +4,24 @@
  * Copyright (C) 2011 Novell Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_copy_acl, ovl_copy_xattr, ovl_copy_up_file, ovl_encode_real_fh,
+ * ovl_prep_cu_creds, ovl_revert_cu_creds, ovl_copy_up_workdir,
+ * ovl_copy_up_one, ovl_copy_up_flags.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -65,7 +83,7 @@ static bool ovl_must_copy_xattr(const char *name)
 	       !strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN);
 }
 
-static int ovl_copy_acl(struct ovl_fs *ofs, const struct path *path,
+__nocfi static int ovl_copy_acl(struct ovl_fs *ofs, const struct path *path,
 			struct dentry *dentry, const char *acl_name)
 {
 	int err;
@@ -94,7 +112,7 @@ static int ovl_copy_acl(struct ovl_fs *ofs, const struct path *path,
 	return err;
 }
 
-int ovl_copy_xattr(struct super_block *sb, const struct path *oldpath, struct dentry *new)
+__nocfi int ovl_copy_xattr(struct super_block *sb, const struct path *oldpath, struct dentry *new)
 {
 	struct dentry *old = oldpath->dentry;
 	ssize_t list_size, size, value_size = 0;
@@ -279,7 +297,7 @@ static int ovl_sync_file(struct path *path)
 	return err;
 }
 
-static int ovl_copy_up_file(struct ovl_fs *ofs, struct dentry *dentry,
+__nocfi static int ovl_copy_up_file(struct ovl_fs *ofs, struct dentry *dentry,
 			    struct file *new_file, loff_t len,
 			    bool datasync)
 {
@@ -437,7 +455,7 @@ int ovl_set_attr(struct ovl_fs *ofs, struct dentry *upperdentry,
 	return err;
 }
 
-struct ovl_fh *ovl_encode_real_fh(struct ovl_fs *ofs, struct inode *realinode,
+__nocfi struct ovl_fh *ovl_encode_real_fh(struct ovl_fs *ofs, struct inode *realinode,
 				  bool is_upper)
 {
 	struct ovl_fh *fh;
@@ -753,7 +771,7 @@ struct ovl_cu_creds {
 	struct cred *new;
 };
 
-static int ovl_prep_cu_creds(struct dentry *dentry, struct ovl_cu_creds *cc)
+__nocfi static int ovl_prep_cu_creds(struct dentry *dentry, struct ovl_cu_creds *cc)
 {
 	int err;
 
@@ -768,7 +786,7 @@ static int ovl_prep_cu_creds(struct dentry *dentry, struct ovl_cu_creds *cc)
 	return 0;
 }
 
-static void ovl_revert_cu_creds(struct ovl_cu_creds *cc)
+__nocfi static void ovl_revert_cu_creds(struct ovl_cu_creds *cc)
 {
 	if (cc->new) {
 		revert_creds(cc->old);
@@ -780,7 +798,7 @@ static void ovl_revert_cu_creds(struct ovl_cu_creds *cc)
  * Copyup using workdir to prepare temp file.  Used when copying up directories,
  * special files or when upper fs doesn't support O_TMPFILE.
  */
-static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
+__nocfi static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 {
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct inode *inode;
@@ -1155,7 +1173,7 @@ out:
 	return err;
 }
 
-static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
+__nocfi static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 			   int flags)
 {
 	int err;
@@ -1233,7 +1251,7 @@ static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 	return err;
 }
 
-static int ovl_copy_up_flags(struct dentry *dentry, int flags)
+__nocfi static int ovl_copy_up_flags(struct dentry *dentry, int flags)
 {
 	int err = 0;
 	const struct cred *old_cred;

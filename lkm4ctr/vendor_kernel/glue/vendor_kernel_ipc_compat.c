@@ -30,8 +30,18 @@
  *     putname, mnt_want_write, lookup_one_len, lookup_one, mntget, vfs_mkobj,
  *     inode_permission, dentry_open, path_put, mnt_drop_write, vfs_unlink,
  *     fs_context_for_mount, fc_mount, put_fs_context, get_tree_nodev,
- *     get_tree_keyed, simple_lookup
+ *     get_tree_keyed
  *   - maple-tree / netlink helpers: mas_pause, netlink_getsockbyfilp
+ *
+ * simple_lookup and security_msg_queue_associate/security_sem_associate/
+ * security_shm_associate are intentionally NOT wrapped here: they are
+ * defined in the sibling glue/vendor_kernel_ipc_callbacks.c translation unit
+ * instead, because (unlike every wrapper in this file) each of them is
+ * installed as a callback that this module's own CFI-instrumented ipc code
+ * (or, for simple_lookup, the real kernel) calls back into indirectly, and
+ * must keep that instrumentation intact rather than being stripped by this
+ * object's own CFI-disabling -- see that file's header comment for the full
+ * rationale.
  *
  * Resolution of every function symbol below is reliable on real targets:
  * these are all ordinary kallsyms *function* symbols (not the private
@@ -198,8 +208,13 @@ typedef int (*get_tree_nodev_fn_t)(struct fs_context *,
 	int (*)(struct super_block *, struct fs_context *));
 typedef int (*get_tree_keyed_fn_t)(struct fs_context *,
 	int (*)(struct super_block *, struct fs_context *), void *);
-typedef struct dentry *(*simple_lookup_fn_t)(struct inode *, struct dentry *,
-	unsigned int);
+/*
+ * simple_lookup and the security_{msg_queue,sem,shm}_associate wrappers are
+ * resolved/defined in glue/vendor_kernel_ipc_callbacks.c, their own
+ * translation unit -- see that file's header comment for why (each is a
+ * callback indirectly called back into and must keep CFI instrumentation,
+ * unlike every other wrapper here).
+ */
 
 /* signal / wake_q */
 typedef int (*do_send_sig_info_fn_t)(int, struct kernel_siginfo *,
@@ -265,20 +280,17 @@ typedef int (*sec_msg_msg_alloc_fn_t)(struct msg_msg *);
 typedef void (*sec_msg_msg_free_fn_t)(struct msg_msg *);
 typedef int (*sec_msg_queue_alloc_fn_t)(struct kern_ipc_perm *);
 typedef void (*sec_msg_queue_free_fn_t)(struct kern_ipc_perm *);
-typedef int (*sec_msg_queue_associate_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_msg_queue_msgctl_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_msg_queue_msgsnd_fn_t)(struct kern_ipc_perm *, struct msg_msg *, int);
 typedef int (*sec_msg_queue_msgrcv_fn_t)(struct kern_ipc_perm *, struct msg_msg *,
 	struct task_struct *, long, int);
 typedef int (*sec_sem_alloc_fn_t)(struct kern_ipc_perm *);
 typedef void (*sec_sem_free_fn_t)(struct kern_ipc_perm *);
-typedef int (*sec_sem_associate_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_sem_semctl_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_sem_semop_fn_t)(struct kern_ipc_perm *, struct sembuf *,
 	unsigned, int);
 typedef int (*sec_shm_alloc_fn_t)(struct kern_ipc_perm *);
 typedef void (*sec_shm_free_fn_t)(struct kern_ipc_perm *);
-typedef int (*sec_shm_associate_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_shm_shmctl_fn_t)(struct kern_ipc_perm *, int);
 typedef int (*sec_shm_shmat_fn_t)(struct kern_ipc_perm *, char __user *, int);
 
@@ -318,7 +330,6 @@ static fc_mount_fn_t            r_fc_mount;
 static put_fs_context_fn_t      r_put_fs_context;
 static get_tree_nodev_fn_t      r_get_tree_nodev;
 static get_tree_keyed_fn_t      r_get_tree_keyed;
-static simple_lookup_fn_t       r_simple_lookup;
 static do_send_sig_info_fn_t    r_do_send_sig_info;
 static wake_q_add_fn_t          r_wake_q_add;
 static wake_q_add_safe_fn_t     r_wake_q_add_safe;
@@ -358,18 +369,15 @@ static sec_msg_msg_alloc_fn_t    r_sec_msg_msg_alloc;
 static sec_msg_msg_free_fn_t     r_sec_msg_msg_free;
 static sec_msg_queue_alloc_fn_t  r_sec_msg_queue_alloc;
 static sec_msg_queue_free_fn_t   r_sec_msg_queue_free;
-static sec_msg_queue_associate_fn_t r_sec_msg_queue_associate;
 static sec_msg_queue_msgctl_fn_t r_sec_msg_queue_msgctl;
 static sec_msg_queue_msgsnd_fn_t r_sec_msg_queue_msgsnd;
 static sec_msg_queue_msgrcv_fn_t r_sec_msg_queue_msgrcv;
 static sec_sem_alloc_fn_t        r_sec_sem_alloc;
 static sec_sem_free_fn_t         r_sec_sem_free;
-static sec_sem_associate_fn_t    r_sec_sem_associate;
 static sec_sem_semctl_fn_t       r_sec_sem_semctl;
 static sec_sem_semop_fn_t        r_sec_sem_semop;
 static sec_shm_alloc_fn_t        r_sec_shm_alloc;
 static sec_shm_free_fn_t         r_sec_shm_free;
-static sec_shm_associate_fn_t    r_sec_shm_associate;
 static sec_shm_shmctl_fn_t       r_sec_shm_shmctl;
 static sec_shm_shmat_fn_t        r_sec_shm_shmat;
 
@@ -419,7 +427,6 @@ void vns_ipc_compat_resolve(void)
 	R(r_put_fs_context, put_fs_context);
 	R(r_get_tree_nodev, get_tree_nodev);
 	R(r_get_tree_keyed, get_tree_keyed);
-	R(r_simple_lookup, simple_lookup);
 	R(r_do_send_sig_info, do_send_sig_info);
 	R(r_wake_q_add, wake_q_add);
 	R(r_wake_q_add_safe, wake_q_add_safe);
@@ -459,18 +466,15 @@ void vns_ipc_compat_resolve(void)
 	R(r_sec_msg_msg_free, security_msg_msg_free);
 	R(r_sec_msg_queue_alloc, security_msg_queue_alloc);
 	R(r_sec_msg_queue_free, security_msg_queue_free);
-	R(r_sec_msg_queue_associate, security_msg_queue_associate);
 	R(r_sec_msg_queue_msgctl, security_msg_queue_msgctl);
 	R(r_sec_msg_queue_msgsnd, security_msg_queue_msgsnd);
 	R(r_sec_msg_queue_msgrcv, security_msg_queue_msgrcv);
 	R(r_sec_sem_alloc, security_sem_alloc);
 	R(r_sec_sem_free, security_sem_free);
-	R(r_sec_sem_associate, security_sem_associate);
 	R(r_sec_sem_semctl, security_sem_semctl);
 	R(r_sec_sem_semop, security_sem_semop);
 	R(r_sec_shm_alloc, security_shm_alloc);
 	R(r_sec_shm_free, security_shm_free);
-	R(r_sec_shm_associate, security_shm_associate);
 	R(r_sec_shm_shmctl, security_shm_shmctl);
 	R(r_sec_shm_shmat, security_shm_shmat);
 #undef R
@@ -775,15 +779,6 @@ int get_tree_keyed(struct fs_context *fc,
 	return -ENOSYS;
 }
 
-struct dentry *simple_lookup(struct inode *dir, struct dentry *dentry,
-			     unsigned int flags)
-{
-	if (r_simple_lookup)
-		return r_simple_lookup(dir, dentry, flags);
-	d_add(dentry, NULL);
-	return NULL;
-}
-
 /* ---- signal / wake_q --------------------------------------------------- */
 
 int do_send_sig_info(int sig, struct kernel_siginfo *info,
@@ -1072,13 +1067,6 @@ void security_msg_queue_free(struct kern_ipc_perm *msq)
 		r_sec_msg_queue_free(msq);
 }
 
-int security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
-{
-	if (r_sec_msg_queue_associate)
-		return r_sec_msg_queue_associate(msq, msqflg);
-	return 0;
-}
-
 int security_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
 {
 	if (r_sec_msg_queue_msgctl)
@@ -1115,13 +1103,6 @@ void security_sem_free(struct kern_ipc_perm *sma)
 		r_sec_sem_free(sma);
 }
 
-int security_sem_associate(struct kern_ipc_perm *sma, int semflg)
-{
-	if (r_sec_sem_associate)
-		return r_sec_sem_associate(sma, semflg);
-	return 0;
-}
-
 int security_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 {
 	if (r_sec_sem_semctl)
@@ -1148,13 +1129,6 @@ void security_shm_free(struct kern_ipc_perm *shp)
 {
 	if (r_sec_shm_free)
 		r_sec_shm_free(shp);
-}
-
-int security_shm_associate(struct kern_ipc_perm *shp, int shmflg)
-{
-	if (r_sec_shm_associate)
-		return r_sec_shm_associate(shp, shmflg);
-	return 0;
 }
 
 int security_shm_shmctl(struct kern_ipc_perm *shp, int cmd)

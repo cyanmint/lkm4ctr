@@ -19,6 +19,7 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 
+#include <linux/compiler_types.h>
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/namei.h>
@@ -29,6 +30,24 @@
 #include <linux/xattr.h>
 #include "overlayfs.h"
 #include "params.h"
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: ovl_parse_monolithic()/ovl_mount_dir_noesc()/
+ * ovl_mount_dir_check()/ovl_free_fs() are marked __nocfi below because each
+ * makes a genuine unsafe indirect call through a
+ * glue/vendor_kernel_ovl_vfs_compat.h vns_ovl_vfsc_<name>-redirected
+ * pointer (vfs_parse_monolithic_sep/kern_path/__mnt_is_readonly/
+ * kern_unmount_array+free_anon_bdev respectively), which can never satisfy
+ * kernel CFI's compile-time type-hash check (see lkm4ctr/Makefile's
+ * VNS_CFI_UNSAFE_OBJS comment for the general rationale). Unlike most other
+ * vendored overlayfs sources, this file is NOT in VNS_CFI_UNSAFE_OBJS: some
+ * of its functions (ovl_init_fs_context, and indirectly the
+ * ovl_context_ops fs_context_operations it installs) are real-kernel-
+ * invoked callbacks (via alloc_fs_context()/vfs_parse_fs_param()), so the
+ * whole object must keep its own CFI instrumentation -- only the four
+ * functions above, which make no such callback role of their own, are
+ * individually exempted from the outgoing-call check via __nocfi.
+ */
 
 /*
  * [BUILD-COMPAT] fs_param_is_string()/fs_param_is_enum() are real, normally
@@ -363,7 +382,7 @@ static char *ovl_next_opt(char **s)
 	return sbegin;
 }
 
-static int ovl_parse_monolithic(struct fs_context *fc, void *data)
+static int __nocfi ovl_parse_monolithic(struct fs_context *fc, void *data)
 {
 	return vfs_parse_monolithic_sep(fc, data, ovl_next_opt);
 }
@@ -408,7 +427,7 @@ static ssize_t ovl_parse_param_split_lowerdirs(char *str)
 	return nr_layers;
 }
 
-static int ovl_mount_dir_noesc(const char *name, struct path *path)
+static int __nocfi ovl_mount_dir_noesc(const char *name, struct path *path)
 {
 	int err = -EINVAL;
 
@@ -453,7 +472,7 @@ static int ovl_mount_dir(const char *name, struct path *path)
 	return err;
 }
 
-static int ovl_mount_dir_check(struct fs_context *fc, const struct path *path,
+static int __nocfi ovl_mount_dir_check(struct fs_context *fc, const struct path *path,
 			       enum ovl_opt layer, const char *name, bool upper)
 {
 	struct ovl_fs_context *ctx = fc->fs_private;
@@ -901,7 +920,7 @@ out_err:
 
 }
 
-void ovl_free_fs(struct ovl_fs *ofs)
+void __nocfi ovl_free_fs(struct ovl_fs *ofs)
 {
 	struct vfsmount **mounts;
 	unsigned i;

@@ -37,6 +37,7 @@ lkm4ctr-objs := \
 	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
 	vendor_kernel/glue/vendor_kernel_ipc_compat.o \
+	vendor_kernel/glue/vendor_kernel_ipc_callbacks.o \
 	vendor_kernel/fs/nsfs.o \
 	vendor_kernel/fs/overlayfs/super.o \
 	vendor_kernel/fs/overlayfs/namei.o \
@@ -119,7 +120,61 @@ ccflags-y += -I$(src)/../common
 #     proc_create_data(); makes no unsafe indirect calls of its own.
 #   - vendor_kernel/ipc/shm.o: defines shm_file_operations/
 #     shm_file_operations_huge/shm_vm_ops; makes no unsafe indirect calls of
-#     its own (unlike msg.c/sem.c/util.c/compat.c, which stay in this list).
+#     its own (unlike util.c/compat.c, which stay in this list).
+#   - vendor_kernel/ipc/msg.o, vendor_kernel/ipc/sem.o: define newque()/
+#     newary() (installed as msg_ops.getnew/sem_ops.getnew, ipc/msg.c,
+#     ipc/sem.c) and sem.o's sem_more_checks() (sem_ops.more_checks), all
+#     called back indirectly from ipc/util.c's ipcget()/ipcget_new(), which
+#     is NOT in this list (see the util.o bullet above) and therefore stays
+#     CFI-instrumented. CI observed a live "CFI failure at ipcget+...
+#     (target: newque+...)" panic here when these objects were still in this
+#     list. Neither file makes any unsafe resolved-pointer indirect call of
+#     its own (their calls into vendor_kernel_ipc_compat.o's by-name compat
+#     wrappers, e.g. security_msg_queue_free()/wake_q_add(), are ordinary
+#     direct calls, not indirect ones -- no CFI check applies to those at
+#     all), so removing them from this list is safe, mirroring shm.o above.
+#   - vendor_kernel/fs/overlayfs/params.o: defines ovl_init_fs_context()
+#     (installed as vns_ovl_fs_type.init_fs_context, fs/overlayfs/super.c),
+#     called back via the real kernel's alloc_fs_context()
+#     (fs/fs_context.c), and (indirectly, via the ovl_context_ops it
+#     installs into fc->ops) ovl_parse_monolithic/ovl_parse_param/
+#     ovl_get_tree/ovl_reconfigure/ovl_free, called back via
+#     vfs_parse_fs_param()/vfs_get_tree()/reconfigure_super()/put_fs_context().
+#     CI observed a live "CFI failure at alloc_fs_context+... (target:
+#     ovl_init_fs_context+...)" panic here when this object was still in
+#     this list. Unlike most other vendored overlayfs sources, only four of
+#     this file's functions make a genuine unsafe resolved-pointer indirect
+#     call of their own (ovl_parse_monolithic, ovl_mount_dir_noesc,
+#     ovl_mount_dir_check, ovl_free_fs); each is marked __nocfi individually
+#     (see the file's own header comment) so the object as a whole can keep
+#     normal CFI instrumentation and be removed from this list.
+#   - vendor_kernel/fs/overlayfs/super.o: defines ovl_fill_super() (installed
+#     as fc->ops->get_tree, called back via the real kernel's
+#     get_tree_nodev(), fs/super.c) plus ovl_dentry_operations/other
+#     struct-installed callbacks. CI observed a live "CFI failure at
+#     get_tree_nodev+... (target: ovl_fill_super+...)" panic here when this
+#     object was still in this list. As with params.o above, only a small
+#     subset of this file's functions make a genuine unsafe resolved-pointer
+#     indirect call of their own (ovl_revalidate_real, ovl_statfs,
+#     ovl_check_namelen, ovl_workdir_ok, ovl_get_upper,
+#     ovl_check_rename_whiteout, ovl_make_workdir, ovl_get_fsid,
+#     ovl_get_layers, ovl_check_layer, ovl_fill_super itself); each is
+#     marked __nocfi individually (see the file's own header comment) so
+#     the object as a whole can keep normal CFI instrumentation and be
+#     removed from this list.
+#   - vendor_kernel/fs/overlayfs/{namei,util,inode,dir,readdir,copy_up,
+#     export,file,xattrs}.o: like super.o above, each of these defines
+#     functions installed into real-kernel-invoked struct-of-function-
+#     pointers callback tables (ovl_dir_inode_operations,
+#     ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+#     ovl_export_operations, xattr_handler.get/set, ovl_inode_operations,
+#     etc., all set up in super.c/inode.c). CI observed a live "CFI failure
+#     at inode_insert5+... (target: ovl_inode_set+...)" panic here (inode.o
+#     was still in this list at the time). Every function across these nine
+#     files that makes a genuine unsafe resolved-pointer indirect call of
+#     its own is marked __nocfi individually (see each file's own header
+#     comment for the specific list) so all nine objects can keep normal
+#     CFI instrumentation and be removed from this list.
 #   - vendor_kernel/glue/vendor_kernel_procfs.o: defines vns_setgroups_fops
 #     (the /proc/*/setgroups file_operations). The one genuine unsafe
 #     indirect call in this file (vns_setgroups_create_fd(), through the
@@ -166,27 +221,32 @@ ccflags-y += -I$(src)/../common
 #     its own; each of those (and vns_kill_litter_super itself, for its own
 #     vns_kill_litter_super_real() call) is marked __nocfi individually so
 #     the object as a whole can be removed from this list.
+#   - vendor_kernel/glue/vendor_kernel_ipc_callbacks.o: defines simple_lookup()
+#     (installed as mq_dir_inode_operations.lookup, ipc/mqueue.c), called
+#     back via the real kernel's __lookup_slow() (fs/namei.c) on every mqueue
+#     directory lookup, plus security_msg_queue_associate()/
+#     security_sem_associate()/security_shm_associate() (installed as
+#     msg_ops.associate/sem_ops.associate/shm_ops.associate, ipc/msg.c,
+#     ipc/sem.c, ipc/shm.c), called back indirectly from this module's own
+#     CFI-instrumented ipc/util.o ipcget()/ipcget_public(). CI observed live
+#     "CFI failure at __lookup_slow+... (target: simple_lookup+...)" and
+#     "CFI failure at ipcget+... (target: security_msg_queue_associate+...)"
+#     panics here when these functions were still defined in
+#     vendor_kernel_ipc_compat.o (which stays in this list): the whole-object
+#     CFI removal that is safe for that file's other ~50 resolved-pointer
+#     wrappers also strips these functions' own KCFI type-hash prefix,
+#     breaking the indirect call into each of them. Split into their own
+#     translation unit so they can keep normal CFI instrumentation; only
+#     each function's own outgoing resolved-pointer call is marked __nocfi
+#     individually, mirroring vns_kill_litter_super() above.
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_cgdevices/shadow_cgdevices.o \
 	vendor_kernel/ipc/msgutil.o \
-	vendor_kernel/ipc/msg.o \
-	vendor_kernel/ipc/sem.o \
 	vendor_kernel/ipc/compat.o \
 	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
 	vendor_kernel/glue/vendor_kernel_ipc_compat.o \
-	vendor_kernel/fs/overlayfs/super.o \
-	vendor_kernel/fs/overlayfs/namei.o \
-	vendor_kernel/fs/overlayfs/util.o \
-	vendor_kernel/fs/overlayfs/inode.o \
-	vendor_kernel/fs/overlayfs/dir.o \
-	vendor_kernel/fs/overlayfs/readdir.o \
-	vendor_kernel/fs/overlayfs/copy_up.o \
-	vendor_kernel/fs/overlayfs/export.o \
-	vendor_kernel/fs/overlayfs/file.o \
-	vendor_kernel/fs/overlayfs/params.o \
-	vendor_kernel/fs/overlayfs/xattrs.o \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \

@@ -4,8 +4,24 @@
  * Copyright (C) 2011 Novell Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
 
 /*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in lkm4ctr/Makefile):
+ * ovl_fill_super() is installed as file_system_type.init_fs_context's
+ * fc->ops->get_tree() target and is invoked indirectly by the real
+ * kernel's get_tree_nodev(), so it (and the dentry_operations/other
+ * struct-installed callbacks defined here) must keep a valid Clang KCFI
+ * type hash. Only the handful of functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_revalidate_real, ovl_statfs,
+ * ovl_check_namelen, ovl_workdir_ok, ovl_get_upper,
+ * ovl_check_rename_whiteout, ovl_make_workdir, ovl_get_fsid,
+ * ovl_get_layers, ovl_check_layer, ovl_fill_super.
+ *
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
  * (kernel 6.12.x): same fs_context-based file_system_type and
  * struct mnt_idmap * idmap arguments as the 6.6 era, plus
@@ -170,7 +186,7 @@ bug:
 }
 #endif /* d_real signature */
 
-static int ovl_revalidate_real(struct dentry *d, unsigned int flags, bool weak)
+__nocfi static int ovl_revalidate_real(struct dentry *d, unsigned int flags, bool weak)
 {
 	int ret = 1;
 
@@ -327,7 +343,7 @@ static int ovl_sync_fs(struct super_block *sb, int wait)
  * Get the filesystem statistics.  As writes always target the upper layer
  * filesystem pass the statfs to the upper filesystem (if it exists)
  */
-static int ovl_statfs(struct dentry *dentry, struct kstatfs *buf)
+__nocfi static int ovl_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct ovl_fs *ofs = OVL_FS(sb);
@@ -464,7 +480,7 @@ out_err:
 	goto out_unlock;
 }
 
-static int ovl_check_namelen(const struct path *path, struct ovl_fs *ofs,
+__nocfi static int ovl_check_namelen(const struct path *path, struct ovl_fs *ofs,
 			     const char *name)
 {
 	struct kstatfs statfs;
@@ -522,7 +538,7 @@ static int ovl_lower_dir(const char *name, struct path *path,
 }
 
 /* Workdir should not be subdir of upperdir and vice versa */
-static bool ovl_workdir_ok(struct dentry *workdir, struct dentry *upperdir)
+__nocfi static bool ovl_workdir_ok(struct dentry *workdir, struct dentry *upperdir)
 {
 	bool ok = false;
 
@@ -572,7 +588,7 @@ static int ovl_report_in_use(struct ovl_fs *ofs, const char *name)
 	}
 }
 
-static int ovl_get_upper(struct super_block *sb, struct ovl_fs *ofs,
+__nocfi static int ovl_get_upper(struct super_block *sb, struct ovl_fs *ofs,
 			 struct ovl_layer *upper_layer,
 			 const struct path *upperpath)
 {
@@ -637,7 +653,7 @@ out:
  * Returns 1 if RENAME_WHITEOUT is supported, 0 if not supported and
  * negative values if error is encountered.
  */
-static int ovl_check_rename_whiteout(struct ovl_fs *ofs)
+__nocfi static int ovl_check_rename_whiteout(struct ovl_fs *ofs)
 {
 	struct dentry *workdir = ofs->workdir;
 	struct inode *dir = d_inode(workdir);
@@ -734,7 +750,7 @@ static int ovl_create_volatile_dirty(struct ovl_fs *ofs)
 	return 0;
 }
 
-static int ovl_make_workdir(struct super_block *sb, struct ovl_fs *ofs,
+__nocfi static int ovl_make_workdir(struct super_block *sb, struct ovl_fs *ofs,
 			    const struct path *workpath)
 {
 	struct vfsmount *mnt = ovl_upper_mnt(ofs);
@@ -1019,7 +1035,7 @@ static bool ovl_lower_uuid_ok(struct ovl_fs *ofs, const uuid_t *uuid)
 }
 
 /* Get a unique fsid for the layer */
-static int ovl_get_fsid(struct ovl_fs *ofs, const struct path *path)
+__nocfi static int ovl_get_fsid(struct ovl_fs *ofs, const struct path *path)
 {
 	struct super_block *sb = path->mnt->mnt_sb;
 	unsigned int i;
@@ -1075,7 +1091,7 @@ static int ovl_get_data_fsid(struct ovl_fs *ofs)
 }
 
 
-static int ovl_get_layers(struct super_block *sb, struct ovl_fs *ofs,
+__nocfi static int ovl_get_layers(struct super_block *sb, struct ovl_fs *ofs,
 			  struct ovl_fs_context *ctx, struct ovl_layer *layers)
 {
 	int err;
@@ -1269,7 +1285,7 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
  * - another layer of this overlayfs instance
  * - upper/work dir of any overlayfs instance
  */
-static int ovl_check_layer(struct super_block *sb, struct ovl_fs *ofs,
+__nocfi static int ovl_check_layer(struct super_block *sb, struct ovl_fs *ofs,
 			   struct dentry *dentry, const char *name,
 			   bool is_lower)
 {
@@ -1394,7 +1410,7 @@ static struct dentry *ovl_get_root(struct super_block *sb,
 	return root;
 }
 
-int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
+__nocfi int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct ovl_fs *ofs = sb->s_fs_info;
 	struct ovl_fs_context *ctx = fc->fs_private;

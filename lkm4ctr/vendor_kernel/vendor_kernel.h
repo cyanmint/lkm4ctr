@@ -470,6 +470,10 @@ bool vns_setup_userns_sysctls(struct user_namespace *ns);
 void vns_retire_userns_sysctls(struct user_namespace *ns);
 void vns_compat_resolve(void);
 void vns_ipc_compat_resolve(void);
+/* glue/vendor_kernel_ipc_callbacks.c: resolves simple_lookup() and the
+ * security_{msg_queue,sem,shm}_associate wrappers separately, in their own
+ * CFI-instrumented translation unit -- see that file's header comment. */
+void vns_ipc_lookup_resolve(void);
 bool vns_compat_ready(void);
 int vns_security_create_user_ns(const struct cred *cred);
 void vns_perf_event_namespaces(struct task_struct *tsk);

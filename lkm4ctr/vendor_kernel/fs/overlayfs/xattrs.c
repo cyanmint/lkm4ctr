@@ -1,5 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_xattr_set, ovl_xattr_get, ovl_can_list, ovl_listxattr.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -52,7 +68,7 @@ bool ovl_is_private_xattr(struct super_block *sb, const char *name)
 	return ovl_is_own_xattr(sb, name) && !ovl_is_escaped_xattr(sb, name);
 }
 
-static int ovl_xattr_set(struct dentry *dentry, struct inode *inode, const char *name,
+__nocfi static int ovl_xattr_set(struct dentry *dentry, struct inode *inode, const char *name,
 			 const void *value, size_t size, int flags)
 {
 	int err;
@@ -100,7 +116,7 @@ out:
 	return err;
 }
 
-static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char *name,
+__nocfi static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char *name,
 			 void *value, size_t size)
 {
 	ssize_t res;
@@ -114,7 +130,7 @@ static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char 
 	return res;
 }
 
-static bool ovl_can_list(struct super_block *sb, const char *s)
+__nocfi static bool ovl_can_list(struct super_block *sb, const char *s)
 {
 	/* Never list private (.overlay) */
 	if (ovl_is_private_xattr(sb, s))
@@ -128,7 +144,7 @@ static bool ovl_can_list(struct super_block *sb, const char *s)
 	return ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
 }
 
-ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
+__nocfi ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
 {
 	struct dentry *realdentry = ovl_dentry_real(dentry);
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);

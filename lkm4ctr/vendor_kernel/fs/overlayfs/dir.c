@@ -4,6 +4,25 @@
  * Copyright (C) 2011 Novell Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_mkdir_real, ovl_instantiate, ovl_clear_empty,
+ * ovl_create_over_whiteout, ovl_setup_cred_for_create, ovl_create_or_link,
+ * ovl_set_link_redirect, ovl_remove_and_whiteout, ovl_remove_upper,
+ * ovl_do_remove, ovl_get_redirect, ovl_rename, ovl_create_tmpfile.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -161,7 +180,7 @@ kill_whiteout:
 	goto out;
 }
 
-int ovl_mkdir_real(struct ovl_fs *ofs, struct inode *dir,
+__nocfi int ovl_mkdir_real(struct ovl_fs *ofs, struct inode *dir,
 		   struct dentry **newdentry, umode_t mode)
 {
 	int err;
@@ -283,7 +302,7 @@ static int ovl_set_opaque(struct dentry *dentry, struct dentry *upperdentry)
  * If @hardlink is false, then @inode is a pre-allocated inode, we may or
  * may not use to instantiate the new dentry.
  */
-static int ovl_instantiate(struct dentry *dentry, struct inode *inode,
+__nocfi static int ovl_instantiate(struct dentry *dentry, struct inode *inode,
 			   struct dentry *newdentry, bool hardlink, struct file *tmpfile)
 {
 	struct ovl_inode_params oip = {
@@ -382,7 +401,7 @@ out_cleanup:
 	goto out_unlock;
 }
 
-static struct dentry *ovl_clear_empty(struct dentry *dentry,
+__nocfi static struct dentry *ovl_clear_empty(struct dentry *dentry,
 				      struct list_head *list)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -466,7 +485,7 @@ static int ovl_set_upper_acl(struct ovl_fs *ofs, struct dentry *upperdentry,
 	return ovl_do_set_acl(ofs, upperdentry, acl_name, acl);
 }
 
-static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,
+__nocfi static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,
 				    struct ovl_cattr *cattr)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -576,7 +595,7 @@ out_cleanup:
 	goto out_dput;
 }
 
-static int ovl_setup_cred_for_create(struct dentry *dentry, struct inode *inode,
+__nocfi static int ovl_setup_cred_for_create(struct dentry *dentry, struct inode *inode,
 				     umode_t mode, const struct cred *old_cred)
 {
 	int err;
@@ -600,7 +619,7 @@ static int ovl_setup_cred_for_create(struct dentry *dentry, struct inode *inode,
 	return 0;
 }
 
-static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
+__nocfi static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 			      struct ovl_cattr *attr, bool origin)
 {
 	int err;
@@ -757,7 +776,7 @@ static int ovl_symlink_compat(struct inode *dir, struct dentry *dentry,
 #define OVL_SYMLINK_OP ovl_symlink
 #endif
 
-static int ovl_set_link_redirect(struct dentry *dentry)
+__nocfi static int ovl_set_link_redirect(struct dentry *dentry)
 {
 	const struct cred *old_cred;
 	int err;
@@ -813,7 +832,7 @@ static bool ovl_matches_upper(struct dentry *dentry, struct dentry *upper)
 	return d_inode(ovl_dentry_upper(dentry)) == d_inode(upper);
 }
 
-static int ovl_remove_and_whiteout(struct dentry *dentry,
+__nocfi static int ovl_remove_and_whiteout(struct dentry *dentry,
 				   struct list_head *list)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -867,7 +886,7 @@ out:
 	return err;
 }
 
-static int ovl_remove_upper(struct dentry *dentry, bool is_dir,
+__nocfi static int ovl_remove_upper(struct dentry *dentry, bool is_dir,
 			    struct list_head *list)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -947,7 +966,7 @@ static void ovl_drop_nlink(struct dentry *dentry)
 		drop_nlink(inode);
 }
 
-static int ovl_do_remove(struct dentry *dentry, bool is_dir)
+__nocfi static int ovl_do_remove(struct dentry *dentry, bool is_dir)
 {
 	int err;
 	const struct cred *old_cred;
@@ -1020,7 +1039,7 @@ static bool ovl_can_move(struct dentry *dentry)
 		!d_is_dir(dentry) || !ovl_type_merge_or_lower(dentry);
 }
 
-static char *ovl_get_redirect(struct dentry *dentry, bool abs_redirect)
+__nocfi static char *ovl_get_redirect(struct dentry *dentry, bool abs_redirect)
 {
 	char *buf, *ret;
 	struct dentry *d, *tmp;
@@ -1138,7 +1157,7 @@ static int ovl_set_redirect(struct dentry *dentry, bool samedir)
 	return err;
 }
 
-static int ovl_rename(struct mnt_idmap *idmap, struct inode *olddir,
+__nocfi static int ovl_rename(struct mnt_idmap *idmap, struct inode *olddir,
 		      struct dentry *old, struct inode *newdir,
 		      struct dentry *new, unsigned int flags)
 {
@@ -1398,7 +1417,7 @@ static int ovl_rename_compat(struct inode *olddir, struct dentry *old,
  * below 6.1, same as the real kernel of that era.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
+__nocfi static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
 			      struct inode *inode, umode_t mode)
 {
 	const struct cred *old_cred;

@@ -4,6 +4,26 @@
  * Copyright (C) 2011 Novell Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_setattr, ovl_getattr, ovl_permission, ovl_get_link,
+ * ovl_get_acl_path, do_ovl_get_acl, ovl_set_or_remove_acl, ovl_set_acl,
+ * ovl_fiemap, ovl_security_fileattr, ovl_real_fileattr_set,
+ * ovl_fileattr_set, ovl_real_fileattr_get, ovl_fileattr_get,
+ * ovl_noop_direct_IO, ovl_iget5.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -39,7 +59,7 @@
 #include "overlayfs.h"
 
 
-int ovl_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+__nocfi int ovl_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		struct iattr *attr)
 {
 	int err;
@@ -174,7 +194,7 @@ static void ovl_map_dev_ino(struct dentry *dentry, struct kstat *stat, int fsid)
 	}
 }
 
-int ovl_getattr(struct mnt_idmap *idmap, const struct path *path,
+__nocfi int ovl_getattr(struct mnt_idmap *idmap, const struct path *path,
 		struct kstat *stat, u32 request_mask, unsigned int flags)
 {
 	struct dentry *dentry = path->dentry;
@@ -306,7 +326,7 @@ out:
 	return err;
 }
 
-int ovl_permission(struct mnt_idmap *idmap,
+__nocfi int ovl_permission(struct mnt_idmap *idmap,
 		   struct inode *inode, int mask)
 {
 	struct inode *upperinode = ovl_inode_upper(inode);
@@ -343,7 +363,7 @@ int ovl_permission(struct mnt_idmap *idmap,
 	return err;
 }
 
-static const char *ovl_get_link(struct dentry *dentry,
+__nocfi static const char *ovl_get_link(struct dentry *dentry,
 				struct inode *inode,
 				struct delayed_call *done)
 {
@@ -414,7 +434,7 @@ static void ovl_idmap_posix_acl(const struct inode *realinode,
  * Until we have made a decision allow this helper to take the @noperm
  * argument. We should hopefully be able to remove it soon.
  */
-struct posix_acl *ovl_get_acl_path(const struct path *path,
+__nocfi struct posix_acl *ovl_get_acl_path(const struct path *path,
 				   const char *acl_name, bool noperm)
 {
 	struct posix_acl *real_acl, *clone;
@@ -459,7 +479,7 @@ struct posix_acl *ovl_get_acl_path(const struct path *path,
  *
  * This is obviously only relevant when idmapped layers are used.
  */
-struct posix_acl *do_ovl_get_acl(struct mnt_idmap *idmap,
+__nocfi struct posix_acl *do_ovl_get_acl(struct mnt_idmap *idmap,
 				 struct inode *inode, int type,
 				 bool rcu, bool noperm)
 {
@@ -497,7 +517,7 @@ struct posix_acl *do_ovl_get_acl(struct mnt_idmap *idmap,
 	return acl;
 }
 
-static int ovl_set_or_remove_acl(struct dentry *dentry, struct inode *inode,
+__nocfi static int ovl_set_or_remove_acl(struct dentry *dentry, struct inode *inode,
 				 struct posix_acl *acl, int type)
 {
 	int err;
@@ -554,7 +574,7 @@ out:
 	return err;
 }
 
-int ovl_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+__nocfi int ovl_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		struct posix_acl *acl, int type)
 {
 	int err;
@@ -611,7 +631,7 @@ int ovl_update_time(struct inode *inode, struct timespec64 *ts, int flags)
 	return 0;
 }
 
-static int ovl_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
+__nocfi static int ovl_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		      u64 start, u64 len)
 {
 	int err;
@@ -636,7 +656,7 @@ static int ovl_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
  * Introducing security_inode_fileattr_get/set() hooks would solve this issue
  * properly.
  */
-static int ovl_security_fileattr(const struct path *realpath, struct fileattr *fa,
+__nocfi static int ovl_security_fileattr(const struct path *realpath, struct fileattr *fa,
 				 bool set)
 {
 	struct file *file;
@@ -663,7 +683,7 @@ static int ovl_security_fileattr(const struct path *realpath, struct fileattr *f
 	return err;
 }
 
-int ovl_real_fileattr_set(const struct path *realpath, struct fileattr *fa)
+__nocfi int ovl_real_fileattr_set(const struct path *realpath, struct fileattr *fa)
 {
 	int err;
 
@@ -674,7 +694,7 @@ int ovl_real_fileattr_set(const struct path *realpath, struct fileattr *fa)
 	return vfs_fileattr_set(ovl_mnt_idmap(realpath->mnt), realpath->dentry, fa);
 }
 
-int ovl_fileattr_set(struct mnt_idmap *idmap,
+__nocfi int ovl_fileattr_set(struct mnt_idmap *idmap,
 		     struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -740,7 +760,7 @@ static void ovl_fileattr_prot_flags(struct inode *inode, struct fileattr *fa)
 }
 #endif /* >= 5.13 */
 
-int ovl_real_fileattr_get(const struct path *realpath, struct fileattr *fa)
+__nocfi int ovl_real_fileattr_get(const struct path *realpath, struct fileattr *fa)
 {
 	int err;
 
@@ -764,7 +784,7 @@ int ovl_real_fileattr_get(const struct path *realpath, struct fileattr *fa)
  * VNS_OVL_TIER_OLD.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 13, 0)
-int ovl_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+__nocfi int ovl_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
 	struct path realpath;
@@ -819,7 +839,7 @@ static const struct inode_operations ovl_special_inode_operations = {
  * rather than resolved via kallsyms merely to be used as this constant
  * initializer value.
  */
-static ssize_t ovl_noop_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+__nocfi static ssize_t ovl_noop_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
 	return -EINVAL;
 }
@@ -1246,7 +1266,7 @@ static bool ovl_hash_bylower(struct super_block *sb, struct dentry *upper,
 	return true;
 }
 
-static struct inode *ovl_iget5(struct super_block *sb, struct inode *newinode,
+__nocfi static struct inode *ovl_iget5(struct super_block *sb, struct inode *newinode,
 			       struct inode *key)
 {
 	return newinode ? inode_insert5(newinode, (unsigned long) key,
