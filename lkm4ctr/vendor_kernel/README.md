@@ -305,6 +305,32 @@ ordinary CFI instrumentation:
   `fc_mount()` etc. are ordinary by-name calls into the compat wrapper
   functions in `glue/vendor_kernel_ipc_compat.o`, which stays CFI-disabled
   for the actual resolved-pointer call inside it).
+- `vendor_kernel/ipc/namespace.o` -- defines `vns_ipcns_operations` (a
+  `proc_ns_operations`, called back e.g. via `/proc/pid/ns/ipc` opens) and
+  `free_ipc()` (a `work_struct` callback the real kernel's own
+  `process_one_work()` calls back into on the `free_ipc_work` workqueue
+  item). A live `CFI failure at process_one_work+... (target:
+  free_ipc+...)` panic from this was observed in CI. Makes no unsafe
+  indirect calls of its own (`vns_alloc_inum()`/`vns_free_inum()`/
+  `vns_put_user_ns()` are ordinary by-name calls into
+  `glue/vendor_kernel_module.o`, which stays CFI-disabled;
+  `sem_exit_ns()`/`msg_exit_ns()`/`shm_exit_ns()` are ordinary by-name
+  calls into their own vendored files).
+- `vendor_kernel/kernel/utsname.o`, `vendor_kernel/kernel/pid_namespace.o`,
+  `vendor_kernel/kernel/user_namespace.o`,
+  `vendor_kernel/kernel/cgroup/namespace.o`,
+  `vendor_kernel/kernel/time/namespace.o`, `vendor_kernel/fs/nsfs.o` --
+  each defines its own `proc_ns_operations` struct
+  (`vns_utsns_operations`, `vns_pidns_operations`/
+  `vns_pidns_for_children_operations`, `vns_userns_operations`,
+  `vns_cgroupns_operations`, `vns_timens_operations`/
+  `vns_timens_for_children_operations`) and/or (for `nsfs.o`) the `nsfs`
+  pseudo-filesystem's own dentry/file callbacks, all real-kernel-invoked
+  via `/proc/pid/ns/*` opens and `ns_get_path()`. None make any unsafe
+  resolved-pointer indirect calls of their own (`user_namespace.o`'s
+  `bsearch()` calls resolve to `<linux/bsearch.h>`'s self-contained
+  `__inline_bsearch()` via the macro redirect in `vendor_kernel.h`, not a
+  kallsyms-resolved pointer).
 
 The vendored overlayfs sources (`vendor_kernel/fs/overlayfs/*.c`) also
 define real-kernel-invoked callback structs (`super_operations`,

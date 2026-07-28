@@ -132,13 +132,32 @@ ccflags-y += -I$(src)/../common
 #     etc. are ordinary direct calls into the by-name compat wrapper
 #     functions defined in vendor_kernel_ipc_compat.o, which stays in this
 #     list for the actual resolved-pointer call inside it).
+#   - vendor_kernel/ipc/namespace.o: defines vns_ipcns_operations (a
+#     proc_ns_operations, called back e.g. via /proc/pid/ns/ipc opens) and
+#     free_ipc() (a work_struct callback invoked by process_one_work());
+#     CI observed a live "CFI failure at process_one_work+... (target:
+#     free_ipc+...)" panic here. Makes no unsafe indirect calls of its own
+#     (vns_alloc_inum()/vns_free_inum()/vns_put_user_ns() are ordinary
+#     direct calls into vendor_kernel_module.o, which stays in this list;
+#     sem_exit_ns()/msg_exit_ns()/shm_exit_ns() are ordinary direct calls
+#     into their own vendored .c files).
+#   - vendor_kernel/kernel/utsname.o, vendor_kernel/kernel/pid_namespace.o,
+#     vendor_kernel/kernel/user_namespace.o,
+#     vendor_kernel/kernel/cgroup/namespace.o,
+#     vendor_kernel/kernel/time/namespace.o, vendor_kernel/fs/nsfs.o: each
+#     defines its own proc_ns_operations struct (vns_utsns_operations,
+#     vns_pidns_operations/vns_pidns_for_children_operations,
+#     vns_userns_operations, vns_cgroupns_operations,
+#     vns_timens_operations/vns_timens_for_children_operations) and/or (for
+#     nsfs.o) the nsfs pseudo-filesystem's own dentry/file callbacks, all
+#     real-kernel-invoked via /proc/pid/ns/* opens and ns_get_path(). None
+#     make any unsafe resolved-pointer indirect calls of their own
+#     (user_namespace.o's bsearch() calls resolve to <linux/bsearch.h>'s
+#     self-contained __inline_bsearch() via the macro redirect in
+#     vendor_kernel.h, not a kallsyms-resolved pointer).
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_cgdevices/shadow_cgdevices.o \
-	vendor_kernel/kernel/utsname.o \
-	vendor_kernel/kernel/pid_namespace.o \
-	vendor_kernel/kernel/user_namespace.o \
-	vendor_kernel/ipc/namespace.o \
 	vendor_kernel/ipc/msgutil.o \
 	vendor_kernel/ipc/msg.o \
 	vendor_kernel/ipc/sem.o \
@@ -146,7 +165,6 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
 	vendor_kernel/glue/vendor_kernel_ipc_compat.o \
-	vendor_kernel/fs/nsfs.o \
 	vendor_kernel/fs/overlayfs/super.o \
 	vendor_kernel/fs/overlayfs/namei.o \
 	vendor_kernel/fs/overlayfs/util.o \
@@ -158,8 +176,6 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/fs/overlayfs/file.o \
 	vendor_kernel/fs/overlayfs/params.o \
 	vendor_kernel/fs/overlayfs/xattrs.o \
-	vendor_kernel/kernel/cgroup/namespace.o \
-	vendor_kernel/kernel/time/namespace.o \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
