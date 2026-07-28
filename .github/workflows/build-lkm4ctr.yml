@@ -1,8 +1,8 @@
 # Build the merged lkm4ctr out-of-tree module across a KMI matrix, then
 # boot-test every KMI under QEMU against its prebuilt stock/patched kernels.
 #
-# lkm4ctr is a single combined lkm4ctr.ko built from subsystem sources
-# under lkm4ctr/lkm4ctr/ (see lkm4ctr/README.md). This workflow
+# lkm4ctr is a single combined lkm4ctr.ko built from sources under
+# vendor/ (see README.md). This workflow
 # builds that module, for every KMI in the matrix, inside SukiSU-Ultra's
 # prebuilt "DDK" (Driver Development Kit) container image
 # (ghcr.io/ylarod/ddk-min:<kmi>-<release>, see
@@ -26,7 +26,7 @@
 # Module built (per KMI):
 #   lkm4ctr                -- merged module containing the shared
 #                                shadow_hijack hook engine plus
-#                                vendor_kernel and shadow_cgdevices.
+#                                vendor_kernel.
 # The resulting .ko for a given KMI is uploaded on its own
 # (lkm4ctr-modules-<kmi>-arm64); it no longer bundles the userspace
 # checker binary (see below).
@@ -247,7 +247,7 @@ jobs:
         run: |
           set -euo pipefail
           DIFF_OUT="$RUNNER_TEMP/vendor-ns.diff"
-          sh lkm4ctr/vendor_kernel/vendor_kernel_diff.sh "$RUNNER_TEMP/kernel-common" | tee "$DIFF_OUT"
+          sh vendor/vendor_kernel_diff.sh "$RUNNER_TEMP/kernel-common" | tee "$DIFF_OUT"
           {
             echo "## vendor_kernel vs kernel-common (android14-6.1)"
             echo
@@ -282,7 +282,7 @@ jobs:
         run: |
           set -euxo pipefail
           KDIR="/opt/ddk/kdir/${{ matrix.kmi }}"
-          ROOT="$GITHUB_WORKSPACE/lkm4ctr"
+          ROOT="$GITHUB_WORKSPACE/vendor"
 
           make -C "$KDIR" M="$ROOT" modules -j"$(nproc)"
 
