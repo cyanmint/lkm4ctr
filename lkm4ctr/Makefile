@@ -55,6 +55,7 @@ lkm4ctr-objs := \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_procfs.o \
+	vendor_kernel/glue/vendor_kernel_procfs_setgroups.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
 	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
 	vendor_kernel/glue/vendor_kernel_diag.o \
@@ -175,11 +176,13 @@ ccflags-y += -I$(src)/../common
 #     its own is marked __nocfi individually (see each file's own header
 #     comment for the specific list) so all nine objects can keep normal
 #     CFI instrumentation and be removed from this list.
-#   - vendor_kernel/glue/vendor_kernel_procfs.o: defines vns_setgroups_fops
-#     (the /proc/*/setgroups file_operations). The one genuine unsafe
-#     indirect call in this file (vns_setgroups_create_fd(), through the
-#     resolved anon_inode_getfd_secure_fn pointer) is marked __nocfi
-#     individually instead.
+#   - vendor_kernel/glue/vendor_kernel_procfs_setgroups.o: defines
+#     vns_setgroups_fops (the /proc/*/setgroups file_operations), split out
+#     of vendor_kernel_procfs.o (see below) so it can keep normal CFI
+#     instrumentation. The one genuine unsafe indirect call in this file
+#     (vns_setgroups_create_fd(), through the resolved
+#     anon_inode_getfd_secure_fn pointer) is marked __nocfi individually
+#     instead.
 #   - vendor_kernel/ipc/mqueue.o: registers mqueue_fs_type/mqueue_super_ops/
 #     mqueue_file_operations, called back via e.g. alloc_fs_context()'s
 #     fs_type->init_fs_context(fc) -> mqueue_init_fs_context(). Makes no
@@ -247,7 +250,17 @@ ccflags-y += -I$(src)/../common
 #     back via the kretprobe_trampoline installed on the real syscall by
 #     SHADOW_HOOK()), exactly the same KCFI-vs-kprobe-resolved-pointer
 #     mismatch documented above for vendor_kernel_compat.o/
-#     vendor_kernel_ipc_callbacks.o.
+#     vendor_kernel_ipc_callbacks.o. vns_setgroups_open()/_read()/_write()
+#     (real file_operations callbacks the kernel's own VFS calls back into
+#     indirectly, unlike the resolved-pointer hooks above) were previously
+#     also defined in this file; CI observed a live "CFI failure at
+#     vfs_write+... (target: vns_setgroups_write+...)" panic in
+#     lkm4ctr_checker's setgroups probe once this whole-object CFI removal
+#     started applying to them too. They are now split into their own
+#     glue/vendor_kernel_procfs_setgroups.o translation unit (see above,
+#     kept out of this list) so they can keep normal CFI instrumentation,
+#     mirroring vendor_kernel_ipc_callbacks.o's split from
+#     vendor_kernel_ipc_compat.o.
 #   - vendor_kernel/kernel/pid_namespace.o: vns_copy_pid_ns()/vns_put_pid_ns()
 #     call through vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn, resolved
 #     by name (shadow_hook_resolve("copy_pid_ns")/("put_pid_ns")) so that on
