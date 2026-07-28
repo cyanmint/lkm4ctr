@@ -179,26 +179,59 @@ consistency and for any code elsewhere in the kernel that assumes them, but
 `vendor_kernel` itself does not require any of the three any more for its
 own uts/pid/user namespace support.
 
-`glue/vendor_kernel_procfs.c` also fabricates `/proc/<pid>/setgroups` on a
-kernel genuinely missing `CONFIG_USER_NS`: `fs/proc/base.c`
-only wires up that per-pid dentry `#ifdef CONFIG_USER_NS`, so modern
-`runc`/`containerd`'s unconditional `open()`/`openat2()` sanity-check of
-`self/setgroups` (part of its "is this really an unrestricted procfs"
-probe, run independent of whether the container itself asked for a new
-user namespace) fails with plain `-ENOENT` and aborts container creation
-with `"unsafe procfs detected ... setgroups: no such file or directory"`.
+`glue/vendor_kernel_procfs.c`/`glue/vendor_kernel_procfs_userns.c` also
+fabricate `/proc/<pid>/{uid_map,gid_map,projid_map,setgroups}` on a kernel
+genuinely missing `CONFIG_USER_NS`: `fs/proc/base.c` only wires up those
+per-pid dentries `#ifdef CONFIG_USER_NS`, so (a) modern `runc`/`containerd`'s
+unconditional `open()`/`openat2()` sanity-check of `self/setgroups` (part of
+its "is this really an unrestricted procfs" probe, run independent of
+whether the container itself asked for a new user namespace) fails with
+plain `-ENOENT` and aborts container creation with `"unsafe procfs detected
+... setgroups: no such file or directory"`, and (b) every container
+runtime's classic `"0 <host-id> 1"` `uid_map`/`gid_map` write — the actual
+mechanism establishing a container's uid/gid remap, not merely a probe —
+fails outright the same way before it can even be attempted.
 `open`/`openat`/`openat2` are hooked to let the real syscall run first and
 only fabricate a descriptor once it has already failed with `-ENOENT` for a
-path unambiguously naming a `"setgroups"` leaf under a procfs-rooted pid
-directory. The fabricated descriptor is a simple one-way
-`"allow"` -> `"deny"` latch on its own private inode (via
-`anon_inode_getfd_secure()`, resolved through `shadow_hook_resolve()`)
-rather than being wired to `vendor_kernel`'s own real per-task
-`user_namespace` (`kernel/user_namespace.c`'s
-`vns_proc_setgroups_show()`/`_write()`) — reproducing the exact
-allow/deny/gid-map-set interactions real `setgroups(7)` has with a
-specific `unshare(CLONE_NEWUSER)`'d namespace is unnecessary complexity for
-what every observed caller only ever treats as a one-shot defensive probe.
+path unambiguously naming one of these four leaves under a procfs-rooted pid
+directory. Unlike an earlier revision (a disconnected one-way
+`"allow"` -> `"deny"` `setgroups` latch, unrelated to any real namespace),
+all four fabricated descriptors are now genuinely wired to the target
+task's own real per-task `user_namespace`
+(`kernel/user_namespace.c`'s `vns_proc_{uid,gid,projid}_seq_operations`
++ `vns_proc_{uid,gid,projid}_map_write()` for the three id-map files,
+`vns_proc_setgroups_show()`/`_write()` for `setgroups`) — required not
+just for `setgroups(7)`'s own allow/deny semantics but because
+`new_idmap_permitted()`'s unprivileged single-mapping rule for `gid_map`
+explicitly checks the real per-namespace `USERNS_SETGROUPS_ALLOWED` flag
+(CVE-2014-8989), so `setgroups` has to be real for an unprivileged
+`gid_map` write to behave correctly at all.
+
+`glue/vendor_kernel_syscalls_userns.c` closes the other half of the gap:
+even with a real per-task `user_namespace` installed (by
+`vns_unshare_userns()`/`vns_create_user_ns()`) and real `uid_map`/`gid_map`
+content in it (via the procfs fabrication above), a kernel genuinely
+missing `CONFIG_USER_NS` makes `<linux/uidgid.h>`'s `make_kuid()`/
+`from_kuid()`/`from_kuid_munged()` (and the `kgid` equivalents) collapse to
+trivial identity functions that ignore their `user_namespace *` argument
+entirely, so the real, unhooked `getuid()`/`setuid()`/etc. syscalls in
+vmlinux never actually consult it — every id stays unmapped end to end.
+`getuid`/`geteuid`/`getgid`/`getegid`/`getresuid`/`getresgid` are hooked to
+call the real syscall first (whose result is always the raw, global id
+here) and then translate it down into the caller's own `user_namespace` via
+`vns_from_kuid_munged()`/`vns_from_kgid_munged()`; `setuid`/`setgid`/
+`setreuid`/`setregid`/`setresuid`/`setresgid` are hooked to translate each
+supplied (non `-1`) id *up* into a raw global id via `vns_make_kuid()`/
+`vns_make_kgid()` before delegating unchanged to the real syscall, so every
+one of its own privilege/capability checks (none of which are gated by
+`CONFIG_USER_NS`) still runs, just against the already-translated value.
+Both directions are skipped outright while the caller is still in the real
+`init_user_ns` (`vns_real_init_user_ns`), so non-namespaced processes are
+unaffected. Installed best-effort (a resolution failure only logs a
+warning, matching the IPC/PID `/proc/<pid>/ns/*` hooks above): without them
+`unshare(CLONE_NEWUSER)` + a `uid_map`/`gid_map` write still install a real,
+isolated `user_namespace` on the task, only the ordinary credential
+syscalls' observability of it is affected.
 
 ## SysV IPC and POSIX mqueue (real isolation, not bookkeeping)
 
@@ -295,10 +328,11 @@ ordinary CFI instrumentation:
   `shm_file_operations_huge`/`shm_vm_ops`; makes no unsafe indirect calls of
   its own (unlike `msg.c`/`sem.c`/`util.c`/`compat.c`, which stay
   CFI-disabled).
-- `glue/vendor_kernel_procfs.o` -- defines
-  `vns_setgroups_fops` (the `/proc/*/setgroups` `file_operations`); the one
-  genuine resolved-pointer call here (`vns_setgroups_create_fd()`, through
-  `anon_inode_getfd_secure_fn`) is marked `__nocfi` individually.
+- `glue/vendor_kernel_procfs_userns.o` -- defines
+  `vns_idmap_fops[]` (the `/proc/*/{uid_map,gid_map,projid_map,setgroups}`
+  `file_operations`); the one genuine resolved-pointer call here
+  (`vns_idmap_create_fd()`, through `anon_inode_getfd_secure_fn`) is marked
+  `__nocfi` individually.
 - `vendor/ipc/mqueue.o` -- registers `mqueue_fs_type`/
   `mqueue_super_ops`/`mqueue_file_operations`, which the real kernel calls
   back into once mounted (e.g. `alloc_fs_context()`'s
