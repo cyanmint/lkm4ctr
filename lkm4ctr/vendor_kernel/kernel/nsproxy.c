@@ -185,7 +185,21 @@ static inline struct nsproxy *create_nsproxy(void)
  * Return the newly created nsproxy.  Do not attach this to the task,
  * leave it to the caller to do proper locking and attach it to task.
  */
-static struct nsproxy *create_new_namespaces(unsigned long flags,
+/*
+ * [BUILD-COMPAT] __nocfi: this function's vns_copy_mnt_ns_fn() call below is
+ * a genuine CFI-unsafe indirect call, through a pointer resolved at runtime
+ * via shadow_hook_resolve("copy_mnt_ns") (vendor_kernel_module.c), not known
+ * to the compiler at this call site. On CONFIG_CFI_CLANG=y GKI kernels
+ * (5.15+) this previously panicked with "CFI failure ... (target:
+ * copy_mnt_ns+...)" from inside create_new_namespaces(). Marking just this
+ * function __nocfi (rather than disabling CFI for the whole nsproxy.o via
+ * CFLAGS_REMOVE_<obj>.o in lkm4ctr/Makefile) keeps the rest of this file --
+ * including vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe
+ * pre_handler callback -- CFI-instrumented and a valid indirect-call target
+ * for the real kernel, matching the pattern used elsewhere in this module
+ * (see e.g. vendor_kernel_procfs_setgroups.c's vns_setgroups_create_fd()).
+ */
+static __nocfi struct nsproxy *create_new_namespaces(unsigned long flags,
 	struct task_struct *tsk, struct user_namespace *user_ns,
 	struct fs_struct *new_fs)
 {

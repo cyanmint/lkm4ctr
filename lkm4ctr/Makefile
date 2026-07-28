@@ -114,10 +114,13 @@ ccflags-y += -I$(src)/../common
 #     shadow_{,un}register_ftrace_function_fn/shadow_ftrace_set_filter_ip_fn
 #     pointers) are marked __nocfi individually instead.
 #   - vendor_kernel/kernel/nsproxy.o: defines vns_exit_kprobe_pre_handler()
-#     (kprobe pre_handler on do_exit()); makes no unsafe indirect calls of
-#     its own (its shadow_hook_resolve()-based init_cgroup_ns/proc_alloc_inum
-#     lookups are called through from vendor_kernel_module.o, which stays in
-#     this list).
+#     (kprobe pre_handler on do_exit()); its shadow_hook_resolve()-based
+#     init_cgroup_ns/proc_alloc_inum lookups are called through from
+#     vendor_kernel_module.o, which stays in this list. The one genuine
+#     unsafe indirect call in this file (create_new_namespaces(), through
+#     the resolved vns_copy_mnt_ns_fn pointer) is marked __nocfi
+#     individually instead -- CI observed a live "CFI failure ... (target:
+#     copy_mnt_ns+...)" panic here when this call was left unmarked.
 #   - vendor_kernel/ipc/util.o: registers sysvipc_proc_ops via
 #     proc_create_data(); makes no unsafe indirect calls of its own.
 #   - vendor_kernel/ipc/shm.o: defines shm_file_operations/
