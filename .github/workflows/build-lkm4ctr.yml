@@ -282,7 +282,7 @@ jobs:
         run: |
           set -euxo pipefail
           KDIR="/opt/ddk/kdir/${{ matrix.kmi }}"
-          ROOT="$GITHUB_WORKSPACE/vendor_kernel"
+          ROOT="$GITHUB_WORKSPACE/vendor"
 
           make -C "$KDIR" M="$ROOT" modules -j"$(nproc)"
 
