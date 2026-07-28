@@ -173,9 +173,17 @@ static bool vns_dfd_is_procfs(int dfd)
  * modern runc/containerd performs as a defensive "unsafe procfs" check)
  * fail with -ENOENT even though the original open succeeded.
  *
- * Numeric components are passed through unchanged: whoever names a pid
- * directory by an explicit number is already responsible for using
- * whatever numbering find_get_pid() expects for their own call context.
+ * Numeric components are passed through unchanged, matching the same
+ * "already namespace-relative to the resolving task" contract:
+ * find_get_pid() is later called by that same task, so a caller naming a
+ * pid directory by an explicit number is expected to already be using
+ * whatever numbering its own task's active pid namespace observes (e.g. a
+ * numeric /proc/<pid>/... path typed from inside a container names a pid
+ * relative to that container's own pid namespace, exactly like the real
+ * kernel's own procfs would resolve it there). This is a pre-existing
+ * limitation carried over unchanged from before this fix, not something
+ * newly introduced by switching "self"/"thread-self" to the vnr() forms
+ * above.
  */
 static pid_t vns_resolve_ns_pid(const char *comp)
 {
