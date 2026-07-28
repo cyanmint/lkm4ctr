@@ -221,6 +221,22 @@ int vendor_kernel_init(void)
 	if (vendor_kernel_enabled)
 		return 0;
 
+	/*
+	 * [BUILD-COMPAT] Capture the real init_user_ns before anything else
+	 * runs: current_user_ns() is a plain read of current_cred()->user_ns
+	 * (no unresolved symbol involved), and insmod always executes from a
+	 * real top-level process context, so this is the same object the
+	 * running kernel's own (data-symbol, kprobe-unresolvable, sometimes
+	 * trimmed) init_user_ns points at. See vendor_kernel.h's init_user_ns
+	 * macro for why every other reference to init_user_ns in this module
+	 * is redirected to dereference this pointer instead of the real symbol.
+	 */
+	vns_real_init_user_ns = current_user_ns();
+	if (!vns_real_init_user_ns) {
+		LKM4CTR_ERR("vendor_kernel", "failed to capture init_user_ns from current task");
+		return -ENOENT;
+	}
+
 	hash_init(vendor_kernel_registry.tasks);
 	spin_lock_init(&vendor_kernel_registry.lock);
 	vendor_kernel_registry.task_count = 0;
@@ -244,6 +260,7 @@ int vendor_kernel_init(void)
 	 */
 	vns_cgroup_default_init();
 	vns_init_nsproxy.cgroup_ns = &vns_default_cgroup_ns;
+	vns_time_ns_default_init();
 #if defined(CONFIG_POSIX_MQUEUE) || defined(CONFIG_SYSVIPC)
 	/*
 	 * [BUILD-COMPAT] vns_init_ipc_ns_ptr (the running kernel's real,

@@ -78,6 +78,10 @@ int vns_ipc_default_init(void)
 {
 	int err;
 
+	/* [BUILD-COMPAT] init_user_ns is a runtime pointer dereference now
+	 * (see vendor_kernel.h); can't be a static initializer, so set here. */
+	vns_default_ipc_ns.user_ns = vns_real_init_user_ns;
+
 	err = vns_mqueue_fs_init();
 	if (err)
 		return err;

@@ -56,6 +56,42 @@ struct shadow_hook;
 #define bsearch(key, base, num, size, cmp) \
 	__inline_bsearch((key), (base), (num), (size), (cmp))
 
+/*
+ * [BUILD-COMPAT] init_user_ns/overflowgid are DATA symbols: unlike ordinary
+ * kernel functions, they cannot be resolved via shadow_hook_resolve()'s
+ * register_kprobe() trick (kprobes only attach to code/executable
+ * addresses; see common/shadow_hook.h), and CONFIG_TRIM_UNUSED_KSYMS has
+ * been observed to drop init_user_ns's module symbol table entry entirely
+ * on some GKI KMIs (insmod "Unknown symbol init_user_ns"/"overflowgid").
+ *
+ * init_user_ns is fixed up without ever needing the real symbol at all:
+ * vns_real_init_user_ns is populated once, at the very start of
+ * vendor_kernel_init() (glue/vendor_kernel_module.c), from
+ * current_user_ns() -- itself just a static-inline read of
+ * current_cred()->user_ns, never an unresolved symbol -- which, since
+ * insmod always runs from a real top-level process context, is the exact
+ * same object the running kernel's own init_user_ns symbol would have
+ * pointed at. Every source reference to init_user_ns is therefore
+ * redirected to dereference that captured pointer instead, so no
+ * relocation to the (possibly trimmed) real symbol is ever emitted.
+ *
+ * NOTE: because of this, init_user_ns must never be used in a static/global
+ * initializer (a runtime pointer dereference isn't a compile-time constant)
+ * -- assign such fields at runtime instead, once vns_real_init_user_ns has
+ * been set. See ipc/msgutil.c's init_ipc_ns, kernel/time/namespace.c's
+ * vns_init_time_ns and kernel/cgroup/namespace.c's vns_default_cgroup_ns,
+ * whose .user_ns fields are populated in vendor_kernel_init() for exactly
+ * this reason.
+ *
+ * overflowgid is a plain scalar (kernel.overflowgid sysctl default), so a
+ * module-owned constant standing in for it can't have this constant-init
+ * problem; 65534 is the standard default on every target kernel.
+ */
+extern struct user_namespace *vns_real_init_user_ns;
+#define init_user_ns (*vns_real_init_user_ns)
+extern const int vns_local_overflowgid;
+#define overflowgid vns_local_overflowgid
+
 #define VNS_TASK_HASH_BITS 10
 #define VNS_CLONE_FLAGS ((unsigned long)(CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNS | \
 				CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWUSER | \
@@ -282,6 +318,7 @@ extern struct cgroup_namespace vns_default_cgroup_ns;
 void vns_cgroup_default_init(void);
 
 extern struct time_namespace vns_init_time_ns;
+void vns_time_ns_default_init(void);
 struct time_namespace *vns_copy_time_ns(unsigned long flags, struct user_namespace *user_ns, struct time_namespace *old_ns);
 void vns_put_time_ns(struct time_namespace *ns);
 void vns_free_time_ns(struct time_namespace *ns);

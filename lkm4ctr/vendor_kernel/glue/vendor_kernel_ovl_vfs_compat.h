@@ -442,7 +442,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
-	X(fs_param_is_enum) \
 	VNS_OVL_VFSC_DTMPFILE_ENTRY(X)
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
@@ -539,7 +538,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
-	X(fs_param_is_enum) \
 	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
@@ -556,6 +554,9 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(prepare_creds) \
 	X(errseq_sample) \
 	X(mntput) \
+	X(__mnt_is_readonly) \
+	X(generic_permission) \
+	X(get_cached_acl_rcu) \
 	X(vfs_statfs) \
 	X(clone_private_mount) \
 	X(lock_rename) \
@@ -635,7 +636,6 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(generic_fillattr) \
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
-	X(fs_param_is_enum) \
 	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X)
@@ -685,6 +685,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define lookup_one_positive_unlocked (*vns_ovl_vfsc_lookup_one_positive_unlocked)
 #define lookup_one_unlocked (*vns_ovl_vfsc_lookup_one_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define generic_fill_statx_attr (*vns_ovl_vfsc_generic_fill_statx_attr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
@@ -764,6 +767,10 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define lookup_one_positive_unlocked (*vns_ovl_vfsc_lookup_one_positive_unlocked)
 #define lookup_one_unlocked (*vns_ovl_vfsc_lookup_one_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
+#define vfs_parse_fs_string (*vns_ovl_vfsc_vfs_parse_fs_string)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define generic_fill_statx_attr (*vns_ovl_vfsc_generic_fill_statx_attr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
@@ -818,6 +825,8 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define prepare_creds (*vns_ovl_vfsc_prepare_creds)
 #define errseq_sample (*vns_ovl_vfsc_errseq_sample)
 #define mntput (*vns_ovl_vfsc_mntput)
+#define __mnt_is_readonly (*vns_ovl_vfsc___mnt_is_readonly)
+#define get_cached_acl_rcu (*vns_ovl_vfsc_get_cached_acl_rcu)
 #define vfs_statfs (*vns_ovl_vfsc_vfs_statfs)
 #define clone_private_mount (*vns_ovl_vfsc_clone_private_mount)
 #define lock_rename (*vns_ovl_vfsc_lock_rename)
@@ -877,6 +886,10 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
  * one. */
 #define lookup_one_len_unlocked (*vns_ovl_vfsc_lookup_one_len_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
+#define vfs_parse_fs_string (*vns_ovl_vfsc_vfs_parse_fs_string)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
 /* get_acl: not redirected (see header comment). */
@@ -952,7 +965,7 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define setattr_prepare(idmap, dentry, attr) \
 	setattr_prepare((dentry), (attr))
 #define generic_permission(idmap, inode, mask) \
-	generic_permission((inode), (mask))
+	(*vns_ovl_vfsc_generic_permission)((inode), (mask))
 #define inode_init_owner(idmap, inode, dir, mode) \
 	inode_init_owner((inode), (dir), (mode))
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)

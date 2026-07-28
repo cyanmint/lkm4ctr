@@ -157,7 +157,15 @@ const struct proc_ns_operations vns_timens_for_children_operations = { /* [RENAM
 
 struct time_namespace vns_init_time_ns = { /* [RENAME] */
 	VNS_TIME_REF_INIT
-	.user_ns	= &init_user_ns,
+	/* [BUILD-COMPAT] .user_ns set at runtime in vns_time_ns_default_init()
+	 * (glue/vendor_kernel_module.c): init_user_ns is now a runtime pointer
+	 * dereference (vendor_kernel.h), not a compile-time constant usable
+	 * in a static initializer. */
 	.ns.ops		= &vns_timens_operations,
 	.frozen_offsets	= true,
 };
+
+void vns_time_ns_default_init(void) /* [BUILD-COMPAT] */
+{
+	vns_init_time_ns.user_ns = vns_real_init_user_ns;
+}
