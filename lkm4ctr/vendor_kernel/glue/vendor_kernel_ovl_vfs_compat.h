@@ -428,18 +428,22 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
  * vfs_parse_monolithic_sep() fallback further down this file that calls it.
  *
  * seq_escape() is deliberately NOT in this list, even though params.c's
- * seq_show_option() calls reach it indirectly: since (at least)
- * android13-5.15 through the current NEW tier, seq_escape() is a `static
- * inline` wrapper around the real, exported seq_escape_mem() (see
+ * seq_show_option() calls reach it indirectly: on some KMIs seq_escape() is
+ * a `static inline` wrapper around the exported seq_escape_mem() (see
  * include/linux/seq_file.h), not its own kallsyms symbol at all --
- * shadow_hook_resolve("seq_escape") always fails on those KMIs, which
- * previously made vns_ovl_vfs_compat_resolve() treat it as a mandatory,
- * unresolvable symbol and fail vns_overlay_init() outright on every load
- * (taking the whole rest of vendor_kernel down with it on the resulting
- * error-unwind path, since every hook installed before that point gets torn
- * back down too). seq_show_option()'s call to seq_escape() is fully inlined
- * at the point <linux/seq_file.h> is parsed (always before this header), so
- * nothing here ever actually needs a resolved seq_escape pointer at runtime.
+ * shadow_hook_resolve("seq_escape") always fails there. On others
+ * (confirmed live on android12-5.10 and android14-5.15) it IS a genuine,
+ * separately EXPORT_SYMBOL'd function, which is a plain, direct-by-name
+ * kernel call from seq_show_option()'s already-inlined body -- a macro
+ * redirect here could never reach that call site regardless of tier, and
+ * CI observed a live "Unknown symbol seq_escape" insmod failure on
+ * android14-5.15 because that symbol can be trimmed from a production GKI
+ * build's module table even though EXPORT_SYMBOL'd in source. Instead,
+ * vendor_kernel_ovl_vfs_compat.c provides its own externally-linked
+ * seq_escape() definition (a self-contained octal-escape reimplementation
+ * using only the always-exported seq_putc()/seq_puts()), which the linker
+ * uses to satisfy any translation unit's undefined "seq_escape" reference
+ * instead of requiring the (possibly trimmed) vmlinux export.
  */
 
 #if VNS_OVL_TIER_NEW
@@ -507,6 +511,13 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
+	X(down_write_killable) \
+	X(d_invalidate) \
+	X(revert_creds) \
+	X(override_creds) \
+	X(security_file_ioctl) \
+	X(iterate_dir) \
+	X(vfs_setpos) \
 	VNS_OVL_VFSC_KFOPEN_ENTRY(X) \
 	VNS_OVL_VFSC_BFOPEN_ENTRY(X) \
 	VNS_OVL_VFSC_VPMSEP_ENTRY(X) \
@@ -608,6 +619,13 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
 	X(errseq_check) \
+	X(down_write_killable) \
+	X(d_invalidate) \
+	X(revert_creds) \
+	X(override_creds) \
+	X(security_file_ioctl) \
+	X(iterate_dir) \
+	X(vfs_setpos) \
 	X(lookup_positive_unlocked) \
 	VNS_OVL_VFSC_VMASETFILE_ENTRY(X) \
 	X(d_tmpfile)
@@ -793,6 +811,26 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
 #define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+/*
+ * [BUILD-COMPAT] down_write_killable/d_invalidate/revert_creds/
+ * override_creds/security_file_ioctl/iterate_dir/vfs_setpos are all
+ * genuinely EXPORT_SYMBOL'd on this KMI range, but -- like every other name
+ * in VNS_OVL_VFS_COMPAT_LIST -- may still be trimmed from a production GKI
+ * build's module symbol table (CONFIG_TRIM_UNUSED_KSYMS, protected-KMI
+ * allow-lists). CI observed a live "Unknown symbol vfs_setpos"/"Unknown
+ * symbol revert_creds"/etc. insmod failure on android14-5.15 (a MID-tier
+ * KMI) because these seven were previously left un-redirected here (only
+ * VNS_OVL_TIER_OLD resolved them), on the incorrect assumption that direct
+ * linkage against these always succeeds on MID/NEW-tier kernels. Resolved
+ * via shadow_hook_resolve() like the rest of this list instead.
+ */
+#define down_write_killable (*vns_ovl_vfsc_down_write_killable)
+#define d_invalidate (*vns_ovl_vfsc_d_invalidate)
+#define revert_creds (*vns_ovl_vfsc_revert_creds)
+#define override_creds (*vns_ovl_vfsc_override_creds)
+#define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
+#define iterate_dir (*vns_ovl_vfsc_iterate_dir)
+#define vfs_setpos (*vns_ovl_vfsc_vfs_setpos)
 #if !VNS_OVL_TIER_HAVE_D_MARK_TMPFILE
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
 #endif
@@ -896,6 +934,20 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
 #define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+/*
+ * [BUILD-COMPAT] see the matching comment in the NEW-tier block above:
+ * these seven are genuinely EXPORT_SYMBOL'd here too, but CI observed a
+ * live "Unknown symbol vfs_setpos"/"Unknown symbol revert_creds"/etc.
+ * insmod failure on android14-5.15 because they were previously left
+ * un-redirected on MID tier (only VNS_OVL_TIER_OLD resolved them).
+ */
+#define down_write_killable (*vns_ovl_vfsc_down_write_killable)
+#define d_invalidate (*vns_ovl_vfsc_d_invalidate)
+#define revert_creds (*vns_ovl_vfsc_revert_creds)
+#define override_creds (*vns_ovl_vfsc_override_creds)
+#define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
+#define iterate_dir (*vns_ovl_vfsc_iterate_dir)
+#define vfs_setpos (*vns_ovl_vfsc_vfs_setpos)
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
 #define errseq_check (*vns_ovl_vfsc_errseq_check)
 #define lookup_positive_unlocked (*vns_ovl_vfsc_lookup_positive_unlocked)

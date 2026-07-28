@@ -18,6 +18,7 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
@@ -76,5 +77,64 @@ int vns_ovl_vfs_compat_resolve(void)
 #undef VNS_OVL_VFSC_RESOLVE
 	return 0;
 }
+
+/*
+ * [BUILD-COMPAT] seq_escape() is deliberately NOT in VNS_OVL_VFS_COMPAT_LIST:
+ * params.c's seq_show_option() (a `static inline` parsed from
+ * <linux/fs_context.h>, always before this file's own VNS_OVL_VFS_COMPAT_LIST
+ * redirects could apply) calls seq_escape() directly by name, so a macro
+ * redirect here could never reach that already-expanded call site anyway.
+ *
+ * Starting with the 6.1 kernel, <linux/seq_file.h> made seq_escape() a
+ * `static inline` wrapper over seq_escape_mem(), so no import is ever
+ * needed there. Before 6.1 (confirmed live on android12-5.10,
+ * android13/14-5.15) it is a genuine, separately EXPORT_SYMBOL'd function
+ * -- and CI observed a live "Unknown symbol seq_escape" insmod failure on
+ * android14-5.15, because (like every other name in VNS_OVL_VFS_COMPAT_LIST)
+ * it can be trimmed from a production GKI build's module symbol table even
+ * though EXPORT_SYMBOL'd in source.
+ *
+ * Rather than require the real seq_escape() as an import (which
+ * shadow_hook_resolve() can't help with here, since it's never called
+ * through a resolved pointer at its call site), provide our own
+ * externally-linked definition, gated to versions below 6.1 where the
+ * kernel doesn't already supply an inline: any translation unit that
+ * references "seq_escape" as an undefined symbol links against this local
+ * definition instead of requiring one from vmlinux. It is a self-contained
+ * reimplementation of the real kernel's octal-escaping logic using only
+ * seq_putc()/seq_puts() -- fundamental, always exported, never-trimmed
+ * seq_file primitives -- so it has no dependency on
+ * seq_escape_str()/seq_escape_mem()/string_escape_str(), whose availability
+ * and exact signature vary across this file's KMI range.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+void seq_escape(struct seq_file *m, const char *s, const char *esc)
+{
+	char c;
+
+	while ((c = *s++) != '\0') {
+		if (!strchr(esc, c)) {
+			seq_putc(m, c);
+			continue;
+		}
+		switch (c) {
+		case '\n':
+			seq_puts(m, "\\n");
+			break;
+		case '\t':
+			seq_puts(m, "\\t");
+			break;
+		case '\\':
+			seq_puts(m, "\\\\");
+			break;
+		default:
+			seq_putc(m, '\\');
+			seq_putc(m, '0' + ((unsigned char)c >> 6));
+			seq_putc(m, '0' + (((unsigned char)c >> 3) & 7));
+			seq_putc(m, '0' + ((unsigned char)c & 7));
+		}
+	}
+}
+#endif /* LINUX_VERSION_CODE < 6.1.0 */
 
 #endif /* LINUX_VERSION_CODE in [5.10, 6.19) */
