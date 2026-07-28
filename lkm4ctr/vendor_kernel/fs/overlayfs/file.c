@@ -3,6 +3,24 @@
  * Copyright (C) 2017 Red Hat, Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_open_realfile, ovl_llseek, ovl_read_iter, ovl_write_iter,
+ * ovl_splice_read, ovl_splice_write, ovl_fsync, ovl_mmap, ovl_fallocate,
+ * ovl_fadvise, ovl_copyfile, ovl_flush.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -86,6 +104,7 @@ static void ovl_aio_cleanup_handler(struct ovl_aio_req *aio_req)
 	ovl_aio_put(aio_req);
 }
 
+#if VNS_OVL_TIER_MID_NEW
 static void ovl_aio_rw_complete(struct kiocb *iocb, long res)
 {
 	struct ovl_aio_req *aio_req = container_of(iocb,
@@ -95,7 +114,24 @@ static void ovl_aio_rw_complete(struct kiocb *iocb, long res)
 	ovl_aio_cleanup_handler(aio_req);
 	orig_iocb->ki_complete(orig_iocb, res);
 }
+#else
+/*
+ * [BUILD-COMPAT] struct kiocb's ->ki_complete took a third `long ret2`
+ * argument on the 5.10/5.15-shaped kernels (verified against
+ * android.googlesource.com include/linux/fs.h; dropped again by 6.1) --
+ * match that arity here instead of the unified (6.12-shaped, 2-arg) one.
+ */
+static void ovl_aio_rw_complete(struct kiocb *iocb, long res, long res2)
+{
+	struct ovl_aio_req *aio_req = container_of(iocb,
+						   struct ovl_aio_req, iocb);
+	struct kiocb *orig_iocb = aio_req->orig_iocb;
+
+	ovl_aio_cleanup_handler(aio_req);
+	orig_iocb->ki_complete(orig_iocb, res, res2);
+}
 #endif
+#endif /* VNS_OVL_NEED_BACKING_FILE_FALLBACK */
 
 static char ovl_whatisit(struct inode *inode, struct inode *realinode)
 {
@@ -107,7 +143,7 @@ static char ovl_whatisit(struct inode *inode, struct inode *realinode)
 		return 'm';
 }
 
-static struct file *ovl_open_realfile(const struct file *file,
+__nocfi static struct file *ovl_open_realfile(const struct file *file,
 				      const struct path *realpath)
 {
 	struct inode *realinode = d_inode(realpath->dentry);
@@ -160,7 +196,7 @@ static int ovl_change_flags(struct file *file, unsigned int flags)
 	if (((flags ^ file->f_flags) & O_APPEND) && IS_APPEND(inode))
 		return -EPERM;
 
-	if ((flags & O_DIRECT) && !(file->f_mode & FMODE_CAN_ODIRECT))
+	if ((flags & O_DIRECT) && !VNS_OVL_FMODE_CAN_ODIRECT(file))
 		return -EINVAL;
 
 	if (file->f_op->check_flags) {
@@ -171,7 +207,9 @@ static int ovl_change_flags(struct file *file, unsigned int flags)
 
 	spin_lock(&file->f_lock);
 	file->f_flags = (file->f_flags & ~OVL_SETFL_MASK) | flags;
+#if VNS_OVL_TIER_MID_NEW
 	file->f_iocb_flags = iocb_flags(file);
+#endif
 	spin_unlock(&file->f_lock);
 
 	return 0;
@@ -268,7 +306,7 @@ static int ovl_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static loff_t ovl_llseek(struct file *file, loff_t offset, int whence)
+__nocfi static loff_t ovl_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct inode *inode = file_inode(file);
 	struct fd real;
@@ -354,7 +392,7 @@ static void ovl_file_accessed(struct file *file)
 	touch_atime(&file->f_path);
 }
 
-static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+__nocfi static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct file *file = iocb->ki_filp;
 	struct fd real;
@@ -382,7 +420,7 @@ static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 #else
 	ret = -EINVAL;
 	if (iocb->ki_flags & IOCB_DIRECT &&
-	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+	    !VNS_OVL_FMODE_CAN_ODIRECT(fd_file(real)))
 		goto out_fdput;
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
@@ -416,7 +454,7 @@ out_fdput:
 	return ret;
 }
 
-static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+__nocfi static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
@@ -459,7 +497,7 @@ static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 #else
 	ret = -EINVAL;
 	if (iocb->ki_flags & IOCB_DIRECT &&
-	    !(fd_file(real)->f_mode & FMODE_CAN_ODIRECT))
+	    !VNS_OVL_FMODE_CAN_ODIRECT(fd_file(real)))
 		goto out_fdput;
 
 	old_cred = ovl_override_creds(file_inode(file)->i_sb);
@@ -500,7 +538,7 @@ out_unlock:
 	return ret;
 }
 
-static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
+__nocfi static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
 			       struct pipe_inode_info *pipe, size_t len,
 			       unsigned int flags)
 {
@@ -541,7 +579,7 @@ static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
  * So do everything ovl_write_iter() does and call iter_file_splice_write() on
  * the real file.
  */
-static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct file *out,
+__nocfi static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct file *out,
 				loff_t *ppos, size_t len, unsigned int flags)
 {
 	struct fd real;
@@ -583,7 +621,7 @@ out_unlock:
 	return ret;
 }
 
-static int ovl_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+__nocfi static int ovl_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct fd real;
 	const struct cred *old_cred;
@@ -609,7 +647,7 @@ static int ovl_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	return ret;
 }
 
-static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
+__nocfi static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct file *realfile = file->private_data;
 #if VNS_OVL_HAVE_BACKING_FILE_RW
@@ -643,7 +681,7 @@ static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 #endif
 }
 
-static long ovl_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+__nocfi static long ovl_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
 	struct inode *inode = file_inode(file);
 	struct fd real;
@@ -676,7 +714,7 @@ out_unlock:
 	return ret;
 }
 
-static int ovl_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
+__nocfi static int ovl_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 {
 	struct fd real;
 	const struct cred *old_cred;
@@ -701,7 +739,7 @@ enum ovl_copyop {
 	OVL_DEDUPE,
 };
 
-static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
+__nocfi static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
 			    struct file *file_out, loff_t pos_out,
 			    loff_t len, unsigned int flags, enum ovl_copyop op)
 {
@@ -796,7 +834,7 @@ static loff_t ovl_remap_file_range(struct file *file_in, loff_t pos_in,
 			    remap_flags, op);
 }
 
-static int ovl_flush(struct file *file, fl_owner_t id)
+__nocfi static int ovl_flush(struct file *file, fl_owner_t id)
 {
 	struct fd real;
 	const struct cred *old_cred;

@@ -4,6 +4,25 @@
  * Copyright (C) 2016 Red Hat, Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_acceptable, ovl_decode_real_fh, ovl_lookup_positive_unlocked,
+ * ovl_lookup_data_layer, ovl_lookup_data_layers, ovl_get_index_fh,
+ * ovl_lookup_index, ovl_maybe_validate_verity, ovl_maybe_lookup_lowerdata,
+ * ovl_lookup, ovl_lower_positive.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -94,7 +113,7 @@ static int ovl_check_redirect(const struct path *path, struct ovl_lookup_data *d
 	return 0;
 }
 
-static int ovl_acceptable(void *ctx, struct dentry *dentry)
+__nocfi static int ovl_acceptable(void *ctx, struct dentry *dentry)
 {
 	/*
 	 * A non-dir origin may be disconnected, which is fine, because
@@ -183,7 +202,7 @@ invalid:
 	goto out;
 }
 
-struct dentry *ovl_decode_real_fh(struct ovl_fs *ofs, struct ovl_fh *fh,
+__nocfi struct dentry *ovl_decode_real_fh(struct ovl_fs *ofs, struct ovl_fh *fh,
 				  struct vfsmount *mnt, bool connected)
 {
 	struct dentry *real;
@@ -227,7 +246,7 @@ struct dentry *ovl_decode_real_fh(struct ovl_fs *ofs, struct ovl_fh *fh,
 	return real;
 }
 
-static struct dentry *ovl_lookup_positive_unlocked(struct ovl_lookup_data *d,
+__nocfi static struct dentry *ovl_lookup_positive_unlocked(struct ovl_lookup_data *d,
 						   const char *name,
 						   struct dentry *base, int len,
 						   bool drop_negative)
@@ -387,7 +406,7 @@ static int ovl_lookup_layer(struct dentry *base, struct ovl_lookup_data *d,
 	return 0;
 }
 
-static int ovl_lookup_data_layer(struct dentry *dentry, const char *redirect,
+__nocfi static int ovl_lookup_data_layer(struct dentry *dentry, const char *redirect,
 				 const struct ovl_layer *layer,
 				 struct path *datapath)
 {
@@ -420,7 +439,7 @@ out_path_put:
 }
 
 /* Lookup in data-only layers by absolute redirect to layer root */
-static int ovl_lookup_data_layers(struct dentry *dentry, const char *redirect,
+__nocfi static int ovl_lookup_data_layers(struct dentry *dentry, const char *redirect,
 				  struct ovl_path *lowerdata)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -774,7 +793,7 @@ int ovl_get_index_name(struct ovl_fs *ofs, struct dentry *origin,
 }
 
 /* Lookup index by file handle for NFS export */
-struct dentry *ovl_get_index_fh(struct ovl_fs *ofs, struct ovl_fh *fh)
+__nocfi struct dentry *ovl_get_index_fh(struct ovl_fs *ofs, struct ovl_fh *fh)
 {
 	struct dentry *index;
 	struct qstr name;
@@ -803,7 +822,7 @@ struct dentry *ovl_get_index_fh(struct ovl_fs *ofs, struct ovl_fh *fh)
 	return ERR_PTR(err);
 }
 
-struct dentry *ovl_lookup_index(struct ovl_fs *ofs, struct dentry *upper,
+__nocfi struct dentry *ovl_lookup_index(struct ovl_fs *ofs, struct dentry *upper,
 				struct dentry *origin, bool verify)
 {
 	struct dentry *index;
@@ -944,7 +963,7 @@ out:
 	return err;
 }
 
-static int ovl_maybe_validate_verity(struct dentry *dentry)
+__nocfi static int ovl_maybe_validate_verity(struct dentry *dentry)
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
 	struct inode *inode = d_inode(dentry);
@@ -995,7 +1014,7 @@ static int ovl_maybe_validate_verity(struct dentry *dentry)
 }
 
 /* Lazy lookup of lowerdata */
-static int ovl_maybe_lookup_lowerdata(struct dentry *dentry)
+__nocfi static int ovl_maybe_lookup_lowerdata(struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 	const char *redirect = ovl_lowerdata_redirect(inode);
@@ -1051,7 +1070,7 @@ int ovl_verify_lowerdata(struct dentry *dentry)
 	return ovl_maybe_validate_verity(dentry);
 }
 
-struct dentry *ovl_lookup(struct inode *dir, struct dentry *dentry,
+__nocfi struct dentry *ovl_lookup(struct inode *dir, struct dentry *dentry,
 			  unsigned int flags)
 {
 	struct ovl_entry *oe = NULL;
@@ -1395,7 +1414,7 @@ out:
 	return ERR_PTR(err);
 }
 
-bool ovl_lower_positive(struct dentry *dentry)
+__nocfi bool ovl_lower_positive(struct dentry *dentry)
 {
 	struct ovl_entry *poe = OVL_E(dentry->d_parent);
 	const struct qstr *name = &dentry->d_name;

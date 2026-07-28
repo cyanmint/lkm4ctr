@@ -117,11 +117,15 @@ const struct proc_ns_operations vns_cgroupns_operations = { /* [RENAME] */
  */
 struct cgroup_namespace vns_default_cgroup_ns = {
 	.ns.ops		= &vns_cgroupns_operations,
-	.user_ns	= &init_user_ns,
+	/* [BUILD-COMPAT] .user_ns set at runtime in vns_cgroup_default_init():
+	 * init_user_ns is now a runtime pointer dereference (vendor_kernel.h),
+	 * not a compile-time constant usable in a static initializer. */
 };
 
 void vns_cgroup_default_init(void) /* [BUILD-COMPAT] */
 {
+	vns_default_cgroup_ns.user_ns = vns_real_init_user_ns;
+
 	/*
 	 * Pin vns_default_cgroup_ns's refcount to a large sentinel value so
 	 * it can never legitimately reach zero and be mistaken for a

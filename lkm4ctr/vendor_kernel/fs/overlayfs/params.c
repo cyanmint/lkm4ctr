@@ -19,6 +19,7 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
 
+#include <linux/compiler_types.h>
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/namei.h>
@@ -31,21 +32,166 @@
 #include "params.h"
 
 /*
- * [BUILD-COMPAT] fs_param_is_enum() may be trimmed from the module symbol
- * table by CONFIG_TRIM_UNUSED_KSYMS on some GKI KMIs, unlike
- * fs_param_is_bool()/fs_param_is_u32()/fs_param_is_string() (exercised by
- * enough in-tree filesystems to always survive trimming) -- so, unlike
- * those, it goes through vendor_kernel_ovl_vfs_compat.h's
- * shadow_hook_resolve() mechanism instead of being linked directly.
- * fsparam_enum()'s expansion embeds the raw symbol name into a designated
- * initializer of ovl_parameter_spec[] below, which needs the symbol at
- * module-load relocation time -- before vns_ovl_vfs_compat_resolve() has a
- * chance to resolve it. Redefine fsparam_enum() to leave .type NULL at
- * compile time instead, and patch it in at runtime once resolved (see
- * vns_ovl_patch_fsparam_enum(), called from vns_ovl_init()).
+ * lkm4ctr [BUILD-COMPAT]: ovl_parse_monolithic()/ovl_mount_dir_noesc()/
+ * ovl_mount_dir_check()/ovl_free_fs() are marked __nocfi below because each
+ * makes a genuine unsafe indirect call through a
+ * glue/vendor_kernel_ovl_vfs_compat.h vns_ovl_vfsc_<name>-redirected
+ * pointer (vfs_parse_monolithic_sep/kern_path/__mnt_is_readonly/
+ * kern_unmount_array+free_anon_bdev respectively), which can never satisfy
+ * kernel CFI's compile-time type-hash check (see lkm4ctr/Makefile's
+ * VNS_CFI_UNSAFE_OBJS comment for the general rationale). Unlike most other
+ * vendored overlayfs sources, this file is NOT in VNS_CFI_UNSAFE_OBJS: some
+ * of its functions (ovl_init_fs_context, and indirectly the
+ * ovl_context_ops fs_context_operations it installs) are real-kernel-
+ * invoked callbacks (via alloc_fs_context()/vfs_parse_fs_param()), so the
+ * whole object must keep its own CFI instrumentation -- only the four
+ * functions above, which make no such callback role of their own, are
+ * individually exempted from the outgoing-call check via __nocfi.
  */
+
+/*
+ * [BUILD-COMPAT] fs_param_is_string()/fs_param_is_enum() are real, normally
+ * EXPORT_SYMBOL()'d kernel functions (fs/fs_parser.c), but GKI's
+ * CONFIG_TRIM_UNUSED_KSYMS symbol-list trimming has been observed to drop
+ * both of them on several KMIs (confirmed insmod "Unknown symbol
+ * fs_param_is_string"/"__fs_parse" failures on 5.10/5.15). Worse, both
+ * names are embedded as the raw `.type` function-pointer initializer of a
+ * `const struct fs_parameter_spec` entry by the fsparam_string()/
+ * fsparam_string_empty()/fsparam_enum() macros below, which needs the
+ * symbol resolved at module-load relocation time -- long before this
+ * module's own init code (let alone vns_ovl_vfs_compat.c's
+ * shadow_hook_resolve() pass) ever runs, so the kallsyms-kprobe trick used
+ * for ordinary function *calls* elsewhere in this compat layer cannot help
+ * here either way.
+ *
+ * The only robust fix is to not need the real symbols at all: provide our
+ * own module-local functions with byte-identical logic to upstream
+ * fs/fs_parser.c's fs_param_is_string()/fs_param_is_enum() (and the small
+ * __fs_parse()/fs_lookup_key() parser core they plug into), and redirect
+ * the macros to reference those instead. Since these are plain function
+ * definitions (not kallsyms-resolved pointer variables), taking their
+ * address is a normal compile-time constant and works fine inside a
+ * static initializer.
+ *
+ * This also finally implements what the old fsparam_enum() override here
+ * used to merely gesture at (leaving `.type = NULL` and referencing a
+ * "patch at runtime" helper that was never actually written, silently
+ * leaving every fsparam_enum() option -- redirect_dir=, index=, uuid=,
+ * nfs_export=, xino=, metacopy=, verity=, fsync= -- treated as a bare flag
+ * and any supplied value ignored).
+ */
+static int vns_ovl_fs_param_bad_value(struct p_log *log, struct fs_parameter *param)
+{
+	return inval_plog(log, "Bad value for '%s'", param->key);
+}
+
+static int vns_ovl_fs_param_is_string(struct p_log *log,
+				       const struct fs_parameter_spec *p,
+				       struct fs_parameter *param,
+				       struct fs_parse_result *result)
+{
+	if (param->type != fs_value_is_string ||
+	    (!*param->string && !(p->flags & fs_param_can_be_empty)))
+		return vns_ovl_fs_param_bad_value(log, param);
+	return 0;
+}
+
+static int vns_ovl_fs_param_is_enum(struct p_log *log,
+				     const struct fs_parameter_spec *p,
+				     struct fs_parameter *param,
+				     struct fs_parse_result *result)
+{
+	const struct constant_table *c;
+
+	if (param->type != fs_value_is_string)
+		return vns_ovl_fs_param_bad_value(log, param);
+	if (!*param->string && (p->flags & fs_param_can_be_empty))
+		return 0;
+	for (c = p->data; c->name; c++) {
+		if (strcmp(c->name, param->string) == 0)
+			break;
+	}
+	if (!c->name)
+		return vns_ovl_fs_param_bad_value(log, param);
+	result->uint_32 = c->value;
+	return 0;
+}
+
+static inline bool vns_ovl_fs_is_flag(const struct fs_parameter_spec *p)
+{
+	return p->type == NULL;
+}
+
+static const struct fs_parameter_spec *
+vns_ovl_fs_lookup_key(const struct fs_parameter_spec *desc,
+		       struct fs_parameter *param, bool *negated)
+{
+	const struct fs_parameter_spec *p, *other = NULL;
+	const char *name = param->key;
+	bool want_flag = param->type == fs_value_is_flag;
+
+	*negated = false;
+	for (p = desc; p->name; p++) {
+		if (strcmp(p->name, name) != 0)
+			continue;
+		if (likely(vns_ovl_fs_is_flag(p) == want_flag))
+			return p;
+		other = p;
+	}
+	if (want_flag) {
+		if (name[0] == 'n' && name[1] == 'o' && name[2]) {
+			for (p = desc; p->name; p++) {
+				if (strcmp(p->name, name + 2) != 0)
+					continue;
+				if (!(p->flags & fs_param_neg_with_no))
+					continue;
+				*negated = true;
+				return p;
+			}
+		}
+	}
+	return other;
+}
+
+/*
+ * [BUILD-COMPAT] Local equivalent of the real __fs_parse()/fs_parse(),
+ * since __fs_parse (extern, real fs/fs_parser.c) has also been observed
+ * trimmed on some KMIs (5.10). Logic is otherwise identical to upstream.
+ */
+static int vns_ovl_fs_parse(struct fs_context *fc,
+			     const struct fs_parameter_spec *desc,
+			     struct fs_parameter *param,
+			     struct fs_parse_result *result)
+{
+	const struct fs_parameter_spec *p;
+
+	result->uint_64 = 0;
+
+	p = vns_ovl_fs_lookup_key(desc, param, &result->negated);
+	if (!p)
+		return -ENOPARAM;
+
+	if (p->flags & fs_param_deprecated)
+		warn_plog(&fc->log, "Deprecated parameter '%s'", param->key);
+
+	if (vns_ovl_fs_is_flag(p)) {
+		if (param->type != fs_value_is_flag)
+			return inval_plog(&fc->log, "Unexpected value for '%s'",
+					   param->key);
+		result->boolean = !result->negated;
+	} else {
+		int ret = p->type(&fc->log, p, param, result);
+
+		if (ret)
+			return ret;
+	}
+	return p->opt;
+}
+
 #undef fsparam_enum
-#define fsparam_enum(NAME, OPT, array) __fsparam(NULL, NAME, OPT, 0, array)
+#define fsparam_enum(NAME, OPT, array) \
+	__fsparam(vns_ovl_fs_param_is_enum, NAME, OPT, 0, array)
+#define fs_param_is_string vns_ovl_fs_param_is_string
 
 static bool ovl_redirect_dir_def = IS_ENABLED(CONFIG_OVERLAY_FS_REDIRECT_DIR);
 module_param_named(redirect_dir, ovl_redirect_dir_def, bool, 0644);
@@ -236,7 +382,7 @@ static char *ovl_next_opt(char **s)
 	return sbegin;
 }
 
-static int ovl_parse_monolithic(struct fs_context *fc, void *data)
+static int __nocfi ovl_parse_monolithic(struct fs_context *fc, void *data)
 {
 	return vfs_parse_monolithic_sep(fc, data, ovl_next_opt);
 }
@@ -281,7 +427,7 @@ static ssize_t ovl_parse_param_split_lowerdirs(char *str)
 	return nr_layers;
 }
 
-static int ovl_mount_dir_noesc(const char *name, struct path *path)
+static int __nocfi ovl_mount_dir_noesc(const char *name, struct path *path)
 {
 	int err = -EINVAL;
 
@@ -326,7 +472,7 @@ static int ovl_mount_dir(const char *name, struct path *path)
 	return err;
 }
 
-static int ovl_mount_dir_check(struct fs_context *fc, const struct path *path,
+static int __nocfi ovl_mount_dir_check(struct fs_context *fc, const struct path *path,
 			       enum ovl_opt layer, const char *name, bool upper)
 {
 	struct ovl_fs_context *ctx = fc->fs_private;
@@ -379,7 +525,7 @@ static int ovl_ctx_realloc_lower(struct fs_context *fc)
 
 	nr = min_t(size_t, max(4096 / sizeof(*l), ctx->capacity * 2),
 		   OVL_MAX_STACK);
-	l = krealloc_array(ctx->lower, nr, sizeof(*l), GFP_KERNEL_ACCOUNT);
+	l = vns_ovl_krealloc_array(ctx->lower, nr, sizeof(*l), GFP_KERNEL_ACCOUNT);
 	if (!l)
 		return -ENOMEM;
 
@@ -599,7 +745,7 @@ static int ovl_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		return invalfc(fc, "No changes allowed in reconfigure");
 	}
 
-	opt = fs_parse(fc, ovl_parameter_spec, param, &result);
+	opt = vns_ovl_fs_parse(fc, ovl_parameter_spec, param, &result);
 	if (opt < 0)
 		return opt;
 
@@ -774,7 +920,7 @@ out_err:
 
 }
 
-void ovl_free_fs(struct ovl_fs *ofs)
+void __nocfi ovl_free_fs(struct ovl_fs *ofs)
 {
 	struct vfsmount **mounts;
 	unsigned i;

@@ -7,6 +7,24 @@
  * Copyright (C) 2017-2018 CTERA Networks. All Rights Reserved.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_connect_layer, ovl_check_encode_origin, ovl_lookup_real_one,
+ * ovl_lookup_real_inode, ovl_lookup_real_ancestor, ovl_lookup_real,
+ * ovl_lower_fh_to_d.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -116,7 +134,7 @@ static int ovl_connectable_layer(struct dentry *dentry)
  *
  * Return the connected origin layer or < 0 on error.
  */
-static int ovl_connect_layer(struct dentry *dentry)
+__nocfi static int ovl_connect_layer(struct dentry *dentry)
 {
 	struct dentry *next, *parent = NULL;
 	struct ovl_entry *oe = OVL_E(dentry);
@@ -195,7 +213,7 @@ static int ovl_connect_layer(struct dentry *dentry)
  *
  * Return 0 for upper file handle, > 0 for lower file handle or < 0 on error.
  */
-static int ovl_check_encode_origin(struct inode *inode)
+__nocfi static int ovl_check_encode_origin(struct inode *inode)
 {
 	struct ovl_fs *ofs = OVL_FS(inode->i_sb);
 	bool decodable = ofs->config.nfs_export;
@@ -374,7 +392,7 @@ static struct dentry *ovl_dentry_real_at(struct dentry *dentry, int idx)
  * dentry with the same name as the real dentry. Otherwise, we need to consult
  * index for lookup.
  */
-static struct dentry *ovl_lookup_real_one(struct dentry *connected,
+__nocfi static struct dentry *ovl_lookup_real_one(struct dentry *connected,
 					  struct dentry *real,
 					  const struct ovl_layer *layer)
 {
@@ -442,7 +460,7 @@ static struct dentry *ovl_lookup_real(struct super_block *sb,
 /*
  * Lookup an indexed or hashed overlay dentry by real inode.
  */
-static struct dentry *ovl_lookup_real_inode(struct super_block *sb,
+__nocfi static struct dentry *ovl_lookup_real_inode(struct super_block *sb,
 					    struct dentry *real,
 					    const struct ovl_layer *layer)
 {
@@ -507,7 +525,7 @@ static struct dentry *ovl_lookup_real_inode(struct super_block *sb,
  * Lookup an indexed or hashed overlay dentry, whose real dentry is an
  * ancestor of @real.
  */
-static struct dentry *ovl_lookup_real_ancestor(struct super_block *sb,
+__nocfi static struct dentry *ovl_lookup_real_ancestor(struct super_block *sb,
 					       struct dentry *real,
 					       const struct ovl_layer *layer)
 {
@@ -560,7 +578,7 @@ static struct dentry *ovl_lookup_real_ancestor(struct super_block *sb,
  * If @real is on upper layer, we lookup a child overlay dentry with the same
  * path the real dentry. Otherwise, we need to consult index for lookup.
  */
-static struct dentry *ovl_lookup_real(struct super_block *sb,
+__nocfi static struct dentry *ovl_lookup_real(struct super_block *sb,
 				      struct dentry *real,
 				      const struct ovl_layer *layer)
 {
@@ -709,7 +727,7 @@ static struct dentry *ovl_upper_fh_to_d(struct super_block *sb,
 	return dentry;
 }
 
-static struct dentry *ovl_lower_fh_to_d(struct super_block *sb,
+__nocfi static struct dentry *ovl_lower_fh_to_d(struct super_block *sb,
 					struct ovl_fh *fh)
 {
 	struct ovl_fs *ofs = OVL_FS(sb);

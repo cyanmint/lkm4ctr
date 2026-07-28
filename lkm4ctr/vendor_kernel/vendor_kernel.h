@@ -6,6 +6,15 @@
 #ifndef _VENDOR_KERNEL_H
 #define _VENDOR_KERNEL_H
 
+/*
+ * Must be included before any other header: it #defines init_user_ns/
+ * overflowgid/overflowuid, and several real kernel headers included below
+ * (or transitively by this module's own .c files) have static inline
+ * helpers that reference those bare names directly. See
+ * vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "glue/vendor_kernel_data_syms.h"
+
 #include <linux/types.h>
 #include <linux/atomic.h>
 #include <linux/version.h>
@@ -40,6 +49,34 @@
 
 struct vns_task;
 struct shadow_hook;
+
+/*
+ * [BUILD-COMPAT] bsearch() (kernel/user_namespace.c's uid/gid map lookups)
+ * is EXPORT_SYMBOL'd in every KMI we target, but may still be trimmed from
+ * the running kernel's module symbol table (CONFIG_TRIM_UNUSED_KSYMS,
+ * protected-KMI allow-lists), causing "Unknown symbol bsearch" at insmod.
+ * <linux/bsearch.h> already ships a self-contained, always-inline
+ * equivalent (__inline_bsearch()) purely to let callers avoid the external
+ * call; redirect the bare name to it here instead of resolving the real
+ * kernel symbol via shadow_hook_resolve(), since it needs no kernel-internal
+ * state at all. Requires <linux/bsearch.h> to already be included at each
+ * use site (kernel/user_namespace.c includes it before this header).
+ */
+#define bsearch(key, base, num, size, cmp) \
+	__inline_bsearch((key), (base), (num), (size), (cmp))
+
+/*
+ * init_user_ns/overflowgid/overflowuid are redirected to module-owned
+ * stand-ins by vendor_kernel_data_syms.h, included at the very top of this
+ * file (see that header for the full rationale). NOTE: because of this,
+ * init_user_ns must never be used in a static/global initializer (a
+ * runtime pointer dereference isn't a compile-time constant) -- assign
+ * such fields at runtime instead, once vns_real_init_user_ns has been set.
+ * See ipc/msgutil.c's init_ipc_ns, kernel/time/namespace.c's
+ * vns_init_time_ns and kernel/cgroup/namespace.c's vns_default_cgroup_ns,
+ * whose .user_ns fields are populated in vendor_kernel_init() for exactly
+ * this reason.
+ */
 
 #define VNS_TASK_HASH_BITS 10
 #define VNS_CLONE_FLAGS ((unsigned long)(CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNS | \
@@ -100,6 +137,29 @@ extern struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *,
 extern void (*vns_real_free_nsproxy_fn)(struct nsproxy *);
 extern bool vendor_kernel_enabled;
 extern bool vns_pidns_runtime_supported;
+/*
+ * [BUILD-COMPAT] Real kernel's own (non-static, non-exported) copy_pid_ns()
+ * and (EXPORT_SYMBOL_GPL) put_pid_ns(), resolved by name so vns_copy_pid_ns()/
+ * vns_put_pid_ns() (kernel/pid_namespace.c) can hand pid namespace creation
+ * and teardown off to the real kernel's own implementation whenever the
+ * running kernel already has real pid-namespace support (CONFIG_PID_NS=y).
+ * Both resolve together (vns_pidns_runtime_supported tracks their combined
+ * availability): on such a kernel, a module-owned pid_namespace (allocated
+ * from vns_pid_ns_cachep) installed as some task's
+ * nsproxy->pid_ns_for_children is still reached by the real, unconditional
+ * alloc_pid()/free_pid() (kernel/pid.c), whose get_pid_ns()/put_pid_ns()
+ * calls are real refcount ops (not no-ops) in that configuration -- so the
+ * real put_pid_ns() eventually calls the real kernel's own
+ * destroy_pid_namespace(), which kmem_cache_free()s the object against the
+ * real, private pid_ns_cachep instead of vns_pid_ns_cachep, triggering
+ * SLUB's "Wrong slab cache" warning (cache_from_obj() self-corrects the
+ * free, so this is not a memory-corruption risk, but it is a real, avoidable
+ * defect). Delegating entirely to the real copy_pid_ns()/put_pid_ns() in
+ * this case (see vns_copy_pid_ns()) avoids the mismatch altogether.
+ */
+extern struct pid_namespace *(*vns_real_copy_pid_ns_fn)(unsigned long flags,
+	struct user_namespace *user_ns, struct pid_namespace *old_ns);
+extern void (*vns_real_put_pid_ns_fn)(struct pid_namespace *ns);
 
 static inline void vns_count_set(void *count, int value, bool is_refcount)
 {
@@ -267,6 +327,7 @@ extern struct cgroup_namespace vns_default_cgroup_ns;
 void vns_cgroup_default_init(void);
 
 extern struct time_namespace vns_init_time_ns;
+void vns_time_ns_default_init(void);
 struct time_namespace *vns_copy_time_ns(unsigned long flags, struct user_namespace *user_ns, struct time_namespace *old_ns);
 void vns_put_time_ns(struct time_namespace *ns);
 void vns_free_time_ns(struct time_namespace *ns);
@@ -418,6 +479,10 @@ bool vns_setup_userns_sysctls(struct user_namespace *ns);
 void vns_retire_userns_sysctls(struct user_namespace *ns);
 void vns_compat_resolve(void);
 void vns_ipc_compat_resolve(void);
+/* glue/vendor_kernel_ipc_callbacks.c: resolves simple_lookup() and the
+ * security_{msg_queue,sem,shm}_associate wrappers separately, in their own
+ * CFI-instrumented translation unit -- see that file's header comment. */
+void vns_ipc_lookup_resolve(void);
 bool vns_compat_ready(void);
 int vns_security_create_user_ns(const struct cred *cred);
 void vns_perf_event_namespaces(struct task_struct *tsk);
@@ -459,8 +524,9 @@ void vns_exit_sem(struct task_struct *tsk);
 void vns_prepare_exit_sem(struct task_struct *tsk);
 int vns_mq_init_ns(struct ipc_namespace *ns);
 int vns_mqueue_fs_init(void);
-void vns_mqueue_fs_exit(void);
+void vns_mqueue_fs_exit(bool cache_teardown_unsafe);
 void vns_mqueue_dev_ensure(void);
+bool vns_mqueue_dev_teardown(void);
 long vns_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		struct mq_attr __user *u_attr);
 long vns_mq_unlink(const char __user *u_name);

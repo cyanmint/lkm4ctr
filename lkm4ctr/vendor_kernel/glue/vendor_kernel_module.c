@@ -20,6 +20,9 @@ struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace 
 void (*vns_put_mnt_ns_fn)(struct mnt_namespace *);
 struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *, struct net *);
 void (*vns_real_free_nsproxy_fn)(struct nsproxy *);
+struct pid_namespace *(*vns_real_copy_pid_ns_fn)(unsigned long flags,
+	struct user_namespace *user_ns, struct pid_namespace *old_ns);
+void (*vns_real_put_pid_ns_fn)(struct pid_namespace *ns);
 bool vendor_kernel_enabled;
 bool vns_pidns_runtime_supported;
 
@@ -201,7 +204,18 @@ static void vns_resolve_symbols(void)
 	vns_put_mnt_ns_fn = (void *)shadow_hook_resolve("put_mnt_ns");
 	vns_copy_net_ns_fn = (void *)shadow_hook_resolve("copy_net_ns");
 	vns_real_free_nsproxy_fn = (void *)shadow_hook_resolve("free_nsproxy");
-	vns_pidns_runtime_supported = shadow_hook_resolve("copy_pid_ns") != 0;
+	vns_real_copy_pid_ns_fn = (void *)shadow_hook_resolve("copy_pid_ns");
+	vns_real_put_pid_ns_fn = (void *)shadow_hook_resolve("put_pid_ns");
+	/*
+	 * [BUILD-COMPAT] Both must resolve for vendor_kernel to safely hand
+	 * pid namespace creation/teardown off to the real kernel (see the
+	 * declaration comment on vns_real_copy_pid_ns_fn in vendor_kernel.h);
+	 * a kernel exposing only one of the two would be unexpected (both
+	 * live in the same CONFIG_PID_NS-gated kernel/pid_namespace.c
+	 * translation unit), but fail closed to the module-owned path rather
+	 * than risk calling through a NULL/mismatched pointer.
+	 */
+	vns_pidns_runtime_supported = vns_real_copy_pid_ns_fn && vns_real_put_pid_ns_fn;
 	/*
 	 * [BUILD-COMPAT] put_net() is always a static inline in
 	 * <net/net_namespace.h> (never a standalone kernel symbol), so it
@@ -221,6 +235,22 @@ int vendor_kernel_init(void)
 	if (vendor_kernel_enabled)
 		return 0;
 
+	/*
+	 * [BUILD-COMPAT] Capture the real init_user_ns before anything else
+	 * runs: current_user_ns() is a plain read of current_cred()->user_ns
+	 * (no unresolved symbol involved), and insmod always executes from a
+	 * real top-level process context, so this is the same object the
+	 * running kernel's own (data-symbol, kprobe-unresolvable, sometimes
+	 * trimmed) init_user_ns points at. See vendor_kernel.h's init_user_ns
+	 * macro for why every other reference to init_user_ns in this module
+	 * is redirected to dereference this pointer instead of the real symbol.
+	 */
+	vns_real_init_user_ns = current_user_ns();
+	if (!vns_real_init_user_ns) {
+		LKM4CTR_ERR("vendor_kernel", "failed to capture init_user_ns from current task");
+		return -ENOENT;
+	}
+
 	hash_init(vendor_kernel_registry.tasks);
 	spin_lock_init(&vendor_kernel_registry.lock);
 	vendor_kernel_registry.task_count = 0;
@@ -231,6 +261,7 @@ int vendor_kernel_init(void)
 	vns_resolve_symbols();
 	vns_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported kernel symbols */
 	vns_ipc_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported ipc/mm/security/audit symbols */
+	vns_ipc_lookup_resolve(); /* [BUILD-COMPAT] resolve simple_lookup()/security_*_associate() (own CFI-safe translation unit) */
 	if (!vns_compat_ready())
 		return -ENOENT;
 	/*
@@ -244,6 +275,7 @@ int vendor_kernel_init(void)
 	 */
 	vns_cgroup_default_init();
 	vns_init_nsproxy.cgroup_ns = &vns_default_cgroup_ns;
+	vns_time_ns_default_init();
 #if defined(CONFIG_POSIX_MQUEUE) || defined(CONFIG_SYSVIPC)
 	/*
 	 * [BUILD-COMPAT] vns_init_ipc_ns_ptr (the running kernel's real,
@@ -341,6 +373,37 @@ int vendor_kernel_init(void)
 		vns_ipc_default_exit();
 		return hooked;
 	}
+
+	/*
+	 * Best-effort: make sure /dev/mqueue is already a working mountpoint by
+	 * the time this returns, instead of only reacting to a container's own
+	 * mount(2) call that init.rc's boot-time attempt may already have
+	 * failed before this (typically late-loaded) module was ever inserted.
+	 * See glue/vendor_kernel_ipc_mount.c for the full rationale. Never
+	 * allowed to fail vendor_kernel_init() itself.
+	 *
+	 * Deliberately called here, last, after every step above that can
+	 * still return an error has already succeeded (vns_ipc_default_init()
+	 * itself used to call this right before its own "return 0;", which is
+	 * too early: any *subsequent* failure in this function -- e.g.
+	 * vns_exit_hook_init(), either shadow_hook_install_all(), or
+	 * vns_overlay_init() above -- unwound back through
+	 * vns_ipc_default_exit(), whose vns_mqueue_dev_teardown() detaches
+	 * the mount via path_umount() but can only *defer* its real
+	 * superblock teardown (cleanup_mnt()/deactivate_super()) to task_work
+	 * run when the current task next returns to userspace (see that
+	 * function's own comment) -- i.e. once insmod's init_module() syscall
+	 * itself returns. But a failed vendor_kernel_init() means
+	 * lkm4ctr_init() itself fails, which the kernel's module loader
+	 * unwinds by freeing this module's memory synchronously, well before
+	 * that deferred task_work runs. The mount's superblock (owned by this
+	 * module's own mqueue_fs_type) then outlives the module, so the
+	 * deferred deactivate_super() call panics on a use-after-free once it
+	 * finally runs. Performing this mount only once nothing else in this
+	 * function can still fail closes that window entirely: from here on,
+	 * vendor_kernel_init() unconditionally succeeds.
+	 */
+	vns_mqueue_dev_ensure();
 
 	vendor_kernel_enabled = true;
 	LKM4CTR_INFO("vendor_kernel", "loaded (%d hook(s) installed)", total_hooked);

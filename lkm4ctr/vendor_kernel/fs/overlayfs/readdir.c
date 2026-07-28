@@ -4,6 +4,24 @@
  * Copyright (C) 2011 Novell Inc.
  */
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_check_whiteouts, ovl_dir_read, ovl_remap_lower_ino,
+ * ovl_cache_update, ovl_iterate_real, ovl_iterate, ovl_dir_llseek,
+ * ovl_dir_open_realfile, ovl_dir_fsync, ovl_check_empty_dir.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -273,7 +291,7 @@ static void ovl_cache_put(struct ovl_dir_file *od, struct inode *inode)
 	}
 }
 
-static bool ovl_fill_merge(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_merge(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
@@ -287,7 +305,7 @@ static bool ovl_fill_merge(struct dir_context *ctx, const char *name,
 		return ovl_fill_lowest(rdd, name, namelen, offset, ino, d_type);
 }
 
-static int ovl_check_whiteouts(const struct path *path, struct ovl_readdir_data *rdd)
+__nocfi static int ovl_check_whiteouts(const struct path *path, struct ovl_readdir_data *rdd)
 {
 	int err;
 	struct ovl_cache_entry *p;
@@ -314,7 +332,7 @@ static int ovl_check_whiteouts(const struct path *path, struct ovl_readdir_data 
 	return err;
 }
 
-static inline int ovl_dir_read(const struct path *realpath,
+__nocfi static inline int ovl_dir_read(const struct path *realpath,
 			       struct ovl_readdir_data *rdd)
 {
 	struct file *realfile;
@@ -452,7 +470,7 @@ static struct ovl_dir_cache *ovl_cache_get(struct dentry *dentry)
 }
 
 /* Map inode number to lower fs unique range */
-static u64 ovl_remap_lower_ino(u64 ino, int xinobits, int fsid,
+__nocfi static u64 ovl_remap_lower_ino(u64 ino, int xinobits, int fsid,
 			       const char *name, int namelen, bool warn)
 {
 	unsigned int xinoshift = 64 - xinobits;
@@ -485,7 +503,7 @@ static u64 ovl_remap_lower_ino(u64 ino, int xinobits, int fsid,
  * Also checks the overlay.whiteout xattr by doing a full lookup which will return
  * negative in this case.
  */
-static int ovl_cache_update(const struct path *path, struct ovl_cache_entry *p, bool update_ino)
+__nocfi static int ovl_cache_update(const struct path *path, struct ovl_cache_entry *p, bool update_ino)
 
 {
 	struct dentry *dir = path->dentry;
@@ -563,7 +581,7 @@ fail:
 	goto out;
 }
 
-static bool ovl_fill_plain(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_plain(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
@@ -684,7 +702,7 @@ struct ovl_readdir_translate {
 	bool xinowarn;
 };
 
-static bool ovl_fill_real(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_fill_real(struct dir_context *ctx, const char *name,
 			   int namelen, loff_t offset, u64 ino,
 			   unsigned int d_type)
 {
@@ -723,7 +741,7 @@ static bool ovl_is_impure_dir(struct file *file)
 
 }
 
-static int ovl_iterate_real(struct file *file, struct dir_context *ctx)
+__nocfi static int ovl_iterate_real(struct file *file, struct dir_context *ctx)
 {
 	int err;
 	struct ovl_dir_file *od = file->private_data;
@@ -766,7 +784,7 @@ static int ovl_iterate_real(struct file *file, struct dir_context *ctx)
 }
 
 
-static int ovl_iterate(struct file *file, struct dir_context *ctx)
+__nocfi static int ovl_iterate(struct file *file, struct dir_context *ctx)
 {
 	struct ovl_dir_file *od = file->private_data;
 	struct dentry *dentry = file->f_path.dentry;
@@ -831,7 +849,7 @@ out:
 	return err;
 }
 
-static loff_t ovl_dir_llseek(struct file *file, loff_t offset, int origin)
+__nocfi static loff_t ovl_dir_llseek(struct file *file, loff_t offset, int origin)
 {
 	loff_t res;
 	struct ovl_dir_file *od = file->private_data;
@@ -871,7 +889,7 @@ out_unlock:
 	return res;
 }
 
-static struct file *ovl_dir_open_realfile(const struct file *file,
+__nocfi static struct file *ovl_dir_open_realfile(const struct file *file,
 					  const struct path *realpath)
 {
 	struct file *res;
@@ -925,7 +943,7 @@ struct file *ovl_dir_real_file(const struct file *file, bool want_upper)
 	return realfile;
 }
 
-static int ovl_dir_fsync(struct file *file, loff_t start, loff_t end,
+__nocfi static int ovl_dir_fsync(struct file *file, loff_t start, loff_t end,
 			 int datasync)
 {
 	struct file *realfile;
@@ -997,7 +1015,7 @@ const struct file_operations ovl_dir_operations = {
 	.release	= ovl_dir_release,
 };
 
-int ovl_check_empty_dir(struct dentry *dentry, struct list_head *list)
+__nocfi int ovl_check_empty_dir(struct dentry *dentry, struct list_head *list)
 {
 	int err;
 	struct ovl_cache_entry *p, *n;
@@ -1066,7 +1084,7 @@ void ovl_cleanup_whiteouts(struct ovl_fs *ofs, struct dentry *upper,
 	inode_unlock(upper->d_inode);
 }
 
-static bool ovl_check_d_type(struct dir_context *ctx, const char *name,
+static VNS_OVL_FILLDIR_T ovl_check_d_type(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {

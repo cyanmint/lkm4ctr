@@ -17,7 +17,9 @@ Once vendored namespaces are installed on the real `task_struct->nsproxy`/`cred-
 
 The fix: **all 4 caches are now entirely module-owned**, created via `kmem_cache_create()` in each subsystem's own init function (`vns_uts_ns_init()`, `vns_nsproxy_cache_init()`, `vns_pid_ns_init()`, `vns_user_ns_init()`) instead of ever being resolved from the running kernel. `create_uts_ns()`/`create_nsproxy()`/`create_pid_namespace()`/`alloc_user_ns()` in the corresponding vendored files still allocate/free through `kmem_cache_alloc()`/`kmem_cache_zalloc()`/`kmem_cache_free()` (matching upstream's alloc-vs-zalloc semantics), just against vendor_kernel's own caches -- no call-site changes were needed for this. `vns_compat_ready()` no longer treats any of the 4 caches as part of its readiness gate; `vendor_kernel_init()` fails closed with `-ENOMEM` only if `kmem_cache_create()` itself fails (extremely unlikely).
 
-Making the caches module-owned only solves half the problem: the real kernel's own exit path must now be kept from ever calling `kmem_cache_free()` against these module-owned objects at all, since it would use the wrong (real) cache pointer. `uts_namespace`/`pid_namespace`/`user_namespace` are safe by construction here: when the target's `CONFIG_UTS_NS`/`CONFIG_PID_NS`/`CONFIG_USER_NS` is `n` (the scenario vendor_kernel targets), the real kernel's own `put_uts_ns()`/`put_pid_ns()`/`__put_user_ns()` compile to no-ops (see "Namespace refcounting is fully self-contained" below), so the real exit path never reaches a real `kmem_cache_free()` call for these three types regardless. `nsproxy` itself is the one unconditional hazard: `kernel/nsproxy.c` is always `obj-y`, so the real kernel's `free_nsproxy()` *always* unconditionally calls `kmem_cache_free(nsproxy_cachep, ns)` — a guaranteed "wrong slab cache" panic if `ns` is one of vendor_kernel's own objects.
+Making the caches module-owned only solves half the problem: the real kernel's own exit path must now be kept from ever calling `kmem_cache_free()` against these module-owned objects at all, since it would use the wrong (real) cache pointer. `uts_namespace`/`user_namespace` are safe by construction here: when the target's `CONFIG_UTS_NS`/`CONFIG_USER_NS` is `n` (the scenario vendor_kernel targets), the real kernel's own `put_uts_ns()`/`__put_user_ns()` compile to no-ops (see "Namespace refcounting is fully self-contained" below), so the real exit path never reaches a real `kmem_cache_free()` call for these two types regardless. `nsproxy` itself is the one unconditional hazard: `kernel/nsproxy.c` is always `obj-y`, so the real kernel's `free_nsproxy()` *always* unconditionally calls `kmem_cache_free(nsproxy_cachep, ns)` — a guaranteed "wrong slab cache" panic if `ns` is one of vendor_kernel's own objects.
+
+`pid_namespace` has a similar but subtler unconditional hazard, *not* fully closed by `CONFIG_PID_NS=n`: `kernel/pid.c` (`alloc_pid()`/`free_pid()`/`put_pid()`) is always `obj-y` and always calls `get_pid_ns()`/`put_pid_ns()` on `task_active_pid_ns(current)` for every `struct pid` it allocates/frees, regardless of `CONFIG_PID_NS`. When the *target* kernel's own `CONFIG_PID_NS=n`, `get_pid_ns()`/`put_pid_ns()` are no-op `static inline`s, so this is harmless. But on a kernel that already ships real pid-namespace support (`CONFIG_PID_NS=y` -- e.g. the CI "patched" test kernels), `get_pid_ns()`/`put_pid_ns()` are real, unconditional refcount ops, called on whatever `pid_namespace` ends up installed as `task_active_pid_ns()` -- including one of vendor_kernel's own `vns_pid_ns_cachep` objects, whenever `unshare(CLONE_NEWPID)`/`clone(CLONE_NEWPID, ...)` installs one. The real `put_pid_ns()` then eventually reaches the real kernel's own `destroy_pid_namespace()`, which `kmem_cache_free()`s the object against the real, private `pid_ns_cachep` -- a "Wrong slab cache" mismatch (`cache_from_obj()` self-corrects the actual free using `virt_to_cache()`, so this is not a memory-corruption risk, but it is a real, avoidable defect, observed as a live WARNING splat in `delayed_free_pidns()`). To close this, `vns_copy_pid_ns()`/`vns_put_pid_ns()` (`kernel/pid_namespace.c`) delegate pid namespace creation and teardown entirely to the real, by-name-resolved `copy_pid_ns()`/`put_pid_ns()` (`vns_real_copy_pid_ns_fn`/`vns_real_put_pid_ns_fn`, tracked together via `vns_pidns_runtime_supported`) whenever both resolve, i.e. whenever the running kernel already has real pid-namespace support -- the resulting object is then allocated from, and always freed against, the real `pid_ns_cachep`, so there is no mismatch to begin with. `vns_task_exit_cleanup()` (`kernel/nsproxy.c`) already treats `vns_pidns_runtime_supported` as "the real `zap_pid_ns_processes()` will not `BUG()`", so this is a natural extension of an existing runtime check rather than a new one.
 
 To close this, `kernel/nsproxy.c` adds:
 
@@ -204,12 +206,12 @@ The vendored SysV IPC (`ipc/msg.c`, `ipc/sem.c`, `ipc/shm.c`, `ipc/util.c`, `ipc
 
 - **Unconditional redirect.** On `vendor_kernel`'s primary target (`CONFIG_SYSVIPC=n && CONFIG_POSIX_MQUEUE=n`) the real syscalls are `sys_ni_syscall()` stubs returning `-ENOSYS`. Even so, `COND_SYSCALL(msgget)`/etc. in `kernel/sys_ni.c` still emit the `__arm64_sys_msgget`/`__x64_sys_msgget` symbols as weak aliases of the ni-stub, so `shadow_hook_resolve()` finds a real function entry to hook. Unlike the `unshare`/`clone` hooks (which pass native-flag requests through to the real syscall), the IPC hooks *always* call the vendored `vns_*` handler — there is nothing useful to pass through to.
 - **Per-syscall-call namespace lookup gives real isolation.** Each vendored handler resolves the caller's effective `ipc_namespace` internally through `vns_current_ipc_ns()` → `vns_task_ipc_ns(current)` at call time, rather than any per-hook bookkeeping. A task that did `unshare(CLONE_NEWIPC)` (or `clone(CLONE_NEWIPC, …)`/`setns()`) has a real vendored `ipc_namespace` installed on `task_struct->nsproxy->ipc_ns` by `vns_copy_ipcs()`/`create_ipc_ns()` (`ipc/namespace.c`), so it operates against its own isolated message-queue / SysV IDRs; every other task shares the module-owned default. `CLONE_NEWIPC` is already part of `VNS_CLONE_FLAGS`, so this reuses the existing `vns_unshare_nsproxy_namespaces()` install path unchanged.
-- **Module-owned default namespace, always vendored.** Tasks that never unshared need a fully-initialised namespace. `vns_ipc_default_init()` (in `glue/vendor_kernel_ipc_syscalls.c`, called from `vendor_kernel_init()` before the hooks go live) builds the mqueue half (`vns_mqueue_fs_init()`: registers the real `mqueue` filesystem type, installs the mq sysctls, runs `mq_init_ns()`; then `vns_mqueue_dev_ensure()` proactively creates and mounts a working `/dev/mqueue`, see "`/dev/mqueue` availability" below) and the SysV half (ipc sysctls + `msg_init_ns()`/`sem_init_ns()`/`shm_init_ns()`) on the vendored `vns_default_ipc_ns` singleton (upstream's `init_ipc_ns`, renamed via `#define init_ipc_ns vns_default_ipc_ns`) — replicating the piecemeal `device_initcall()`/`module_init()` setup that never runs for an out-of-tree module. This build is **unconditional**: it runs regardless of the running kernel's own `CONFIG_SYSVIPC`/`CONFIG_POSIX_MQUEUE`, and `vns_ipc_active_default()` **always** returns `&vns_default_ipc_ns`, never the real kernel's `init_ipc_ns`.
+- **Module-owned default namespace, always vendored.** Tasks that never unshared need a fully-initialised namespace. `vns_ipc_default_init()` (in `glue/vendor_kernel_ipc_syscalls.c`, called from `vendor_kernel_init()` before the hooks go live) builds the mqueue half (`vns_mqueue_fs_init()`: registers the real `mqueue` filesystem type, installs the mq sysctls, runs `mq_init_ns()`) and the SysV half (ipc sysctls + `msg_init_ns()`/`sem_init_ns()`/`shm_init_ns()`) on the vendored `vns_default_ipc_ns` singleton (upstream's `init_ipc_ns`, renamed via `#define init_ipc_ns vns_default_ipc_ns`) — replicating the piecemeal `device_initcall()`/`module_init()` setup that never runs for an out-of-tree module. This build is **unconditional**: it runs regardless of the running kernel's own `CONFIG_SYSVIPC`/`CONFIG_POSIX_MQUEUE`, and `vns_ipc_active_default()` **always** returns `&vns_default_ipc_ns`, never the real kernel's `init_ipc_ns`.
 - **No dependency on the real kernel's ipc code, even when it ships it (self-contained like UTS/PID/USER_NS).** The IPC subsystem is deliberately as self-contained as the UTS/PID/USER namespaces are (see "Namespace refcounting is fully self-contained"): every namespace-setup call site in `create_ipc_ns()`/`vns_free_ipc_ns()` (`mq_init_ns`/`msg_init_ns`/`sem_init_ns`/`shm_init_ns`, `setup_mq_sysctls`/`setup_ipc_sysctls`/`retire_mq_sysctls`/`retire_ipc_sysctls`, `mq_put_mnt`/`mq_clear_sbinfo`) is unconditionally `#define`-aliased in `vendor_kernel.h` to its vendored `vns_*` implementation in `ipc/mqueue.c`/`ipc/msg.c`/`ipc/sem.c`/`ipc/shm.c` — none of them is gated behind `#ifdef CONFIG_SYSVIPC`/`#ifdef CONFIG_POSIX_MQUEUE`, so none can ever fall through to a real kernel symbol. `vns_init_ipc_ns_ptr` (the real, non-exported `init_ipc_ns`, resolved best-effort via `shadow_hook_resolve("init_ipc_ns")`) is kept purely for cosmetic bookkeeping and is **never** substituted for the vendored default: it is not written onto `vns_default_ipc_ns`, not returned by `vns_ipc_active_default()`, and `vns_init_nsproxy.ipc_ns` is pointed at the vendored default (`&vns_default_ipc_ns`) rather than at it. As a belt-and-braces guard, `vns_task_ipc_ns()` explicitly rejects `vns_init_ipc_ns_ptr` (via `vns_ipc_ns_is_vendored()`) and falls back to the vendored default — this catches the one inheritance path where a task that unshared a *non*-IPC namespace on a `CONFIG_SYSVIPC=y` kernel would otherwise carry the real `init_ipc_ns` by reference (`vns_copy_ipcs()` returns `get_ipc_ns(old)` when `CLONE_NEWIPC` is absent). The net effect: real-kernel-owned message-queue / SysV state can never enter the shadowed syscall paths.
 - **`vns_free_ipc_ns()` fully tears down a per-task IPC namespace, mirroring upstream `free_ipc_ns()`.** `sem_exit_ns()`/`msg_exit_ns()`/`shm_exit_ns()` (`ipc/sem.c`/`ipc/msg.c`/`ipc/shm.c`, `#define`-aliased to `vns_sem_exit_ns`/`vns_msg_exit_ns`/`vns_shm_exit_ns`) are called from `ipc/namespace.c`'s `vns_free_ipc_ns()` exactly where upstream calls them, right after `mq_put_mnt(ns)`. A previous version of this function skipped all three, reasoning they were "not exported to out-of-tree modules" — but they don't need to be: they are vendored, non-static functions linked into the very same `lkm4ctr.ko`, resolved at link time like every other cross-file call in this module. Skipping them leaked every SysV queue/array/segment still registered in the namespace and, critically, never called `percpu_counter_destroy()` on `msg_exit_ns()`'s own `ns->percpu_msg_bytes`/`percpu_msg_hdrs` (`vns_msg_accounting_destroy()`), so the immediately-following `kfree(ns)` freed memory that was still linked into the kernel-wide `percpu_counters` list. That corrupted the list for the next *unrelated* `percpu_counter_init()` call anywhere in the kernel (observed via a real `cgroup_mkdir` -> `mem_cgroup_css_alloc` -> `wb_domain_init` -> `fprop_global_init` -> `__percpu_counter_init` call site, minutes after the container that triggered the leaking `unshare(CLONE_NEWIPC)` had already exited): `kernel BUG at lib/list_debug.c:29` ("list_add corruption"). This may also be the true root cause (or a contributing one) behind the similarly-shaped `percpu_counters` corruption documented below for `CLONE_NEWNET`/`xfrm4_net_init`, since both share the same global list.
 - **Non-exported symbol resolution.** The vendored `ipc/*.c` pull in ~40 non-exported kernel helpers (mm, `wake_q`, ucounts, vfs, netlink, audit and the `security_*` LSM ipc/msg/sem/shm hooks) plus a handful of data symbols (`ipc_mni`, `ipc_mni_shift`, `ipc_min_cycle`, `sysctl_overcommit_memory`). `glue/vendor_kernel_ipc_compat.c` resolves the functions by name via `shadow_hook_resolve()` (reliable for kallsyms *function* symbols) with safe fallback stubs, and defines the data symbols directly from their upstream constant values; the POSIX-mqueue exact-name wrappers there also cover trimmed VFS/mount helpers such as `getname`/`putname`, `dentry_open`, `fs_context_for_mount`, `fc_mount`, `get_tree_{nodev,keyed}` and `simple_lookup`, so production GKI `CONFIG_TRIM_UNUSED_KSYMS` no longer leaves `mq_open()`/`mq_unlink()` unresolved at insmod time. This mirrors the `glue/vendor_kernel_compat.c` strategy used for the namespace core.
 - **Non-target caveat.** On a kernel that genuinely ships `CONFIG_SYSVIPC=y`/`CONFIG_POSIX_MQUEUE=y` (e.g. the host used for local `make` type-checking), loading these hooks *shadows* the already-working syscalls and routes them through the vendored code operating on the vendored `vns_default_ipc_ns` (or a per-task vendored `ipc_namespace`) — **not** the running kernel's real `init_ipc_ns`, per the self-containment guarantee above. That is still not the intended deployment — `vendor_kernel` targets kernels where these configs are `n` — but it is harmless in practice since the vendored implementation is a faithful copy of the same kernel version's code, and it will never corrupt or read the host kernel's own message queues / SysV IDRs.
-- **`/dev/mqueue` availability, without requiring `--ipc host`.** `mqueue_fs_type.name` (`ipc/mqueue.c`) is registered under the real name `"mqueue"`, not a module-private alias, so an unmodified `runc`/`containerd`/`dockerd`'s own `mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC, ...)` during container init finds it through the ordinary `get_fs_type("mqueue")` lookup and just works — no `--ipc host` workaround needed. `register_filesystem()` tolerates losing that name to a real `CONFIG_POSIX_MQUEUE=y` kernel's own builtin mqueue filesystem (`-EBUSY`): `mqueue_fs_type_registered` tracks whether registration actually succeeded, so `vns_mqueue_fs_exit()`/the error path never call `unregister_filesystem()` on a struct that was never linked in, and `mq_create_mount()`'s own `fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT)` (used for the module's own internal ipc_namespace bookkeeping) never depends on the name lookup succeeding either way, since it references the local struct pointer directly. On top of that, `glue/vendor_kernel_ipc_mount.c`'s `vns_mqueue_dev_ensure()` (called from `vns_ipc_default_init()`) proactively creates `/dev/mqueue` and mounts it at module load time, since `lkm4ctr.ko` is typically insmod'd late (e.g. a KernelSU/Magisk post-fs-data module), well after init.rc's own one-shot `mount mqueue mqueue /dev/mqueue ...` line already ran and silently failed with `-ENODEV` (init never retries a failed boot-time mount). It proactively mounts the real, vendored `mqueue` filesystem type first, falling back to `tmpfs` only if that unexpectedly fails. All of the VFS helpers this needs (`path_mount`, `vfs_mkdir`, `kern_path`/`kern_path_create`/`done_path_create`, `path_put`) are resolved at runtime via `shadow_hook_resolve()`, same as the rest of vendor_kernel's non-exported-symbol handling; this step is best-effort and never fails module init.
+- **`/dev/mqueue` availability, without requiring `--ipc host`.** `mqueue_fs_type.name` (`ipc/mqueue.c`) is registered under the real name `"mqueue"`, not a module-private alias, so an unmodified `runc`/`containerd`/`dockerd`'s own `mount("mqueue", "/dev/mqueue", "mqueue", MS_NOSUID|MS_NODEV|MS_NOEXEC, ...)` during container init finds it through the ordinary `get_fs_type("mqueue")` lookup and just works — no `--ipc host` workaround needed. `register_filesystem()` tolerates losing that name to a real `CONFIG_POSIX_MQUEUE=y` kernel's own builtin mqueue filesystem (`-EBUSY`): `mqueue_fs_type_registered` tracks whether registration actually succeeded, so `vns_mqueue_fs_exit()`/the error path never call `unregister_filesystem()` on a struct that was never linked in, and `mq_create_mount()`'s own `fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT)` (used for the module's own internal ipc_namespace bookkeeping) never depends on the name lookup succeeding either way, since it references the local struct pointer directly. On top of that, `glue/vendor_kernel_ipc_mount.c`'s `vns_mqueue_dev_ensure()` (called from `vendor_kernel_init()` itself, deliberately last -- after every other step that could still fail has already succeeded; see that call site's own comment for why) proactively creates `/dev/mqueue` and mounts it at module load time, since `lkm4ctr.ko` is typically insmod'd late (e.g. a KernelSU/Magisk post-fs-data module), well after init.rc's own one-shot `mount mqueue mqueue /dev/mqueue ...` line already ran and silently failed with `-ENODEV` (init never retries a failed boot-time mount). It proactively mounts the real, vendored `mqueue` filesystem type first, falling back to `tmpfs` only if that unexpectedly fails. All of the VFS helpers this needs (`path_mount`, `vfs_mkdir`, `kern_path`/`kern_path_create`/`done_path_create`, `path_put`) are resolved at runtime via `shadow_hook_resolve()`, same as the rest of vendor_kernel's non-exported-symbol handling; this step is best-effort and never fails module init. This proactive `/dev/mqueue` mount gets its own superblock and root inode (out of `mqueue_inode_cachep`), separate from `mq_create_mount()`'s internal `SB_KERNMOUNT` instance backing `ipc_namespace::mq_mnt` — so `vns_mqueue_dev_teardown()` (called from `vns_ipc_default_exit()`, before `vns_mqueue_fs_exit()`'s `kmem_cache_destroy(mqueue_inode_cachep)`) detaches it (via `path_umount(..., MNT_DETACH)`, resolved the same way) whenever `vns_mqueue_dev_ensure()` actually performed the mount itself. Unlike `mq_create_mount()`'s `SB_KERNMOUNT` instance (`MNT_INTERNAL`, so its final `mntput()` runs `cleanup_mnt()`/`deactivate_super()` synchronously via `kern_unmount()`), this proactive mount is a normal, namespace-attached mount: `path_umount()` only detaches it from the namespace, while the real superblock/inode teardown (`cleanup_mnt()`/`deactivate_super()`) is unconditionally deferred by the kernel to `task_work` run the next time the *current* task returns to userspace — well after `vns_mqueue_dev_teardown()` (and even `insmod`/`rmmod` itself) returns. `kmem_cache_destroy(mqueue_inode_cachep)` cannot be forced to wait for that; calling it anyway while the mount's root inode is still alive trips slub's "Objects remaining ... on `__kmem_cache_shutdown()`" BUG immediately, followed by a use-after-free `Oops`/panic once the deferred `task_work` eventually runs `deactivate_super()` against the now-freed cache. So `vns_mqueue_dev_teardown()` returns a `bool` telling `vns_mqueue_fs_exit()` whether it actually had a mount of its own to detach; when true, `vns_mqueue_fs_exit()` skips `kmem_cache_destroy()` altogether and leaves `mqueue_inode_cachep` allocated — a small, bounded, one-time leak, but the only way to avoid the guaranteed panic given this kernel's mount-teardown semantics.
 - **`sysvsem`/`sysvshm` exit-time state is self-contained too.** Upstream keeps the per-task semaphore-undo list (`task_struct->sysvsem`) and the per-task orphaned-shm-segment list (`task_struct->sysvshm`) as real `task_struct` members, but on a `CONFIG_SYSVIPC=n` target kernel those members don't exist in `struct task_struct` at all. `ipc/sem.c`/`ipc/shm.c` therefore keep this state in vendor_kernel's own per-task side table (the same `struct vns_task` registry `glue/vendor_kernel_module.c` already uses for the per-task `nsproxy` pointer) instead of the real `task_struct` fields: `vns_copy_semundo()`/`vns_prepare_exit_sem()`/`vns_exit_sem()` and `vns_prepare_exit_shm()`/`vns_exit_shm()` are called from the clone/exit paths (`glue/vendor_kernel_syscalls.c`'s `vendor_kernel_clone_track()`, `kernel/nsproxy.c`'s `vns_task_exit_cleanup()`) instead of the upstream `copy_semundo()`/`exit_sem()`/`exit_shm()` call sites baked into the real `fork()`/`do_exit()`. On a target that genuinely ships `CONFIG_SYSVIPC=y` (so `task_struct` does carry real `sysvsem`/`sysvshm`), the real fields are used directly instead, guarded by `#if defined(CONFIG_SYSVIPC)`.
 
 ## Module-owned default cgroup namespace, always vendored
@@ -235,6 +237,125 @@ dereferenced -- building a real, isolated per-namespace `root_cset` would
 require duplicating the running kernel's non-exported cgroup core (`css_set`
 table, `cgroup_mutex`, `task_css_set()`), which is out of scope for this
 module (see "Known remaining gaps" below).
+
+## Clang CFI (`CONFIG_CFI_CLANG`) compatibility
+
+Production Android GKI kernels (5.15+) are typically built with
+`CONFIG_CFI_CLANG=y`, which instruments every indirect call with a
+compile-time type-hash check. `vendor_kernel`/`shadow_hijack` fundamentally
+call kernel-internal functions by resolving their runtime address via
+`shadow_hook_resolve()` (the `register_kprobe()` trick) and invoking them
+through a function pointer; since the compiler never sees a real
+declaration/definition pair for these indirect calls the way CFI's checker
+expects, every one of them is a guaranteed, fatal false positive under CFI
+(observed as `Kernel panic - not syncing: CFI failure` during
+`vendor_kernel_init()`). `lkm4ctr/Makefile` disables CFI instrumentation
+(`CFLAGS_REMOVE_*.o += $(CC_FLAGS_CFI)`) for every object that performs
+this kind of call -- `shadow_hijack.c`/`shadow_cgdevices.c` (the hook
+engines themselves), every `glue/vendor_kernel_*_compat.c` real-name
+wrapper (e.g. the resolved `fs_context_for_mount()`/`fc_mount()` used by
+`vns_mq_init_ns()`/`vns_mqueue_fs_init()`), and the vendored overlayfs
+sources (whose `glue/vendor_kernel_ovl_vfs_compat.h` macro-redirects every
+VFS helper call site directly to a resolved pointer) -- mirroring how
+upstream's own `arch/arm64/kernel/Makefile` disables `CC_FLAGS_FTRACE` for
+`ftrace.o`/`insn.o` for the same underlying reason (code that must
+transfer control to an address only known at runtime cannot satisfy a
+compile-time check). CFI protection for the rest of the running kernel is
+entirely unaffected.
+
+Several objects are deliberately kept **out** of this CFI-disabled set even
+though they use `shadow_hook_resolve()`-based lookups, because they define
+functions the real, CFI-instrumented kernel itself calls back into
+indirectly (a `kprobe`/`kretprobe` `pre_handler`/`handler`, a
+`ftrace_ops.func`, or a `file_operations`/`proc_ops`/`file_system_type`
+struct wired into a real mount/procfs entry). Compiling such an object with
+CFI disabled strips the KCFI type-hash prefix the compiler would otherwise
+emit for those callback functions, so the *caller's* (real kernel's) CFI
+check on the indirect call into them fails instead of the module's own
+call -- observed as `CFI failure at alloc_fs_context+... (target:
+mqueue_init_fs_context+...)` and `CFI failure at
+kprobe_breakpoint_handler+... (target: shadow_hook_pre_handler+...)`
+immediately on `insmod`. For each of these, either the whole file makes no
+unsafe resolved-pointer indirect call at all, or the specific function(s)
+that do are marked with the kernel's own `__nocfi` function attribute
+(`<linux/compiler_types.h>`) instead, so the rest of the object keeps
+ordinary CFI instrumentation:
+- `shadow_hijack/shadow_hijack.o` -- defines `shadow_hook_pre_handler()`
+  (kprobe `pre_handler`) and `shadow_hook_thunk()` (`ftrace_ops.func`); the
+  ftrace-backend `shadow_hook_install()`/`shadow_hook_remove()` (the only
+  functions here making a genuine resolved-pointer call, through
+  `shadow_{,un}register_ftrace_function_fn`/`shadow_ftrace_set_filter_ip_fn`)
+  are marked `__nocfi` individually.
+- `vendor_kernel/kernel/nsproxy.o` -- defines `vns_exit_kprobe_pre_handler()`
+  (kprobe `pre_handler` on `do_exit()`); makes no unsafe indirect calls of
+  its own.
+- `vendor_kernel/ipc/util.o` -- registers `sysvipc_proc_ops` via
+  `proc_create_data()`; makes no unsafe indirect calls of its own.
+- `vendor_kernel/ipc/shm.o` -- defines `shm_file_operations`/
+  `shm_file_operations_huge`/`shm_vm_ops`; makes no unsafe indirect calls of
+  its own (unlike `msg.c`/`sem.c`/`util.c`/`compat.c`, which stay
+  CFI-disabled).
+- `vendor_kernel/glue/vendor_kernel_procfs.o` -- defines
+  `vns_setgroups_fops` (the `/proc/*/setgroups` `file_operations`); the one
+  genuine resolved-pointer call here (`vns_setgroups_create_fd()`, through
+  `anon_inode_getfd_secure_fn`) is marked `__nocfi` individually.
+- `vendor_kernel/ipc/mqueue.o` -- registers `mqueue_fs_type`/
+  `mqueue_super_ops`/`mqueue_file_operations`, which the real kernel calls
+  back into once mounted (e.g. `alloc_fs_context()`'s
+  `fs_type->init_fs_context(fc)` call into `mqueue_init_fs_context()`).
+  Makes no unsafe indirect calls of its own (`fs_context_for_mount()`/
+  `fc_mount()` etc. are ordinary by-name calls into the compat wrapper
+  functions in `glue/vendor_kernel_ipc_compat.o`, which stays CFI-disabled
+  for the actual resolved-pointer call inside it).
+- `vendor_kernel/ipc/namespace.o` -- defines `vns_ipcns_operations` (a
+  `proc_ns_operations`, called back e.g. via `/proc/pid/ns/ipc` opens) and
+  `free_ipc()` (a `work_struct` callback the real kernel's own
+  `process_one_work()` calls back into on the `free_ipc_work` workqueue
+  item). A live `CFI failure at process_one_work+... (target:
+  free_ipc+...)` panic from this was observed in CI. Makes no unsafe
+  indirect calls of its own (`vns_alloc_inum()`/`vns_free_inum()`/
+  `vns_put_user_ns()` are ordinary by-name calls into
+  `glue/vendor_kernel_module.o`, which stays CFI-disabled;
+  `sem_exit_ns()`/`msg_exit_ns()`/`shm_exit_ns()` are ordinary by-name
+  calls into their own vendored files).
+- `vendor_kernel/kernel/utsname.o`, `vendor_kernel/kernel/pid_namespace.o`,
+  `vendor_kernel/kernel/user_namespace.o`,
+  `vendor_kernel/kernel/cgroup/namespace.o`,
+  `vendor_kernel/kernel/time/namespace.o`, `vendor_kernel/fs/nsfs.o` --
+  each defines its own `proc_ns_operations` struct
+  (`vns_utsns_operations`, `vns_pidns_operations`/
+  `vns_pidns_for_children_operations`, `vns_userns_operations`,
+  `vns_cgroupns_operations`, `vns_timens_operations`/
+  `vns_timens_for_children_operations`) and/or (for `nsfs.o`) the `nsfs`
+  pseudo-filesystem's own dentry/file callbacks, all real-kernel-invoked
+  via `/proc/pid/ns/*` opens and `ns_get_path()`. None make any unsafe
+  resolved-pointer indirect calls of their own (`user_namespace.o`'s
+  `bsearch()` calls resolve to `<linux/bsearch.h>`'s self-contained
+  `__inline_bsearch()` via the macro redirect in `vendor_kernel.h`, not a
+  kallsyms-resolved pointer).
+
+The vendored overlayfs sources (`vendor_kernel/fs/overlayfs/*.c`) also
+define real-kernel-invoked callback structs (`super_operations`,
+`file_operations`, `file_system_type`, ...) while pervasively using
+`glue/vendor_kernel_ovl_vfs_compat.h`'s macro-redirected resolved-pointer
+calls throughout nearly every function in every file. Untangling that into
+a precise per-function `__nocfi` split (as done for the objects above) is a
+larger, separate effort; this remains a known gap where the same class of
+CFI panic could in principle occur once overlay mounts are actually
+exercised on a `CONFIG_CFI_CLANG=y` kernel.
+
+## `lookup_one` symbol resolution (KMI >= 6.3)
+
+`common/lkm4ctr_compat.h`'s `lkm4ctr_lookup_one_len()` calls the
+idmap-taking `lookup_one()` directly by name on kernels >= 6.3, since that
+replaced the older `lookup_one_len()` API `ipc/mqueue.c` needs here.
+Unlike `lookup_one_len()` (already wrapped) `lookup_one()` had no
+module-local real-name override, so on any KMI where
+`CONFIG_TRIM_UNUSED_KSYMS` drops it from the exported symbol table (e.g.
+android15-6.6+) `insmod` failed with `Unknown symbol lookup_one`.
+`glue/vendor_kernel_ipc_compat.c` now defines a real-name `lookup_one()`
+wrapper, resolved via `shadow_hook_resolve()` like `inode_permission()`/
+`vfs_unlink()` right next to it.
 
 ## Known remaining gaps
 

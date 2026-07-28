@@ -1,5 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_xattr_set, ovl_xattr_get, ovl_can_list, ovl_listxattr.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -52,7 +68,7 @@ bool ovl_is_private_xattr(struct super_block *sb, const char *name)
 	return ovl_is_own_xattr(sb, name) && !ovl_is_escaped_xattr(sb, name);
 }
 
-static int ovl_xattr_set(struct dentry *dentry, struct inode *inode, const char *name,
+__nocfi static int ovl_xattr_set(struct dentry *dentry, struct inode *inode, const char *name,
 			 const void *value, size_t size, int flags)
 {
 	int err;
@@ -100,7 +116,7 @@ out:
 	return err;
 }
 
-static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char *name,
+__nocfi static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char *name,
 			 void *value, size_t size)
 {
 	ssize_t res;
@@ -114,7 +130,7 @@ static int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char 
 	return res;
 }
 
-static bool ovl_can_list(struct super_block *sb, const char *s)
+__nocfi static bool ovl_can_list(struct super_block *sb, const char *s)
 {
 	/* Never list private (.overlay) */
 	if (ovl_is_private_xattr(sb, s))
@@ -128,7 +144,7 @@ static bool ovl_can_list(struct super_block *sb, const char *s)
 	return ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
 }
 
-ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
+__nocfi ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
 {
 	struct dentry *realdentry = ovl_dentry_real(dentry);
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
@@ -198,6 +214,71 @@ static char *ovl_xattr_escape_name(const char *prefix, const char *name)
 	return escaped;
 }
 
+/*
+ * lkm4ctr [BUILD-COMPAT]: struct xattr_handler's ->get()/->set() member
+ * signatures differ on VNS_OVL_TIER_OLD (<5.12): ->get() takes a trailing
+ * `int flags` argument that MID/NEW tiers dropped, and ->set() has no
+ * idmap/mnt_userns argument at all (idmapped mounts don't exist yet, see
+ * the VNS_OVL_TIER_OLD note near ovl_mnt_idmap() in
+ * vendor_kernel_ovl_vfs_compat.h). Verified against
+ * include/linux/xattr.h on android12-5.10/android13-5.10 (OLD) vs.
+ * android14-6.1 (MID) and android16-6.12 (NEW).
+ */
+#if VNS_OVL_TIER_OLD
+static int ovl_own_xattr_get(const struct xattr_handler *handler,
+			     struct dentry *dentry, struct inode *inode,
+			     const char *name, void *buffer, size_t size,
+			     int flags)
+{
+	char *escaped;
+	int r;
+
+	escaped = ovl_xattr_escape_name(handler->prefix, name);
+	if (IS_ERR(escaped))
+		return PTR_ERR(escaped);
+
+	r = ovl_xattr_get(dentry, inode, escaped, buffer, size);
+
+	kfree(escaped);
+
+	return r;
+}
+
+static int ovl_own_xattr_set(const struct xattr_handler *handler,
+			     struct dentry *dentry, struct inode *inode,
+			     const char *name, const void *value,
+			     size_t size, int flags)
+{
+	char *escaped;
+	int r;
+
+	escaped = ovl_xattr_escape_name(handler->prefix, name);
+	if (IS_ERR(escaped))
+		return PTR_ERR(escaped);
+
+	r = ovl_xattr_set(dentry, inode, escaped, value, size, flags);
+
+	kfree(escaped);
+
+	return r;
+}
+
+static int ovl_other_xattr_get(const struct xattr_handler *handler,
+			       struct dentry *dentry, struct inode *inode,
+			       const char *name, void *buffer, size_t size,
+			       int flags)
+{
+	return ovl_xattr_get(dentry, inode, name, buffer, size);
+}
+
+static int ovl_other_xattr_set(const struct xattr_handler *handler,
+			       struct dentry *dentry, struct inode *inode,
+			       const char *name, const void *value,
+			       size_t size, int flags)
+{
+	return ovl_xattr_set(dentry, inode, name, value, size, flags);
+}
+#else /* !VNS_OVL_TIER_OLD */
 static int ovl_own_xattr_get(const struct xattr_handler *handler,
 			     struct dentry *dentry, struct inode *inode,
 			     const char *name, void *buffer, size_t size)
@@ -251,6 +332,7 @@ static int ovl_other_xattr_set(const struct xattr_handler *handler,
 {
 	return ovl_xattr_set(dentry, inode, name, value, size, flags);
 }
+#endif /* VNS_OVL_TIER_OLD */
 
 static const struct xattr_handler ovl_own_trusted_xattr_handler = {
 	.prefix	= OVL_XATTR_TRUSTED_PREFIX,
@@ -288,4 +370,4 @@ const struct xattr_handler * const *ovl_xattr_handlers(struct ovl_fs *ofs)
 		ovl_trusted_xattr_handlers;
 }
 
-#endif /* LINUX_VERSION_CODE in [KERNEL_VERSION(6, 12, 0), KERNEL_VERSION(6, 13, 0)) */
+#endif /* LINUX_VERSION_CODE in [KERNEL_VERSION(5, 10, 0), KERNEL_VERSION(6, 19, 0)) */

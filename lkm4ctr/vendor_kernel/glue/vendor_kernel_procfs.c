@@ -409,99 +409,17 @@ static long vendor_kernel_hook_readlink(const struct pt_regs *regs)
  * gid-map-set interactions real setgroups(7) has with a specific
  * unshare(CLONE_NEWUSER)'d namespace is unnecessary complexity for what
  * every observed caller only ever treats as a one-shot defensive probe.
+ *
+ * The actual file_operations callbacks (open/read/write) and
+ * vns_setgroups_create_fd() itself live in
+ * glue/vendor_kernel_procfs_setgroups.c, a separate translation unit kept
+ * out of lkm4ctr/Makefile's VNS_CFI_UNSAFE_OBJS: unlike the
+ * newfstatat/stat/lstat hooks below, those callbacks are called back into
+ * indirectly by the kernel's own (KCFI-checked) VFS and must keep ordinary
+ * CFI instrumentation to remain valid indirect-call targets. See that
+ * file's header comment for the full rationale.
  */
-static ssize_t vns_setgroups_read(struct file *file, char __user *ubuf,
-				   size_t count, loff_t *ppos)
-{
-	bool deny = !!file_inode(file)->i_private;
-	const char *str = deny ? "deny\n" : "allow\n";
-
-	return simple_read_from_buffer(ubuf, count, ppos, str, strlen(str));
-}
-
-static ssize_t vns_setgroups_write(struct file *file, const char __user *ubuf,
-				    size_t count, loff_t *ppos)
-{
-	struct inode *inode = file_inode(file);
-	char kbuf[8];
-	size_t n = min(count, sizeof(kbuf) - 1);
-
-	if (copy_from_user(kbuf, ubuf, n))
-		return -EFAULT;
-	kbuf[n] = '\0';
-	if (n && kbuf[n - 1] == '\n')
-		kbuf[n - 1] = '\0';
-
-	/*
-	 * Real setgroups(7): "allow" is only a no-op re-affirmation of the
-	 * default, "deny" latches permanently (a later "allow" is rejected
-	 * once denied). No other value is accepted.
-	 */
-	if (!strcmp(kbuf, "deny")) {
-		inode->i_private = (void *)1UL;
-	} else if (strcmp(kbuf, "allow") || inode->i_private) {
-		return -EINVAL;
-	}
-
-	*ppos += count;
-	return count;
-}
-
-/*
- * Only ever invoked when this inode is opened a *second* time, through the
- * "/proc/thread-self/fd/<n>" magic-link reopen every modern
- * runc/containerd performs on a freshly-opened procfs fd -- see
- * vns_setgroups_create_fd() below for why this callback needs to exist at
- * all.
- */
-static int vns_setgroups_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-static const struct file_operations vns_setgroups_fops = {
-	.owner		= THIS_MODULE,
-	.open		= vns_setgroups_open,
-	.read		= vns_setgroups_read,
-	.write		= vns_setgroups_write,
-	.llseek		= default_llseek,
-};
-
-typedef int (*vns_anon_inode_getfd_secure_fn)(const char *,
-					       const struct file_operations *,
-					       void *, int,
-					       const struct inode *);
-
-static long vns_setgroups_create_fd(void)
-{
-	vns_anon_inode_getfd_secure_fn anon_inode_getfd_secure_fn;
-	struct file *file;
-	int fd;
-
-	/*
-	 * anon_inode_getfd_secure() (not the plain, shared-singleton-inode
-	 * anon_inode_getfd()) is required here so the magic-link reopen
-	 * above succeeds, and the symbol still needs to be resolved via
-	 * shadow_hook_resolve() rather than called directly.
-	 */
-	anon_inode_getfd_secure_fn = (vns_anon_inode_getfd_secure_fn)
-		shadow_hook_resolve("anon_inode_getfd_secure");
-	if (!anon_inode_getfd_secure_fn)
-		return -ENOENT;
-
-	fd = anon_inode_getfd_secure_fn("[vns_setgroups]", &vns_setgroups_fops,
-					 NULL, O_RDWR | O_CLOEXEC, NULL);
-	if (fd < 0)
-		return fd;
-
-	file = fget(fd);
-	if (file) {
-		file_inode(file)->i_fop = &vns_setgroups_fops;
-		fput(file);
-	}
-
-	return fd;
-}
+long vns_setgroups_create_fd(void);
 
 static bool vns_path_wants_setgroups(int dfd, const char __user *upath)
 {

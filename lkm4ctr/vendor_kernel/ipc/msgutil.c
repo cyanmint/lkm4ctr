@@ -34,7 +34,12 @@ struct ipc_namespace init_ipc_ns = {
 #else
 	.ns.count = REFCOUNT_INIT(1),
 #endif
-	.user_ns = &init_user_ns,
+	/* [BUILD-COMPAT] .user_ns can't be initialized to &init_user_ns here:
+	 * init_user_ns is now a runtime pointer dereference (see
+	 * vendor_kernel.h), not a compile-time constant, so it can't appear
+	 * in a static initializer. Assigned instead in vns_ipc_default_init()
+	 * (glue/vendor_kernel_ipc_syscalls.c), once vns_real_init_user_ns has
+	 * been captured. */
 	.ns.inum = PROC_IPC_INIT_INO,
 #ifdef CONFIG_IPC_NS
 	.ns.ops = &ipcns_operations,

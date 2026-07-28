@@ -64,6 +64,16 @@
 #define _VNS_OVL_VFS_COMPAT_H
 
 /*
+ * Must be included before any other header in this file: it #defines
+ * init_user_ns (used by the nop_mnt_idmap alias below and by xattrs.c's
+ * ovl_can_list()), and several real kernel headers included further down
+ * (or transitively by this header's includers) have static inline helpers
+ * that reference that bare name directly -- see vendor_kernel_data_syms.h
+ * for the full rationale.
+ */
+#include "vendor_kernel_data_syms.h"
+
+/*
  * vfs_path_lookup() is not declared in any public header (only
  * fs/internal.h, unavailable to out-of-tree modules) -- it is itself
  * EXPORT_SYMBOL_NS(vfs_path_lookup, ANDROID_GKI_VFS_EXPORT_ONLY) in
@@ -80,6 +90,17 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 		     struct path *path);
 
 #include <linux/version.h>
+#include <linux/statfs.h>
+#include <linux/seq_file.h>
+#include <linux/uuid.h>
+#include <linux/fs_context.h>
+/* errseq.h/namei.h/mm.h: declarations for errseq_check()/lookup_positive_unlocked()/
+ * vma_set_file() respectively (added to VNS_OVL_VFS_COMPAT_LIST below). Included
+ * directly here (not relied upon transitively) so every consumer of this header
+ * sees the real prototype needed for the typeof()-based pass-1 declare. */
+#include <linux/errseq.h>
+#include <linux/namei.h>
+#include <linux/mm.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
@@ -119,6 +140,58 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_HAVE_BACKING_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
+
+/* kernel_file_open() exists since 6.5 (pre-6.10 with an extra `struct inode *`
+ * argument, dropped again at 6.10); vfs_parse_monolithic_sep() exists since
+ * 6.6. Both, like backing_file_open() above, are real kernel helpers that may
+ * be trimmed from the module symbol table on production GKI, so they must be
+ * resolved via kallsyms/kprobe (VNS_OVL_VFS_COMPAT_LIST) rather than called as
+ * a bare (modpost-visible, possibly-unexported) symbol whenever the running
+ * kernel is new enough to have them natively. */
+#define VNS_OVL_HAVE_KERNEL_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0))
+#define VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+
+#if VNS_OVL_HAVE_KERNEL_FILE_OPEN
+#define VNS_OVL_VFSC_KFOPEN_ENTRY(X) X(kernel_file_open)
+#else
+#define VNS_OVL_VFSC_KFOPEN_ENTRY(X)
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_OPEN
+#define VNS_OVL_VFSC_BFOPEN_ENTRY(X) X(backing_file_open)
+#else
+#define VNS_OVL_VFSC_BFOPEN_ENTRY(X)
+#endif
+#if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
+#define VNS_OVL_VFSC_VPMSEP_ENTRY(X) X(vfs_parse_monolithic_sep)
+#else
+#define VNS_OVL_VFSC_VPMSEP_ENTRY(X)
+#endif
+
+/* vma_set_file() (<linux/mm.h>) is real/linkable on MID and NEW, but is only
+ * ever reached by ovl_mmap()'s manual fallback path (file.c), which is only
+ * compiled in when VNS_OVL_HAVE_BACKING_FILE_RW is false -- i.e. always on
+ * MID, and on NEW-tier kernels in [6.3, 6.8). Like every other name here it
+ * may still be trimmed from the module symbol table, so resolve it whenever
+ * that fallback path is actually compiled. VNS_OVL_TIER_OLD predates
+ * vma_set_file() entirely and uses its own local reimplementation instead
+ * (see the shim further down this file). */
+#if !VNS_OVL_HAVE_BACKING_FILE_RW
+#define VNS_OVL_VFSC_VMASETFILE_ENTRY(X) X(vma_set_file)
+#else
+#define VNS_OVL_VFSC_VMASETFILE_ENTRY(X)
+#endif
+
+/* generic_file_splice_read() was removed at 6.6 in favour of
+ * filemap_splice_read() (same (file *, loff_t *, pipe_inode_info *, size_t,
+ * unsigned int) signature) -- verified against android.googlesource.com's
+ * include/linux/fs.h: android14-6.1 still declares generic_file_splice_read,
+ * android15-6.6 only declares filemap_splice_read. This only matters for the
+ * [6.6, 6.8) window, where VNS_OVL_HAVE_BACKING_FILE_RW is still false (so
+ * ovl_splice_read() falls back to calling generic_file_splice_read()
+ * directly) but the old symbol no longer exists. */
+#if !VNS_OVL_HAVE_BACKING_FILE_RW && LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define generic_file_splice_read filemap_splice_read
+#endif
 
 /* <linux/backing-file.h> declares backing_file_read_iter()/write_iter()/...
  * (>=6.9) and is what VNS_OVL_VFS_COMPAT_LIST_BF's typeof()-based resolution
@@ -228,6 +301,142 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 }
 #endif /* < 6.6 */
 
+/*
+ * [BUILD-COMPAT] rw_verify_area() is not declared in any module-visible
+ * header on android12-5.10/android13-5.10/android13-5.15/android14-5.15
+ * (verified against android.googlesource.com include/linux/fs.h for each
+ * branch: android14-6.1 onward declares it, these four do not), even though
+ * the symbol itself is exported and still resolved at load time via
+ * shadow_hook_resolve() below. Supply the prototype ourselves so typeof()
+ * has something to use; this is a no-op on branches that already declare it
+ * identically.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+int rw_verify_area(int, struct file *, const loff_t *, size_t);
+#endif
+
+/*
+ * [BUILD-COMPAT] uuid_to_fsid() (<linux/statfs.h>) does not exist on
+ * android12-5.10/android13-5.10 (verified against
+ * android.googlesource.com include/linux/statfs.h: present starting at
+ * android13-5.15). u64_to_fsid() already exists on 5.10 -- reimplement only
+ * uuid_to_fsid()'s body verbatim from the >=5.15 header, which calls the
+ * already-present u64_to_fsid().
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+static inline __kernel_fsid_t uuid_to_fsid(__u8 *uuid)
+{
+	return u64_to_fsid(le64_to_cpup((void *)uuid) ^
+			    le64_to_cpup((void *)(uuid + sizeof(u64))));
+}
+#endif
+
+/*
+ * [BUILD-COMPAT] is_idmapped_mnt() (<linux/fs.h>) and
+ * generic_fill_statx_attr() (<linux/fs.h>) do not exist on
+ * android12-5.10/android13-5.10 (verified against
+ * android.googlesource.com include/linux/fs.h: both present starting at
+ * android13-5.15). Neither kernel has idmapped mount support at all, so
+ * is_idmapped_mnt() can simply always report false. generic_fill_statx_attr()
+ * is reimplemented from its >=5.15 body, minus the
+ * `stat->attributes_mask |= KSTAT_ATTR_VFS_FLAGS` line since
+ * KSTAT_ATTR_VFS_FLAGS itself does not exist on 5.10 either (only the older
+ * KSTAT_ATTR_FS_IOC_FLAGS does).
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+static inline bool is_idmapped_mnt(const struct vfsmount *mnt)
+{
+	return false;
+}
+
+static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *stat)
+{
+	if (inode->i_flags & S_IMMUTABLE)
+		stat->attributes |= STATX_ATTR_IMMUTABLE;
+	if (inode->i_flags & S_APPEND)
+		stat->attributes |= STATX_ATTR_APPEND;
+}
+#endif
+
+/*
+ * [BUILD-COMPAT] struct iattr's ->ia_uid/->ia_gid (plain kuid_t/kgid_t)
+ * were replaced by the vfsuid_t/vfsgid_t-typed ->ia_vfsuid/->ia_vfsgid
+ * (plus the VFSUIDT_INIT()/VFSGIDT_INIT() constructors) starting at 6.1
+ * (verified against android.googlesource.com include/linux/fs.h and
+ * include/linux/mnt_idmapping.h: absent on android13-5.15/android14-5.15
+ * and the OLD tier). Before 6.1, ->ia_uid/->ia_gid already take a plain
+ * kuid_t/kgid_t directly, so VFSUIDT_INIT()/VFSGIDT_INIT() can just be the
+ * identity, and the field-name macros redirect the designated initializer
+ * in copy_up.c to the pre-6.1 field names.
+ */
+#if !VNS_OVL_TIER_MID_NEW
+#define VFSUIDT_INIT(val) (val)
+#define VFSGIDT_INIT(val) (val)
+#define ia_vfsuid ia_uid
+#define ia_vfsgid ia_gid
+#endif
+
+/*
+ * [BUILD-COMPAT] FMODE_CAN_ODIRECT and struct file's ->f_iocb_flags do not
+ * exist before 6.1 (verified against android.googlesource.com
+ * include/linux/fs.h: absent on android13-5.15/android14-5.15 and the OLD
+ * tier). Before 6.1, real upstream overlayfs (fs/overlayfs/file.c) checked
+ * direct-I/O support via `file->f_mapping->a_ops->direct_IO` instead --
+ * reproduce that via VNS_OVL_FMODE_CAN_ODIRECT() and drop the
+ * ->f_iocb_flags cache update (it exists purely to speed up iocb_flags(),
+ * which is still called directly wherever ->f_iocb_flags would otherwise be
+ * read).
+ */
+#if !VNS_OVL_TIER_MID_NEW
+#define VNS_OVL_FMODE_CAN_ODIRECT(f) ((f)->f_mapping->a_ops->direct_IO != NULL)
+#else
+#define VNS_OVL_FMODE_CAN_ODIRECT(f) ((f)->f_mode & FMODE_CAN_ODIRECT)
+#endif
+
+/*
+ * [BUILD-COMPAT] filldir_t (the struct dir_context ->actor callback type)
+ * returns bool as of 6.1; before that (OLD tier, and MID tier below 6.1,
+ * i.e. the 5.15-shaped branches) it returned int. The vendored readdir.c's
+ * ovl_fill_merge()/ovl_fill_plain()/ovl_fill_real()/ovl_check_d_type() are
+ * declared to match the 6.12 baseline (bool); use this macro for their
+ * return type instead so they match whichever filldir_t the running kernel
+ * expects. `return true;`/`return false;` remain valid for either type.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#define VNS_OVL_FILLDIR_T int
+#else
+#define VNS_OVL_FILLDIR_T bool
+#endif
+
+/*
+ * [BUILD-COMPAT] d_drop(), uuid_gen() and ns_capable_noaudit() are all
+ * genuinely EXPORT_SYMBOL'd on every KMI in our support matrix, but -- like
+ * every other name in VNS_OVL_VFS_COMPAT_LIST -- may still be trimmed from a
+ * production GKI build's module symbol table (CONFIG_TRIM_UNUSED_KSYMS,
+ * protected-KMI allow-lists), producing "Unknown symbol" at insmod rather
+ * than a build failure (there is no compile-time signal for this). Resolved
+ * via shadow_hook_resolve() like the rest of this list. vfs_parse_fs_string()
+ * is resolved the same way for MID/OLD, which alone reach the
+ * vfs_parse_monolithic_sep() fallback further down this file that calls it.
+ *
+ * seq_escape() is deliberately NOT in this list, even though params.c's
+ * seq_show_option() calls reach it indirectly: on some KMIs seq_escape() is
+ * a `static inline` wrapper around the exported seq_escape_mem() (see
+ * include/linux/seq_file.h), not its own kallsyms symbol at all --
+ * shadow_hook_resolve("seq_escape") always fails there. On others
+ * (confirmed live on android12-5.10 and android14-5.15) it IS a genuine,
+ * separately EXPORT_SYMBOL'd function, which is a plain, direct-by-name
+ * kernel call from seq_show_option()'s already-inlined body -- a macro
+ * redirect here could never reach that call site regardless of tier, and
+ * CI observed a live "Unknown symbol seq_escape" insmod failure on
+ * android14-5.15 because that symbol can be trimmed from a production GKI
+ * build's module table even though EXPORT_SYMBOL'd in source. Instead,
+ * vendor_kernel_ovl_vfs_compat.c provides its own externally-linked
+ * seq_escape() definition (a self-contained octal-escape reimplementation
+ * using only the always-exported seq_putc()/seq_puts()), which the linker
+ * uses to satisfy any translation unit's undefined "seq_escape" reference
+ * instead of requiring the (possibly trimmed) vmlinux export.
+ */
 
 #if VNS_OVL_TIER_NEW
 #define VNS_OVL_VFS_COMPAT_LIST(X) \
@@ -258,6 +467,9 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(lookup_one_positive_unlocked) \
 	X(lookup_one_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(ns_capable_noaudit) \
 	X(vfs_getattr) \
 	X(generic_fill_statx_attr) \
 	X(vfs_listxattr) \
@@ -291,7 +503,17 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
-	X(fs_param_is_enum) \
+	X(down_write_killable) \
+	X(d_invalidate) \
+	X(revert_creds) \
+	X(override_creds) \
+	X(security_file_ioctl) \
+	X(iterate_dir) \
+	X(vfs_setpos) \
+	VNS_OVL_VFSC_KFOPEN_ENTRY(X) \
+	VNS_OVL_VFSC_BFOPEN_ENTRY(X) \
+	VNS_OVL_VFSC_VPMSEP_ENTRY(X) \
+	VNS_OVL_VFSC_VMASETFILE_ENTRY(X) \
 	VNS_OVL_VFSC_DTMPFILE_ENTRY(X)
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
@@ -349,6 +571,10 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(lookup_one_positive_unlocked) \
 	X(lookup_one_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(ns_capable_noaudit) \
+	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \
 	X(generic_fill_statx_attr) \
 	X(vfs_listxattr) \
@@ -384,7 +610,16 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
-	X(fs_param_is_enum) \
+	X(errseq_check) \
+	X(down_write_killable) \
+	X(d_invalidate) \
+	X(revert_creds) \
+	X(override_creds) \
+	X(security_file_ioctl) \
+	X(iterate_dir) \
+	X(vfs_setpos) \
+	X(lookup_positive_unlocked) \
+	VNS_OVL_VFSC_VMASETFILE_ENTRY(X) \
 	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
@@ -401,12 +636,16 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(prepare_creds) \
 	X(errseq_sample) \
 	X(mntput) \
+	X(__mnt_is_readonly) \
+	X(generic_permission) \
+	X(get_cached_acl_rcu) \
 	X(vfs_statfs) \
 	X(clone_private_mount) \
 	X(lock_rename) \
 	X(unlock_rename) \
 	X(take_dentry_name_snapshot) \
 	X(vfs_rename) \
+	X(notify_change) \
 	X(release_dentry_name_snapshot) \
 	X(vfs_setxattr) \
 	X(vfs_removexattr) \
@@ -420,8 +659,13 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(is_subdir) \
 	X(vfs_getxattr) \
 	X(__vfs_getxattr) \
+	X(lookup_one_len) \
 	X(lookup_one_len_unlocked) \
 	X(__d_drop) \
+	X(d_drop) \
+	X(uuid_gen) \
+	X(ns_capable_noaudit) \
+	X(vfs_parse_fs_string) \
 	X(vfs_getattr) \
 	X(vfs_listxattr) \
 	X(get_acl) \
@@ -474,7 +718,6 @@ static inline struct timespec64 inode_set_mtime_to_ts(struct inode *inode,
 	X(generic_fillattr) \
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
-	X(fs_param_is_enum) \
 	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X)
@@ -524,6 +767,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define lookup_one_positive_unlocked (*vns_ovl_vfsc_lookup_one_positive_unlocked)
 #define lookup_one_unlocked (*vns_ovl_vfsc_lookup_one_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define generic_fill_statx_attr (*vns_ovl_vfsc_generic_fill_statx_attr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
@@ -557,8 +803,40 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
 #define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+/*
+ * [BUILD-COMPAT] down_write_killable/d_invalidate/revert_creds/
+ * override_creds/security_file_ioctl/iterate_dir/vfs_setpos are all
+ * genuinely EXPORT_SYMBOL'd on this KMI range, but -- like every other name
+ * in VNS_OVL_VFS_COMPAT_LIST -- may still be trimmed from a production GKI
+ * build's module symbol table (CONFIG_TRIM_UNUSED_KSYMS, protected-KMI
+ * allow-lists). CI observed a live "Unknown symbol vfs_setpos"/"Unknown
+ * symbol revert_creds"/etc. insmod failure on android14-5.15 (a MID-tier
+ * KMI) because these seven were previously left un-redirected here (only
+ * VNS_OVL_TIER_OLD resolved them), on the incorrect assumption that direct
+ * linkage against these always succeeds on MID/NEW-tier kernels. Resolved
+ * via shadow_hook_resolve() like the rest of this list instead.
+ */
+#define down_write_killable (*vns_ovl_vfsc_down_write_killable)
+#define d_invalidate (*vns_ovl_vfsc_d_invalidate)
+#define revert_creds (*vns_ovl_vfsc_revert_creds)
+#define override_creds (*vns_ovl_vfsc_override_creds)
+#define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
+#define iterate_dir (*vns_ovl_vfsc_iterate_dir)
+#define vfs_setpos (*vns_ovl_vfsc_vfs_setpos)
 #if !VNS_OVL_TIER_HAVE_D_MARK_TMPFILE
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_OPEN
+#define backing_file_open (*vns_ovl_vfsc_backing_file_open)
+#endif
+#if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
+#define vfs_parse_monolithic_sep (*vns_ovl_vfsc_vfs_parse_monolithic_sep)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+#define kernel_file_open (*vns_ovl_vfsc_kernel_file_open)
+#endif
+#if !VNS_OVL_HAVE_BACKING_FILE_RW
+#define vma_set_file (*vns_ovl_vfsc_vma_set_file)
 #endif
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
@@ -603,6 +881,10 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define lookup_one_positive_unlocked (*vns_ovl_vfsc_lookup_one_positive_unlocked)
 #define lookup_one_unlocked (*vns_ovl_vfsc_lookup_one_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
+#define vfs_parse_fs_string (*vns_ovl_vfsc_vfs_parse_fs_string)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define generic_fill_statx_attr (*vns_ovl_vfsc_generic_fill_statx_attr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
@@ -644,7 +926,24 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define vfs_path_lookup (*vns_ovl_vfsc_vfs_path_lookup)
 #define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
+/*
+ * [BUILD-COMPAT] see the matching comment in the NEW-tier block above:
+ * these seven are genuinely EXPORT_SYMBOL'd here too, but CI observed a
+ * live "Unknown symbol vfs_setpos"/"Unknown symbol revert_creds"/etc.
+ * insmod failure on android14-5.15 because they were previously left
+ * un-redirected on MID tier (only VNS_OVL_TIER_OLD resolved them).
+ */
+#define down_write_killable (*vns_ovl_vfsc_down_write_killable)
+#define d_invalidate (*vns_ovl_vfsc_d_invalidate)
+#define revert_creds (*vns_ovl_vfsc_revert_creds)
+#define override_creds (*vns_ovl_vfsc_override_creds)
+#define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
+#define iterate_dir (*vns_ovl_vfsc_iterate_dir)
+#define vfs_setpos (*vns_ovl_vfsc_vfs_setpos)
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
+#define errseq_check (*vns_ovl_vfsc_errseq_check)
+#define lookup_positive_unlocked (*vns_ovl_vfsc_lookup_positive_unlocked)
+#define vma_set_file (*vns_ovl_vfsc_vma_set_file)
 #define vfs_iter_read (*vns_ovl_vfsc_vfs_iter_read)
 #define vfs_iter_write (*vns_ovl_vfsc_vfs_iter_write)
 #define vfs_iocb_iter_read (*vns_ovl_vfsc_vfs_iocb_iter_read)
@@ -657,40 +956,91 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define prepare_creds (*vns_ovl_vfsc_prepare_creds)
 #define errseq_sample (*vns_ovl_vfsc_errseq_sample)
 #define mntput (*vns_ovl_vfsc_mntput)
+#define __mnt_is_readonly (*vns_ovl_vfsc___mnt_is_readonly)
+#define get_cached_acl_rcu (*vns_ovl_vfsc_get_cached_acl_rcu)
 #define vfs_statfs (*vns_ovl_vfsc_vfs_statfs)
 #define clone_private_mount (*vns_ovl_vfsc_clone_private_mount)
 #define lock_rename (*vns_ovl_vfsc_lock_rename)
 #define unlock_rename (*vns_ovl_vfsc_unlock_rename)
 #define take_dentry_name_snapshot (*vns_ovl_vfsc_take_dentry_name_snapshot)
 #define vfs_rename (*vns_ovl_vfsc_vfs_rename)
+/*
+ * [BUILD-COMPAT] VNS_OVL_TIER_OLD (<5.12) predates idmapped mounts: none of
+ * the VFS entry points below take a `struct mnt_idmap *`/`struct
+ * user_namespace *` argument yet, but the unified 6.12-shaped overlayfs
+ * source calls every one of them with the (always-dummy, see
+ * ovl_mnt_idmap() above) idmap threaded through as an extra argument. Rather
+ * than touch every call site, redefine each of these as a variadic macro
+ * that drops the idmap argument (found in the same position the running
+ * kernel's *idmapped* API would place it) before forwarding to the resolved
+ * function pointer, whose real (pre-idmap) signature was captured by pass 1
+ * above via typeof(). vfs_link()'s idmap is its *second* argument (the 6.12
+ * signature is (old_dentry, idmap, dir, new_dentry, delegated_inode)); every
+ * other one threads it first.
+ */
+#define notify_change(idmap, dentry, attr, delegated_inode) \
+	(*vns_ovl_vfsc_notify_change)((dentry), (attr), (delegated_inode))
 #define release_dentry_name_snapshot (*vns_ovl_vfsc_release_dentry_name_snapshot)
-#define vfs_setxattr (*vns_ovl_vfsc_vfs_setxattr)
-#define vfs_removexattr (*vns_ovl_vfsc_vfs_removexattr)
+#define vfs_setxattr(idmap, dentry, name, value, size, flags) \
+	(*vns_ovl_vfsc_vfs_setxattr)((dentry), (name), (value), (size), (flags))
+#define vfs_removexattr(idmap, dentry, name) \
+	(*vns_ovl_vfsc_vfs_removexattr)((dentry), (name))
 #define get_anon_bdev (*vns_ovl_vfsc_get_anon_bdev)
 #define kern_unmount_array (*vns_ovl_vfsc_kern_unmount_array)
 #define free_anon_bdev (*vns_ovl_vfsc_free_anon_bdev)
 #define kern_path (*vns_ovl_vfsc_kern_path)
 #define dget_parent (*vns_ovl_vfsc_dget_parent)
-#define inode_owner_or_capable (*vns_ovl_vfsc_inode_owner_or_capable)
+#define inode_owner_or_capable(idmap, inode) \
+	(*vns_ovl_vfsc_inode_owner_or_capable)((inode))
+/*
+ * [BUILD-COMPAT] capable_wrt_inode_uidgid() is a plain, always
+ * exported/linkable symbol on VNS_OVL_TIER_OLD (<5.12) -- it simply
+ * doesn't take a `struct mnt_idmap *` yet (verified against
+ * android.googlesource.com include/linux/capability.h). See the
+ * setattr_prepare()/generic_permission() comment above for why a
+ * self-referencing macro is safe here.
+ */
+#define capable_wrt_inode_uidgid(idmap, inode, cap) \
+	capable_wrt_inode_uidgid((inode), (cap))
 #define exportfs_decode_fh (*vns_ovl_vfsc_exportfs_decode_fh)
 #define is_subdir (*vns_ovl_vfsc_is_subdir)
-#define vfs_getxattr (*vns_ovl_vfsc_vfs_getxattr)
+#define vfs_getxattr(idmap, dentry, name, value, size) \
+	(*vns_ovl_vfsc_vfs_getxattr)((dentry), (name), (value), (size))
 #define __vfs_getxattr (*vns_ovl_vfsc___vfs_getxattr)
+#define lookup_one(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_one_len)((name), (base), (len))
+#define lookup_one_unlocked(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_one_len_unlocked)((name), (base), (len))
+/* lookup_one_len_unlocked: bare (no-idmap) alias to the same resolved
+ * pointer as lookup_one_unlocked above, kept for any caller using the raw
+ * pre-idmap kernel name directly instead of the 6.12-shaped idmap-taking
+ * one. */
 #define lookup_one_len_unlocked (*vns_ovl_vfsc_lookup_one_len_unlocked)
 #define __d_drop (*vns_ovl_vfsc___d_drop)
+#define d_drop (*vns_ovl_vfsc_d_drop)
+#define uuid_gen (*vns_ovl_vfsc_uuid_gen)
+#define ns_capable_noaudit (*vns_ovl_vfsc_ns_capable_noaudit)
+#define vfs_parse_fs_string (*vns_ovl_vfsc_vfs_parse_fs_string)
 #define vfs_getattr (*vns_ovl_vfsc_vfs_getattr)
 #define vfs_listxattr (*vns_ovl_vfsc_vfs_listxattr)
 /* get_acl: not redirected (see header comment). */
 #define set_posix_acl (*vns_ovl_vfsc_set_posix_acl)
 #define inode_insert5 (*vns_ovl_vfsc_inode_insert5)
 #define vfs_get_link (*vns_ovl_vfsc_vfs_get_link)
-#define vfs_unlink (*vns_ovl_vfsc_vfs_unlink)
-#define vfs_rmdir (*vns_ovl_vfsc_vfs_rmdir)
-#define vfs_link (*vns_ovl_vfsc_vfs_link)
-#define vfs_mknod (*vns_ovl_vfsc_vfs_mknod)
-#define vfs_mkdir (*vns_ovl_vfsc_vfs_mkdir)
-#define vfs_create (*vns_ovl_vfsc_vfs_create)
-#define vfs_symlink (*vns_ovl_vfsc_vfs_symlink)
+#define vfs_unlink(idmap, dir, dentry, delegated_inode) \
+	(*vns_ovl_vfsc_vfs_unlink)((dir), (dentry), (delegated_inode))
+#define vfs_rmdir(idmap, dir, dentry) \
+	(*vns_ovl_vfsc_vfs_rmdir)((dir), (dentry))
+#define vfs_link(old_dentry, idmap, dir, new_dentry, delegated_inode) \
+	(*vns_ovl_vfsc_vfs_link)((old_dentry), (dir), (new_dentry), (delegated_inode))
+#define vfs_mknod(idmap, dir, dentry, mode, dev) \
+	(*vns_ovl_vfsc_vfs_mknod)((dir), (dentry), (mode), (dev))
+#define vfs_mkdir(idmap, dir, dentry, mode) \
+	(*vns_ovl_vfsc_vfs_mkdir)((dir), (dentry), (mode))
+#define vfs_create(idmap, dir, dentry, mode, want_excl) \
+	(*vns_ovl_vfsc_vfs_create)((dir), (dentry), (mode), (want_excl))
+#define vfs_symlink(idmap, dir, dentry, oldname) \
+	(*vns_ovl_vfsc_vfs_symlink)((dir), (dentry), (oldname))
 #define vfs_tmpfile (*vns_ovl_vfsc_vfs_tmpfile)
 #define security_dentry_create_files_as (*vns_ovl_vfsc_security_dentry_create_files_as)
 #define posix_acl_create (*vns_ovl_vfsc_posix_acl_create)
@@ -718,10 +1068,37 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define errseq_check (*vns_ovl_vfsc_errseq_check)
 #define iterate_dir (*vns_ovl_vfsc_iterate_dir)
 #define lookup_positive_unlocked (*vns_ovl_vfsc_lookup_positive_unlocked)
+#define lookup_one_positive_unlocked(idmap, name, base, len) \
+	(*vns_ovl_vfsc_lookup_positive_unlocked)((name), (base), (len))
 #define override_creds (*vns_ovl_vfsc_override_creds)
 #define revert_creds (*vns_ovl_vfsc_revert_creds)
 #define vfs_llseek (*vns_ovl_vfsc_vfs_llseek)
-#define inode_permission (*vns_ovl_vfsc_inode_permission)
+/*
+ * The `(void)(idmap)` keeps the idmap argument "used" from the preprocessor's
+ * point of view: at call sites (e.g. ovl_path_open() in fs/overlayfs/util.c)
+ * that first compute the idmap into a local variable and then pass it here,
+ * simply dropping the macro parameter (as the other idmap-dropping macros in
+ * this file do) would leave that variable looking unreferenced to the
+ * compiler post-preprocessing, tripping -Werror=unused-variable.
+ */
+#define inode_permission(idmap, inode, mask) \
+	((void)(idmap), (*vns_ovl_vfsc_inode_permission)((inode), (mask)))
+/*
+ * [BUILD-COMPAT] setattr_prepare()/generic_permission()/inode_init_owner()
+ * are plain, always exported/linkable symbols on VNS_OVL_TIER_OLD (<5.12) --
+ * they simply don't take a `struct mnt_idmap *` yet (verified against
+ * android.googlesource.com include/linux/fs.h). Unlike the vfs_* helpers
+ * above they don't need vns_ovl_vfsc_* pointer resolution, just an
+ * idmap-dropping wrapper macro. The macro name reappearing in its own
+ * replacement list is intentionally not re-expanded by the preprocessor, so
+ * this forwards straight to the real symbol.
+ */
+#define setattr_prepare(idmap, dentry, attr) \
+	setattr_prepare((dentry), (attr))
+#define generic_permission(idmap, inode, mask) \
+	(*vns_ovl_vfsc_generic_permission)((inode), (mask))
+#define inode_init_owner(idmap, inode, dir, mode) \
+	inode_init_owner((inode), (dir), (mode))
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
 #define vfs_ioctl (*vns_ovl_vfsc_vfs_ioctl)
@@ -812,7 +1189,12 @@ static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
  * changed twice: pre-6.5 it didn't exist at all (dentry_open() with the same
  * (path, flags, cred) shape is the equivalent); [6.5,6.10) it took an extra
  * `struct inode *inode` argument (dropped again at 6.10, back to the
- * (path, flags, cred) shape overlayfs actually calls it with). */
+ * (path, flags, cred) shape overlayfs actually calls it with). Like every
+ * other name in VNS_OVL_VFS_COMPAT_LIST, kernel_file_open() may be trimmed
+ * from the module symbol table on production GKI, so both branches below
+ * reach it only through the resolved vns_ovl_vfsc_kernel_file_open pointer
+ * (see VNS_OVL_VFSC_KFOPEN_ENTRY above), never as a bare, modpost-visible
+ * symbol. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 #define kernel_file_open(path, flags, cred) dentry_open((path), (flags), (cred))
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
@@ -820,7 +1202,7 @@ static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
 						     int flags,
 						     const struct cred *cred)
 {
-	return kernel_file_open(path, flags, d_inode(path->dentry), cred);
+	return (*vns_ovl_vfsc_kernel_file_open)(path, flags, d_inode(path->dentry), cred);
 }
 #define kernel_file_open(path, flags, cred) \
 	vns_ovl_kernel_file_open((path), (flags), (cred))
@@ -859,6 +1241,23 @@ static inline struct file *vfs_tmpfile_open(struct mnt_idmap *idmap,
 }
 #endif
 
+/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([5.10, 6.6)). Same
+ * (idmap, parentpath, mode, open_flag, cred) shape; on MID `idmap` is the
+ * aliased struct user_namespace *, and on OLD (5.10, no idmapped mounts) the
+ * vfs_tmpfile_open() shim above simply ignores it. Defined here (before
+ * backing_tmpfile_open() below, which calls it) since it is a plain
+ * static-inline function, not a macro -- unlike macros, its definition must
+ * precede any call site. */
+#if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
+static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
+					       const struct path *parentpath,
+					       umode_t mode, int open_flag,
+					       const struct cred *cred)
+{
+	return vfs_tmpfile_open(idmap, parentpath, mode, open_flag, cred);
+}
+#endif
+
 /* backing_file_open()/backing_tmpfile_open() (6.6+): open a real file while
  * presenting the overlay's own (fake) path to the VFS/LSM layer instead of
  * the real (underlying) one. Pre-6.6 overlayfs achieved the same effect for
@@ -887,15 +1286,28 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
 						const struct path *real_parentpath,
 						umode_t mode, const struct cred *cred)
 {
-	return vfs_tmpfile_open(ovl_mnt_idmap(real_parentpath->mnt), real_parentpath,
-				mode, flags, cred);
+	/* kernel_tmpfile_open() is real (declared in <linux/fs.h>, already
+	 * included) on android15-6.6+ (NEW tier); on MID/OLD tiers it is the
+	 * static-inline shim defined just above. */
+	return kernel_tmpfile_open(ovl_mnt_idmap(real_parentpath->mnt), real_parentpath,
+				   mode, flags, cred);
 }
 #endif
 
 /* d_mark_tmpfile() is the 6.7 rename of the older d_tmpfile() (not 6.6 --
- * see "vfs: rename d_tmpfile to d_mark_tmpfile", merged for v6.7); both take
- * the same (struct file *, struct inode *) pair. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
+ * see "vfs: rename d_tmpfile to d_mark_tmpfile", merged for v6.7). Both take
+ * a (struct file *, struct inode *) pair from 6.1 onward, matching the call
+ * site in fs/overlayfs/dir.c (which always passes the tmpfile as a struct
+ * file *, per the unified 6.12-shaped source). Before 6.1 (OLD tier, and MID
+ * tier below 6.1, i.e. the 5.15-shaped branches), d_tmpfile() instead took
+ * the tmpfile's struct dentry * directly -- wrap it to accept the same
+ * struct file * the call site passes. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+static inline void d_mark_tmpfile(struct file *file, struct inode *inode)
+{
+	d_tmpfile(file->f_path.dentry, inode);
+}
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
 #define d_mark_tmpfile d_tmpfile
 #endif
 
@@ -913,11 +1325,37 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
 	{ return x(file, ctx); }
 #endif
 
-/* fsparam_string_empty() (6.6+): a string mount option that also accepts the
- * empty value ("opt="). Byte-identical to the upstream 6.6 definition, built
- * from the __fsparam()/fs_param_can_be_empty primitives present since 5.x. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* str_on_off() renders a bool as "on"/"off". Upstream mainline only gained
+ * it at 6.6 (in the new <linux/string_choices.h>), but android14-6.1
+ * backported the same helper straight into its existing
+ * include/linux/string_helpers.h (verified against
+ * android.googlesource.com's include/linux/string_helpers.h and
+ * include/linux/string_choices.h across all seven KMIs: android12/13-5.10
+ * and android13/14-5.15 have neither; android14-6.1 already has str_on_off
+ * in string_helpers.h; android15-6.6+ has it in string_choices.h). So the
+ * fallback is only needed below 6.1, not below 6.6. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#ifndef str_on_off
+static inline const char *str_on_off(bool v)
+{
+	return v ? "on" : "off";
+}
+#endif
+#endif
+
+/* fsparam_string_empty() (6.12+): a string mount option that also accepts
+ * the empty value ("opt="). Byte-identical to the upstream definition, built
+ * from the __fsparam()/fs_param_can_be_empty primitives. The `flags` field's
+ * fs_param_can_be_empty bit itself only exists from 5.16 onward (verified
+ * against android.googlesource.com's include/linux/fs_parser.h across
+ * android12/13-5.10, android13/14-5.15, android14-6.1 and android15-6.6 --
+ * none of them define either fs_param_can_be_empty or fsparam_string_empty,
+ * only android16-6.12+ does), so both need a fallback here. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 #include <linux/fs_parser.h>
+#ifndef fs_param_can_be_empty
+#define fs_param_can_be_empty 0x0004
+#endif
 #ifndef fsparam_string_empty
 #define fsparam_string_empty(NAME, OPT) \
 	__fsparam(fs_param_is_string, NAME, OPT, fs_param_can_be_empty, NULL)
@@ -1026,19 +1464,6 @@ static inline int vns_ovl_fsverity_get_digest(struct inode *inode, u8 *digest,
 #if VNS_OVL_TIER_MID
 #define old_mnt_idmap old_mnt_userns
 #define new_mnt_idmap new_mnt_userns
-#endif
-
-/* kernel_tmpfile_open() (6.6+) -> vfs_tmpfile_open() ([6.1, 6.6)). Same
- * (idmap, parentpath, mode, open_flag, cred) shape; on MID `idmap` is the
- * aliased struct user_namespace *. */
-#if VNS_OVL_TIER_MID
-static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
-					       const struct path *parentpath,
-					       umode_t mode, int open_flag,
-					       const struct cred *cred)
-{
-	return vfs_tmpfile_open(idmap, parentpath, mode, open_flag, cred);
-}
 #endif
 #endif /* MID || OLD */
 
@@ -1277,6 +1702,49 @@ static inline vfsgid_t i_gid_into_vfsgid(struct user_namespace *mnt_userns,
 }
 #endif /* < 6.0 */
 
+/* vma_set_file() (<linux/mm.h>) is not linkable/declared on VNS_OVL_TIER_OLD
+ * (<5.12, e.g. android12-5.10/android13-5.10): it was only added alongside
+ * the 5.15-era MID VFS API churn (present on every MID/NEW-tier KMI in our
+ * support matrix). ovl_mmap()'s manual (!VNS_OVL_HAVE_BACKING_FILE_RW)
+ * fallback path in file.c only calls it to atomically swap vma->vm_file for
+ * an already-vma->vm_file-equal file (see the WARN_ON just above the call),
+ * so a local reimplementation of the well known get_file()/fput() swap is
+ * sufficient here. */
+#if VNS_OVL_TIER_OLD
+static inline void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	struct file *old_file = vma->vm_file;
+
+	get_file(file);
+	vma->vm_file = file;
+	if (old_file)
+		fput(old_file);
+}
+#endif
+
+/* krealloc_array() (mainline 5.15) is inconsistently backported within a
+ * single kernel PATCHLEVEL: android12-5.10 has it (include/linux/slab.h),
+ * but android13-5.10 -- otherwise the exact same 5.10.260 base, same
+ * LINUX_VERSION_CODE -- does not, so this cannot be gated by version alone.
+ * Always route ovl_ctx_realloc_lower() (params.c) through this
+ * overflow-checked local helper instead of relying on the raw
+ * krealloc_array() name/prototype being present. */
+#include <linux/overflow.h>
+static inline void *vns_ovl_krealloc_array(void *p, size_t new_n,
+					    size_t new_size, gfp_t flags)
+{
+	size_t bytes;
+
+	/* Mirrors upstream krealloc_array()'s own overflow handling: a
+	 * silent NULL return on overflow, treated by callers the same as
+	 * any other allocation failure. No extra diagnostic is emitted
+	 * here, consistent with the real symbol this is standing in for.
+	 */
+	if (unlikely(check_mul_overflow(new_n, new_size, &bytes)))
+		return NULL;
+	return krealloc(p, bytes, flags);
+}
+
 /* <linux/fileattr.h>/struct fileattr (5.13+): the generic FS_IOC_GETFLAGS/
  * FS_IOC_FSGETXATTR container type, and the ->fileattr_get/->fileattr_set
  * inode_operations members + vfs_fileattr_get()/vfs_fileattr_set() VFS
@@ -1304,6 +1772,25 @@ struct fileattr {
 	bool	flags_valid:1;
 	bool	fsx_valid:1;
 };
+
+/* FS_COMMON_FL/FS_XFLAG_COMMON themselves (as opposed to struct fileattr)
+ * are also only defined by <linux/fileattr.h> from 5.13 onward, but
+ * overlayfs's ovl_copy_fileattr() (copy_up.c) references them in
+ * BUILD_BUG_ON() checks unconditionally, so they must still resolve to
+ * *something* even though the surrounding function is otherwise dead code
+ * on this tier (see the vfs_fileattr_get/_set stubs above). The individual
+ * FS_*_FL/FS_XFLAG_* bit values they're built from are all plain uapi
+ * <linux/fs.h> macros already available on 5.10, so just reproduce the
+ * upstream v5.13 fileattr.h composition here. */
+#define FS_COMMON_FL \
+	(FS_SYNC_FL | FS_IMMUTABLE_FL | FS_APPEND_FL | \
+	 FS_NODUMP_FL | FS_NOATIME_FL | FS_DAX_FL | \
+	 FS_PROJINHERIT_FL)
+
+#define FS_XFLAG_COMMON \
+	(FS_XFLAG_SYNC | FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND | \
+	 FS_XFLAG_NODUMP | FS_XFLAG_NOATIME | FS_XFLAG_DAX | \
+	 FS_XFLAG_PROJINHERIT)
 
 static inline int vfs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 {

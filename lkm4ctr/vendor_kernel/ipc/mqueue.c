@@ -37,6 +37,7 @@
 #include <linux/user_namespace.h>
 #include <linux/slab.h>
 #include <linux/sched/wake_q.h>
+#include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/user.h>
 
@@ -1816,7 +1817,7 @@ int vns_mqueue_fs_init(void)
 	return init_mqueue_fs();
 }
 
-void vns_mqueue_fs_exit(void)
+void vns_mqueue_fs_exit(bool cache_teardown_unsafe)
 {
 	if (init_ipc_ns.mq_mnt) {
 		kern_unmount(init_ipc_ns.mq_mnt);
@@ -1828,6 +1829,49 @@ void vns_mqueue_fs_exit(void)
 	}
 	retire_mq_sysctls(&init_ipc_ns);
 	if (mqueue_inode_cachep) {
+		/*
+		 * kern_unmount() above tears down the superblock and evicts
+		 * its inodes, but generic VFS inode teardown (destroy_inode(),
+		 * fs/inode.c) frees each inode via call_rcu() (mqueue_free_inode()
+		 * runs from that RCU callback, see .free_inode above) rather
+		 * than synchronously. Without waiting out that grace period
+		 * first, kmem_cache_destroy() below can run while RCU-deferred
+		 * frees are still pending, which trips slub's "Objects
+		 * remaining in mqueue_inode_cache on __kmem_cache_shutdown()"
+		 * BUG splat (and, if it goes unnoticed, is a straightforward
+		 * use-after-free/UAF once the RCU callback runs against the
+		 * now-destroyed cache). Every real in-tree fs with an RCU-freed
+		 * inode cache serializes its module-exit path against this the
+		 * same way.
+		 */
+		rcu_barrier();
+		if (cache_teardown_unsafe) {
+			/*
+			 * @cache_teardown_unsafe is set when the caller's own
+			 * proactive "/dev/mqueue" mount (glue/vendor_kernel_ipc_mount.c's
+			 * vns_mqueue_dev_ensure()/vns_mqueue_dev_teardown()) was
+			 * attached into the real mount namespace and could only be
+			 * *detached* (path_umount()), not synchronously torn down:
+			 * unlike this function's own kern_unmount(init_ipc_ns.mq_mnt)
+			 * above (an MNT_INTERNAL kernel-mount, freed synchronously by
+			 * mntput_no_expire()), a namespace-attached mount's final
+			 * mntput() always defers the actual superblock/inode teardown
+			 * (cleanup_mnt() -> deactivate_super()) to task_work run when
+			 * the unmounting task next returns to userspace -- which can
+			 * be well after this function returns (e.g. only once the
+			 * insmod/rmmod syscall itself returns). rcu_barrier() above
+			 * cannot wait that out, so mqueue_inode_cachep may still hold
+			 * that mount's live root inode here. Destroying the cache
+			 * anyway would hit the exact same "Objects remaining" BUG (and
+			 * a subsequent use-after-free once the deferred task_work
+			 * finally runs against the now-destroyed cache). Leaving the
+			 * cache allocated is a small, bounded, one-time leak -- far
+			 * preferable to a guaranteed kernel panic.
+			 */
+			LKM4CTR_WARN("vendor_kernel",
+				     "mqueue: leaving mqueue_inode_cache allocated: a proactively-mounted /dev/mqueue's teardown is deferred past this call and destroying the cache now would panic on its still-live inode");
+			return;
+		}
 		kmem_cache_destroy(mqueue_inode_cachep);
 		mqueue_inode_cachep = NULL;
 	}

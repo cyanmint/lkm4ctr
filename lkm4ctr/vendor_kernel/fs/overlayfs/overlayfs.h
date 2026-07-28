@@ -4,6 +4,15 @@
  * Copyright (C) 2011 Novell Inc.
  */
 
+/*
+ * Must be included before any other header: it #defines init_user_ns, and
+ * several real kernel headers included below (or transitively by this
+ * header's includers, e.g. <linux/mnt_idmapping.h>'s initial_idmapping())
+ * have static inline helpers that reference that bare name directly -- see
+ * glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
+
 #include <linux/kernel.h>
 #include <linux/uuid.h>
 #include <linux/cred.h>
@@ -18,6 +27,14 @@
 #include <linux/exportfs.h>
 #include <linux/splice.h>
 #include <linux/errseq.h>
+/* [BUILD-COMPAT] <linux/fs_context.h>/<linux/fs_parser.h> declare
+ * fs_param_is_enum() (used by glue/vendor_kernel_ovl_vfs_compat.h's
+ * VNS_OVL_VFS_COMPAT_LIST()). params.c/super.c already include these
+ * directly, but every other .c file in this directory reaches
+ * fs_param_is_enum() only through this header's compat-header include below,
+ * so make sure the declaration is visible here too. */
+#include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 /* [BUILD-COMPAT] <linux/fileattr.h> (and the generic ->fileattr_get/_set
  * inode_operations members it defines) only exist >=5.13; see
  * glue/vendor_kernel_ovl_vfs_compat.h for the pre-5.13 struct fileattr
@@ -392,6 +409,16 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 				struct dentry *newdentry, unsigned int flags)
 {
 	int err;
+
+	/* Logged before dispatch (success case); the error path below logs
+	 * again with the result. */
+	pr_debug("rename(%pd2, %pd2, 0x%x)\n", olddentry, newdentry, flags);
+#if VNS_OVL_TIER_OLD
+	/* [BUILD-COMPAT] struct renamedata does not exist before 5.12; call
+	 * the pre-idmap 6-argument vfs_rename() directly instead. */
+	err = vfs_rename(olddir, olddentry, newdir, newdentry, NULL, flags);
+#else
+	{
 	struct renamedata rd = {
 		.old_mnt_idmap	= ovl_upper_mnt_idmap(ofs),
 		.old_dir 	= olddir,
@@ -401,9 +428,9 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 		.new_dentry 	= newdentry,
 		.flags 		= flags,
 	};
-
-	pr_debug("rename(%pd2, %pd2, 0x%x)\n", olddentry, newdentry, flags);
 	err = vfs_rename(&rd);
+	}
+#endif
 	if (err) {
 		pr_debug("...rename(%pd2, %pd2, ...) = %i\n",
 			 olddentry, newdentry, err);
@@ -1012,3 +1039,36 @@ int ovl_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 int ovl_getattr(struct mnt_idmap *idmap, const struct path *path,
 		struct kstat *stat, u32 request_mask, unsigned int flags);
 ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size);
+
+/*
+ * [BUILD-COMPAT] The inode_operations ->setattr/->permission/->getattr slots
+ * take an idmap on >=5.12 kernels but not on VNS_OVL_TIER_OLD (<5.12, no
+ * idmapped mounts at all). ovl_setattr()/ovl_permission()/ovl_getattr()
+ * above are written to the >=5.12 (idmap-first) shape and already ignore
+ * their idmap argument internally in favour of &nop_mnt_idmap where needed
+ * (see inode.c) -- wrap them with the OLD-tier (no-idmap) signature instead
+ * of forking their bodies, and use OVL_SETATTR_OP/OVL_PERMISSION_OP/
+ * OVL_GETATTR_OP in the inode_operations initialisers below and in inode.c.
+ */
+#if VNS_OVL_TIER_OLD
+static inline int ovl_setattr_compat(struct dentry *dentry, struct iattr *attr)
+{
+	return ovl_setattr(&nop_mnt_idmap, dentry, attr);
+}
+static inline int ovl_permission_compat(struct inode *inode, int mask)
+{
+	return ovl_permission(&nop_mnt_idmap, inode, mask);
+}
+static inline int ovl_getattr_compat(const struct path *path, struct kstat *stat,
+				     u32 request_mask, unsigned int flags)
+{
+	return ovl_getattr(&nop_mnt_idmap, path, stat, request_mask, flags);
+}
+#define OVL_SETATTR_OP ovl_setattr_compat
+#define OVL_PERMISSION_OP ovl_permission_compat
+#define OVL_GETATTR_OP ovl_getattr_compat
+#else
+#define OVL_SETATTR_OP ovl_setattr
+#define OVL_PERMISSION_OP ovl_permission
+#define OVL_GETATTR_OP ovl_getattr
+#endif

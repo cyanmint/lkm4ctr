@@ -3,7 +3,33 @@
  * Copyright (C) 2011 Novell Inc.
  * Copyright (C) 2016 Red Hat, Inc.
  */
+/*
+ * Must be included before any other header: <linux/mnt_idmapping.h>'s
+ * initial_idmapping() (reached transitively via <linux/fs.h> et al, pulled
+ * in below) has a static inline body that references the bare init_user_ns
+ * name directly -- see glue/vendor_kernel_data_syms.h for the full
+ * rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/version.h>
+#include <linux/compiler_types.h>
+
+/*
+ * lkm4ctr [BUILD-COMPAT]: this file is intentionally NOT compiled with
+ * CFI checks disabled wholesale (see VNS_CFI_UNSAFE_OBJS in
+ * lkm4ctr/Makefile): several of its functions are installed into
+ * struct-of-function-pointers callback tables (ovl_dir_inode_operations,
+ * ovl_file_inode_operations, ovl_file_operations, ovl_dir_operations,
+ * ovl_export_operations, xattr_handler.get/set, etc.) that the real
+ * kernel invokes indirectly, so those functions must keep a valid
+ * Clang KCFI type hash. Only the functions below that themselves make
+ * shadow_hook_resolve()-based indirect calls to vns_ovl_vfsc_*-redirected
+ * kernel helpers are marked __nocfi (which merely suppresses the CFI
+ * check on indirect calls *made from* that function, not its own
+ * callable-target type hash): ovl_override_creds, ovl_path_open, ovl_init_uuid_xattr,
+ * ovl_nlink_start, ovl_nlink_end, ovl_lock_rename_workdir,
+ * ovl_ensure_verity_loaded, ovl_sync_status.
+ */
 
 /*
  * lkm4ctr [BUILD-COMPAT]: this vendored overlayfs source was taken from android16-6.12
@@ -82,7 +108,7 @@ struct dentry *ovl_workdir(struct dentry *dentry)
 	return ofs->workdir;
 }
 
-const struct cred *ovl_override_creds(struct super_block *sb)
+__nocfi const struct cred *ovl_override_creds(struct super_block *sb)
 {
 	struct ovl_fs *ofs = OVL_FS(sb);
 
@@ -667,7 +693,7 @@ bool ovl_path_is_whiteout(struct ovl_fs *ofs, const struct path *path)
 		ovl_path_check_xwhiteout_xattr(ofs, path);
 }
 
-struct file *ovl_path_open(const struct path *path, int flags)
+__nocfi struct file *ovl_path_open(const struct path *path, int flags)
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct mnt_idmap *real_idmap = ovl_mnt_idmap(path->mnt);
@@ -799,7 +825,7 @@ bool ovl_path_check_xwhiteout_xattr(struct ovl_fs *ofs, const struct path *path)
  * Load persistent uuid from xattr into s_uuid if found, or store a new
  * random generated value in s_uuid and in xattr.
  */
-bool ovl_init_uuid_xattr(struct super_block *sb, struct ovl_fs *ofs,
+__nocfi bool ovl_init_uuid_xattr(struct super_block *sb, struct ovl_fs *ofs,
 			 const struct path *upperpath)
 {
 	bool set = false;
@@ -1159,7 +1185,7 @@ fail:
  * Operations that change overlay inode and upper inode nlink need to be
  * synchronized with copy up for persistent nlink accounting.
  */
-int ovl_nlink_start(struct dentry *dentry)
+__nocfi int ovl_nlink_start(struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 	const struct cred *old_cred;
@@ -1221,7 +1247,7 @@ out_unlock:
 	return err;
 }
 
-void ovl_nlink_end(struct dentry *dentry)
+__nocfi void ovl_nlink_end(struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 
@@ -1238,7 +1264,7 @@ void ovl_nlink_end(struct dentry *dentry)
 	ovl_inode_unlock(inode);
 }
 
-int ovl_lock_rename_workdir(struct dentry *workdir, struct dentry *upperdir)
+__nocfi int ovl_lock_rename_workdir(struct dentry *workdir, struct dentry *upperdir)
 {
 	struct dentry *trap;
 
@@ -1395,7 +1421,7 @@ err_free:
 }
 
 /* Call with mounter creds as it may open the file */
-int ovl_ensure_verity_loaded(struct path *datapath)
+__nocfi int ovl_ensure_verity_loaded(struct path *datapath)
 {
 	struct inode *inode = d_inode(datapath->dentry);
 	struct file *filp;
@@ -1513,7 +1539,7 @@ int ovl_get_verity_digest(struct ovl_fs *ofs, struct path *src,
  * code.
  */
 
-int ovl_sync_status(struct ovl_fs *ofs)
+__nocfi int ovl_sync_status(struct ovl_fs *ofs)
 {
 	struct vfsmount *mnt;
 

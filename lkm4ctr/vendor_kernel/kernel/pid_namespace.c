@@ -142,22 +142,54 @@ out:
 	return ERR_PTR(err);
 }
 
-static void delayed_free_pidns(struct rcu_head *p)
-{
-	struct pid_namespace *ns = container_of(p, struct pid_namespace, rcu);
-
-	dec_pid_namespaces(ns->ucounts);
-	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
-
-	kmem_cache_free(vns_pid_ns_cachep, ns); /* [BUILD-COMPAT] */
-}
-
+/*
+ * [BUILD-COMPAT] Deliberately leak the pid_namespace object itself instead
+ * of freeing it (upstream frees it here via kmem_cache_free() after
+ * call_rcu()).
+ *
+ * The real kernel's alloc_pid()/free_pid()/put_pid() (kernel/pid.c) are
+ * unconditional of CONFIG_PID_NS and keep touching this object's fields
+ * (->pid_cachep, ->idr, ->pid_allocated, ->child_reaper) for as long as any
+ * struct pid allocated against it is alive -- which, via a lingering procfs
+ * dentry/struct file, can outlive our own nsproxy-based refcounting by an
+ * arbitrary amount of time. On a real CONFIG_PID_NS=y kernel this is safe
+ * because alloc_pid() takes a get_pid_ns() reference on the namespace for
+ * every struct pid it hands out, and put_pid()'s matching put_pid_ns() is
+ * exactly what is expected to trigger this destroy path -- so the object
+ * cannot be destroyed while a struct pid still references it. But on the
+ * target GKI kernels this module exists for (CONFIG_PID_NS=n),
+ * get_pid_ns()/put_pid_ns() are no-op static inlines, so that protection is
+ * gone entirely: nothing pins the namespace alive for the lifetime of the
+ * struct pid objects allocated from it, and destroying it here (as soon as
+ * our own nsproxy attach/detach refcount hits zero) reopens a
+ * use-after-free window that crashes later (e.g. put_pid()/proc_free_inode()
+ * dereferencing a freed ns->pid_cachep/ns->child_reaper from an RCU
+ * callback, observed as a NULL-pointer oops in put_pid()).
+ *
+ * There is no cheap, safe way to hook the real (always compiled-in,
+ * unconditional-of-config) alloc_pid()/free_pid()/put_pid() to restore the
+ * missing pinning without risking further instability, so -- matching this
+ * codebase's established "leak rather than risk a UAF/crash" convention
+ * (see vns_nsproxy_put_deferred(), vns_put_foreign_nsproxy()) -- we simply
+ * never give the object's memory back to the slab allocator. The ucounts
+ * and user_ns references are still released promptly below since neither
+ * is ever touched by alloc_pid()/free_pid()/put_pid(), so keeping those
+ * indefinitely would be a needless additional (and unbounded) leak.
+ *
+ * This trades a small, bounded (sizeof(struct pid_namespace) plus its
+ * pid_cachep and proc-ns inum) per-namespace-creation memory/inum leak for
+ * eliminating a real kernel panic; pid namespaces are created far less
+ * frequently than individual tasks, so the leak is not expected to be
+ * operationally significant.
+ *
+ * NOTE: despite the (upstream-matching, kept for diffability) name, this no
+ * longer actually destroys/frees @ns -- it only releases the two references
+ * (ucounts, user_ns) that are safe to release immediately. See above.
+ */
 static void destroy_pid_namespace(struct pid_namespace *ns)
 {
-	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
-
-	idr_destroy(&ns->idr);
-	call_rcu(&ns->rcu, delayed_free_pidns);
+	dec_pid_namespaces(ns->ucounts);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 }
 
 struct pid_namespace *vns_copy_pid_ns( /* [RENAME] */
@@ -188,11 +220,37 @@ unsigned long flags,
 	 * the reduced-scope cascade used here (SIGKILL everyone else in the
 	 * namespace, then stop admitting new members; orphan
 	 * reparenting/reaping is left to the host's own genuine parent chain).
+	 *
+	 * [BUILD-COMPAT] The above -- and the "leak, never free" strategy in
+	 * destroy_pid_namespace() above -- both implicitly assume the running
+	 * kernel's own get_pid_ns()/put_pid_ns() are no-ops, which is only
+	 * true when CONFIG_PID_NS=n. When the running kernel already has real
+	 * pid-namespace support (vns_pidns_runtime_supported, i.e.
+	 * vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn both resolved), the
+	 * real, unconditional alloc_pid()/free_pid() (kernel/pid.c) call the
+	 * real get_pid_ns()/put_pid_ns() on whatever pid_namespace ends up in
+	 * task_active_pid_ns() -- including one of our own vns_pid_ns_cachep
+	 * objects installed above. Those are then real refcount ops (not
+	 * no-ops), so the real put_pid_ns() eventually reaches the real
+	 * kernel's own destroy_pid_namespace(), which
+	 * kmem_cache_free()s the object against the real, private
+	 * pid_ns_cachep instead of vns_pid_ns_cachep -- a "Wrong slab cache"
+	 * mismatch (SLUB's cache_from_obj() self-corrects the actual free, so
+	 * this is not a memory-corruption risk, but it is a real, avoidable
+	 * defect observed as a live WARNING splat in delayed_free_pidns()).
+	 * In that case, delegate entirely to the real copy_pid_ns() instead:
+	 * the resulting object is allocated from the real pid_ns_cachep, so
+	 * every subsequent get_pid_ns()/put_pid_ns()/zap_pid_ns_processes()
+	 * call against it -- whether from this module or the real kernel --
+	 * is fully self-consistent. See vns_put_pid_ns() below for the
+	 * matching teardown half.
 	 */
 	if (!(flags & CLONE_NEWPID))
 		return vns_get_pid_ns(old_ns); /* [BUILD-COMPAT] */
 	if (task_active_pid_ns(current) != old_ns)
 		return ERR_PTR(-EINVAL);
+	if (vns_pidns_runtime_supported)
+		return vns_real_copy_pid_ns_fn(flags, user_ns, old_ns);
 	return create_pid_namespace(user_ns, old_ns);
 }
 
@@ -215,6 +273,21 @@ struct pid_namespace *vns_get_pid_ns(struct pid_namespace *ns) /* [BUILD-COMPAT]
 void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
 {
 	struct pid_namespace *parent;
+
+	/*
+	 * [BUILD-COMPAT] When the running kernel has real pid-namespace
+	 * support, every non-init_pid_ns object handed to this function was
+	 * created by the real copy_pid_ns() (see vns_copy_pid_ns() above),
+	 * so hand the whole put/teardown chain off to the real put_pid_ns()
+	 * too -- it already walks ->parent itself and frees against the
+	 * correct (real) pid_ns_cachep, avoiding the slab-cache mismatch a
+	 * module-owned destroy_pid_namespace() would otherwise risk.
+	 */
+	if (vns_pidns_runtime_supported) {
+		if (ns != &init_pid_ns)
+			vns_real_put_pid_ns_fn(ns);
+		return;
+	}
 
 	while (ns != &init_pid_ns) {
 		parent = ns->parent;
