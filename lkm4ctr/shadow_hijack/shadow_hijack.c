@@ -715,8 +715,23 @@ static void notrace shadow_hook_thunk(unsigned long ip, unsigned long parent_ip,
  * symbol to be missing entirely (returns -ENOENT) so callers can simply skip
  * shadowing a syscall that a particular kernel build already implements
  * natively (CONFIG_SYSVIPC=y, etc.) or does not expose at all.
+ *
+ * __nocfi: the only CFI-unsafe indirect calls in this whole file live here
+ * and in the ftrace-backend shadow_hook_remove() below (through
+ * shadow_ftrace_set_filter_ip_fn()/shadow_register_ftrace_function_fn(),
+ * resolved by name via shadow_hook_resolve() since they can be trimmed from
+ * a GKI KMI's export table). Everything else in this file -- most
+ * importantly shadow_hook_pre_handler()/shadow_hook_thunk()/
+ * shadow_hook_retprobe_ret(), which the real, CFI-instrumented kernel calls
+ * back into indirectly via struct kprobe/kretprobe/ftrace_ops -- must keep
+ * ordinary CFI instrumentation so those callback functions retain a valid
+ * KCFI type-hash prefix; see lkm4ctr/Makefile's VNS_CFI_UNSAFE_OBJS comment
+ * for why shadow_hijack.o itself is deliberately *not* CFI-disabled
+ * wholesale (doing so previously caused "CFI failure at
+ * kprobe_breakpoint_handler+... target: shadow_hook_pre_handler+..." on
+ * insmod).
  */
-int shadow_hook_install(struct shadow_hook *hook)
+int __nocfi shadow_hook_install(struct shadow_hook *hook)
 {
 	const char * const *name;
 	int err;
@@ -806,8 +821,11 @@ EXPORT_SYMBOL_GPL(shadow_hook_install);
  * shadow_hook_teardown_all_retprobes() at the very end of lkm4ctr_exit(),
  * once the kernel itself has already guaranteed module_refcount() is
  * zero (module_exit() is only reached after that).
+ *
+ * __nocfi: see shadow_hook_install()'s comment above -- the resolved-pointer
+ * calls below are the same class of CFI-unsafe indirect call.
  */
-void shadow_hook_remove(struct shadow_hook *hook)
+void __nocfi shadow_hook_remove(struct shadow_hook *hook)
 {
 	if (!hook->installed)
 		return;

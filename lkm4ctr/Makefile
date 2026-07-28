@@ -66,58 +66,82 @@ ccflags-y += -I$(src)/../common
 # [BUILD-COMPAT] Disable Clang CFI (CONFIG_CFI_CLANG, -fsanitize=(k)cfi) for
 # every object that either (a) resolves a kernel symbol at runtime via
 # shadow_hook_resolve()'s register_kprobe() trick and then calls through the
-# resulting raw function pointer (shadow_hijack.c's hook->original(), every
-# glue/vendor_kernel_*_compat.c real-name wrapper's r_<name>(...) call, the
-# vendored overlayfs sources' vns_ovl_vfsc_<name> macro-redirected calls via
+# resulting raw function pointer (every glue/vendor_kernel_*_compat.c
+# real-name wrapper's r_<name>(...) call, the vendored overlayfs sources'
+# vns_ovl_vfsc_<name> macro-redirected calls via
 # glue/vendor_kernel_ovl_vfs_compat.h), or (b) is itself the ftrace/kprobe
 # hook engine redirecting control flow into a replacement function chosen at
-# runtime (shadow_hijack.c/shadow_cgdevices.c). None of these call sites can
-# ever satisfy kernel CFI's compile-time type-hash check (the callee's real
-# compiled identity is looked up by name at runtime, not known to the
-# compiler at the call site), so the check is a guaranteed, fatal false
-# positive here -- observed as "Kernel panic - not syncing: CFI failure"
-# during vendor_kernel_init() on CONFIG_CFI_CLANG=y GKI kernels (5.15+).
-# This mirrors upstream's own CFLAGS_REMOVE_ftrace.o/insn.o (arch/arm64/
+# runtime (shadow_cgdevices.c). None of these call sites can ever satisfy
+# kernel CFI's compile-time type-hash check (the callee's real compiled
+# identity is looked up by name at runtime, not known to the compiler at the
+# call site), so the check is a guaranteed, fatal false positive here --
+# observed as "Kernel panic - not syncing: CFI failure" during
+# vendor_kernel_init() on CONFIG_CFI_CLANG=y GKI kernels (5.15+). This
+# mirrors upstream's own CFLAGS_REMOVE_ftrace.o/insn.o (arch/arm64/
 # kernel/Makefile): code that must jump to an address only known at runtime
 # is expected to opt out of CFI instrumentation for itself, not to defeat
 # CFI's protection for the rest of the kernel, which is untouched. Applied
 # to every real source object below except the two embedded-text blobs
 # (helper.sh.o/readme.txt.o, plain string data), lkm4ctr_main.o/
 # lkm4ctr_log.o/lkm4ctr_diagfs.o, which never call a symbol resolved this
-# way, and vendor_kernel/ipc/mqueue.o (see below).
+# way, and the objects listed below that are intentionally excluded.
 #
-# vendor_kernel/ipc/mqueue.o is intentionally EXCLUDED here even though it
-# is part of the vendored IPC sources: unlike msg.c/sem.c/shm.c/util.c, it
-# registers mqueue_fs_type/mqueue_super_ops/mqueue_file_operations, which
-# the real, CFI-instrumented kernel itself calls back into indirectly
-# (e.g. alloc_fs_context()'s fs_type->init_fs_context(fc) call into
-# mqueue_init_fs_context()) once mq_create_mount()/register_filesystem()
-# make them live. Compiling mqueue.o with CFI disabled strips the KCFI
-# type-hash prefix from those callback functions, so the *caller's* (real
-# kernel's) CFI check on the indirect call fails -- observed as "CFI
-# failure at alloc_fs_context+... (target: mqueue_init_fs_context+...)"
-# immediately on insmod. mqueue.c itself makes no raw resolved-pointer
-# indirect calls (it only calls the ordinary, by-name compat wrapper
-# functions defined in glue/vendor_kernel_ipc_compat.o, e.g.
-# fs_context_for_mount()/fc_mount(), which are direct calls from mqueue.c's
-# point of view -- the actual unsafe indirect call through the resolved
-# r_<name> pointer happens inside vendor_kernel_ipc_compat.o, which stays
-# in this list), so it needs no CFI exemption of its own and must keep CFI
-# enabled to remain a valid indirect-call target for the real kernel.
+# The following are intentionally EXCLUDED from this list even though they
+# would otherwise qualify by (a)/(b) above, because doing so strips the KCFI
+# type-hash prefix from a function DEFINED in that object that the real,
+# CFI-instrumented kernel itself calls back into indirectly (via a
+# kprobe/kretprobe/ftrace_ops/file_operations/proc_ops/file_system_type
+# struct this module registers) -- breaking the *caller's* (real kernel's)
+# CFI check on that indirect call the moment the callback fires, rather than
+# the module's own unsafe outgoing call (which the check is meant to guard
+# against). Observed panics of this shape: "CFI failure at
+# alloc_fs_context+... (target: mqueue_init_fs_context+...)" and "CFI
+# failure at kprobe_breakpoint_handler+... (target:
+# shadow_hook_pre_handler+...)". Each such object either has no unsafe
+# indirect call of its own at all, or has the specific function(s) that do
+# marked with the kernel's own __nocfi function attribute
+# (<linux/compiler_types.h>) instead, so the object as a whole keeps
+# ordinary CFI instrumentation and its callback functions remain valid
+# indirect-call targets:
+#   - shadow_hijack/shadow_hijack.o: defines shadow_hook_pre_handler()
+#     (kprobe pre_handler) and shadow_hook_thunk() (ftrace_ops.func), both
+#     real-kernel-invoked callbacks. The only genuine unsafe indirect calls
+#     in this file (the ftrace-backend shadow_hook_install()/
+#     shadow_hook_remove(), through the resolved
+#     shadow_{,un}register_ftrace_function_fn/shadow_ftrace_set_filter_ip_fn
+#     pointers) are marked __nocfi individually instead.
+#   - vendor_kernel/kernel/nsproxy.o: defines vns_exit_kprobe_pre_handler()
+#     (kprobe pre_handler on do_exit()); makes no unsafe indirect calls of
+#     its own (its shadow_hook_resolve()-based init_cgroup_ns/proc_alloc_inum
+#     lookups are called through from vendor_kernel_module.o, which stays in
+#     this list).
+#   - vendor_kernel/ipc/util.o: registers sysvipc_proc_ops via
+#     proc_create_data(); makes no unsafe indirect calls of its own.
+#   - vendor_kernel/ipc/shm.o: defines shm_file_operations/
+#     shm_file_operations_huge/shm_vm_ops; makes no unsafe indirect calls of
+#     its own (unlike msg.c/sem.c/util.c/compat.c, which stay in this list).
+#   - vendor_kernel/glue/vendor_kernel_procfs.o: defines vns_setgroups_fops
+#     (the /proc/*/setgroups file_operations). The one genuine unsafe
+#     indirect call in this file (vns_setgroups_create_fd(), through the
+#     resolved anon_inode_getfd_secure_fn pointer) is marked __nocfi
+#     individually instead.
+#   - vendor_kernel/ipc/mqueue.o: registers mqueue_fs_type/mqueue_super_ops/
+#     mqueue_file_operations, called back via e.g. alloc_fs_context()'s
+#     fs_type->init_fs_context(fc) -> mqueue_init_fs_context(). Makes no
+#     unsafe indirect calls of its own (fs_context_for_mount()/fc_mount()
+#     etc. are ordinary direct calls into the by-name compat wrapper
+#     functions defined in vendor_kernel_ipc_compat.o, which stays in this
+#     list for the actual resolved-pointer call inside it).
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
-	shadow_hijack/shadow_hijack.o \
 	shadow_cgdevices/shadow_cgdevices.o \
 	vendor_kernel/kernel/utsname.o \
-	vendor_kernel/kernel/nsproxy.o \
 	vendor_kernel/kernel/pid_namespace.o \
 	vendor_kernel/kernel/user_namespace.o \
 	vendor_kernel/ipc/namespace.o \
-	vendor_kernel/ipc/util.o \
 	vendor_kernel/ipc/msgutil.o \
 	vendor_kernel/ipc/msg.o \
 	vendor_kernel/ipc/sem.o \
-	vendor_kernel/ipc/shm.o \
 	vendor_kernel/ipc/compat.o \
 	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
@@ -138,7 +162,6 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/kernel/time/namespace.o \
 	vendor_kernel/glue/vendor_kernel_module.o \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
-	vendor_kernel/glue/vendor_kernel_procfs.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
 	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
 	vendor_kernel/glue/vendor_kernel_diag.o \

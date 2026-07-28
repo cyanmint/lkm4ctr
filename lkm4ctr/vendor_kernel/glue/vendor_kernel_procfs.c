@@ -472,7 +472,17 @@ typedef int (*vns_anon_inode_getfd_secure_fn)(const char *,
 					       void *, int,
 					       const struct inode *);
 
-static long vns_setgroups_create_fd(void)
+/*
+ * __nocfi: this is the only CFI-unsafe indirect call in this file (through
+ * anon_inode_getfd_secure_fn, resolved by name at runtime since it can be
+ * trimmed from a GKI KMI's export table). vns_setgroups_open()/_read()/
+ * _write() above are real file_operations callbacks the kernel's own VFS
+ * calls back into indirectly once wired up via vns_setgroups_fops, and must
+ * keep ordinary CFI instrumentation to remain valid indirect-call targets;
+ * see lkm4ctr/Makefile's VNS_CFI_UNSAFE_OBJS comment for why this whole
+ * object is therefore deliberately *not* CFI-disabled.
+ */
+static long __nocfi vns_setgroups_create_fd(void)
 {
 	vns_anon_inode_getfd_secure_fn anon_inode_getfd_secure_fn;
 	struct file *file;

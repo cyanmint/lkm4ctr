@@ -261,22 +261,60 @@ transfer control to an address only known at runtime cannot satisfy a
 compile-time check). CFI protection for the rest of the running kernel is
 entirely unaffected.
 
-`vendor_kernel/ipc/mqueue.o` is deliberately kept **out** of this CFI-
-disabled set, unlike the other vendored IPC objects. Its own code makes no
-unresolved-pointer indirect calls (`fs_context_for_mount()`/`fc_mount()`
-etc. are ordinary by-name calls into the compat wrapper functions in
-`glue/vendor_kernel_ipc_compat.o`, which stays CFI-disabled for the actual
-resolved-pointer call inside it); instead it *registers* `mqueue_fs_type`/
-`mqueue_super_ops`/`mqueue_file_operations`, which the real,
-CFI-instrumented kernel itself calls back into indirectly once mounted
-(e.g. `alloc_fs_context()`'s `fs_type->init_fs_context(fc)` call into
-`mqueue_init_fs_context()`). Compiling `mqueue.o` with CFI disabled strips
-the KCFI type-hash prefix the compiler would otherwise emit for those
-callback functions, so the *caller's* (real kernel's) CFI check on the
-indirect call into them fails instead -- observed as `CFI failure at
-alloc_fs_context+... (target: mqueue_init_fs_context+...)` immediately on
-`insmod`. Keeping `mqueue.o` CFI-enabled preserves those prefixes so it
-remains a valid callback target for the real kernel.
+Several objects are deliberately kept **out** of this CFI-disabled set even
+though they use `shadow_hook_resolve()`-based lookups, because they define
+functions the real, CFI-instrumented kernel itself calls back into
+indirectly (a `kprobe`/`kretprobe` `pre_handler`/`handler`, a
+`ftrace_ops.func`, or a `file_operations`/`proc_ops`/`file_system_type`
+struct wired into a real mount/procfs entry). Compiling such an object with
+CFI disabled strips the KCFI type-hash prefix the compiler would otherwise
+emit for those callback functions, so the *caller's* (real kernel's) CFI
+check on the indirect call into them fails instead of the module's own
+call -- observed as `CFI failure at alloc_fs_context+... (target:
+mqueue_init_fs_context+...)` and `CFI failure at
+kprobe_breakpoint_handler+... (target: shadow_hook_pre_handler+...)`
+immediately on `insmod`. For each of these, either the whole file makes no
+unsafe resolved-pointer indirect call at all, or the specific function(s)
+that do are marked with the kernel's own `__nocfi` function attribute
+(`<linux/compiler_types.h>`) instead, so the rest of the object keeps
+ordinary CFI instrumentation:
+- `shadow_hijack/shadow_hijack.o` -- defines `shadow_hook_pre_handler()`
+  (kprobe `pre_handler`) and `shadow_hook_thunk()` (`ftrace_ops.func`); the
+  ftrace-backend `shadow_hook_install()`/`shadow_hook_remove()` (the only
+  functions here making a genuine resolved-pointer call, through
+  `shadow_{,un}register_ftrace_function_fn`/`shadow_ftrace_set_filter_ip_fn`)
+  are marked `__nocfi` individually.
+- `vendor_kernel/kernel/nsproxy.o` -- defines `vns_exit_kprobe_pre_handler()`
+  (kprobe `pre_handler` on `do_exit()`); makes no unsafe indirect calls of
+  its own.
+- `vendor_kernel/ipc/util.o` -- registers `sysvipc_proc_ops` via
+  `proc_create_data()`; makes no unsafe indirect calls of its own.
+- `vendor_kernel/ipc/shm.o` -- defines `shm_file_operations`/
+  `shm_file_operations_huge`/`shm_vm_ops`; makes no unsafe indirect calls of
+  its own (unlike `msg.c`/`sem.c`/`util.c`/`compat.c`, which stay
+  CFI-disabled).
+- `vendor_kernel/glue/vendor_kernel_procfs.o` -- defines
+  `vns_setgroups_fops` (the `/proc/*/setgroups` `file_operations`); the one
+  genuine resolved-pointer call here (`vns_setgroups_create_fd()`, through
+  `anon_inode_getfd_secure_fn`) is marked `__nocfi` individually.
+- `vendor_kernel/ipc/mqueue.o` -- registers `mqueue_fs_type`/
+  `mqueue_super_ops`/`mqueue_file_operations`, which the real kernel calls
+  back into once mounted (e.g. `alloc_fs_context()`'s
+  `fs_type->init_fs_context(fc)` call into `mqueue_init_fs_context()`).
+  Makes no unsafe indirect calls of its own (`fs_context_for_mount()`/
+  `fc_mount()` etc. are ordinary by-name calls into the compat wrapper
+  functions in `glue/vendor_kernel_ipc_compat.o`, which stays CFI-disabled
+  for the actual resolved-pointer call inside it).
+
+The vendored overlayfs sources (`vendor_kernel/fs/overlayfs/*.c`) also
+define real-kernel-invoked callback structs (`super_operations`,
+`file_operations`, `file_system_type`, ...) while pervasively using
+`glue/vendor_kernel_ovl_vfs_compat.h`'s macro-redirected resolved-pointer
+calls throughout nearly every function in every file. Untangling that into
+a precise per-function `__nocfi` split (as done for the objects above) is a
+larger, separate effort; this remains a known gap where the same class of
+CFI panic could in principle occur once overlay mounts are actually
+exercised on a `CONFIG_CFI_CLANG=y` kernel.
 
 ## `lookup_one` symbol resolution (KMI >= 6.3)
 
