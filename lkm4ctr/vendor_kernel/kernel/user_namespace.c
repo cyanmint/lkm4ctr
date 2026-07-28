@@ -15,6 +15,15 @@
  *   Any line NOT marked RENAME/BUILD-COMPAT/DIAGFS is unchanged from upstream.
  */
 
+/*
+ * Must be included before any other header: <linux/seq_file.h>'s
+ * seq_user_ns() (included below, used by uid_m_show()/gid_m_show()/
+ * projid_m_show()) has a static inline body that references the bare
+ * init_user_ns name directly, and vns_from_kuid_munged()/
+ * vns_from_kgid_munged() below reference bare overflowuid/overflowgid --
+ * see ../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../glue/vendor_kernel_data_syms.h"
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>

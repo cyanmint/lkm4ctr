@@ -21,6 +21,13 @@
  * by Jakub Jelinek.
  *
  */
+/*
+ * Must be included before any other header: <linux/highuid.h>'s
+ * high2lowuid()/high2lowgid() macros (used via SET_UID()/SET_GID() below,
+ * under CONFIG_UID16) reference the bare overflowuid/overflowgid names
+ * directly -- see ../glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../glue/vendor_kernel_data_syms.h"
 #include <linux/compat.h>
 #include <linux/errno.h>
 #include <linux/highuid.h>

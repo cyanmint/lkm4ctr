@@ -4,6 +4,15 @@
  * Copyright (C) 2011 Novell Inc.
  */
 
+/*
+ * Must be included before any other header: it #defines init_user_ns, and
+ * several real kernel headers included below (or transitively by this
+ * header's includers, e.g. <linux/mnt_idmapping.h>'s initial_idmapping())
+ * have static inline helpers that reference that bare name directly -- see
+ * glue/vendor_kernel_data_syms.h for the full rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
+
 #include <linux/kernel.h>
 #include <linux/uuid.h>
 #include <linux/cred.h>

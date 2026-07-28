@@ -64,6 +64,16 @@
 #define _VNS_OVL_VFS_COMPAT_H
 
 /*
+ * Must be included before any other header in this file: it #defines
+ * init_user_ns (used by the nop_mnt_idmap alias below and by xattrs.c's
+ * ovl_can_list()), and several real kernel headers included further down
+ * (or transitively by this header's includers) have static inline helpers
+ * that reference that bare name directly -- see vendor_kernel_data_syms.h
+ * for the full rationale.
+ */
+#include "vendor_kernel_data_syms.h"
+
+/*
  * vfs_path_lookup() is not declared in any public header (only
  * fs/internal.h, unavailable to out-of-tree modules) -- it is itself
  * EXPORT_SYMBOL_NS(vfs_path_lookup, ANDROID_GKI_VFS_EXPORT_ONLY) in
@@ -93,24 +103,6 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #include <linux/mm.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
-
-/*
- * [BUILD-COMPAT] init_user_ns is a DATA symbol (register_kprobe() based
- * shadow_hook_resolve() cannot resolve it -- kprobes only attach to code
- * addresses), and CONFIG_TRIM_UNUSED_KSYMS has been observed to drop its
- * module symbol table entry entirely on some GKI KMIs ("Unknown symbol
- * init_user_ns" at insmod). xattrs.c's ovl_can_list() (all tiers) and the
- * MID/OLD-tier nop_mnt_idmap alias below reference it directly, but this
- * file (unlike the vendored overlayfs .c sources) never includes
- * vendor_kernel.h, whose own identical redirect (see that header's
- * init_user_ns comment) therefore never applies here. Redirect the bare
- * name to the same module-owned vns_real_init_user_ns pointer that
- * glue/vendor_kernel_module.c's vendor_kernel_init() populates from
- * current_user_ns() at load time, so no relocation to the (possibly
- * trimmed) real symbol is ever emitted from this header's includers.
- */
-extern struct user_namespace *vns_real_init_user_ns;
-#define init_user_ns (*vns_real_init_user_ns)
 
 #define VNS_OVL_TIER_NEW (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0))
 #define VNS_OVL_TIER_MID (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0) && \

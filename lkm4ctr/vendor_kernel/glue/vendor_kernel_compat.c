@@ -174,12 +174,14 @@ struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 struct ipc_namespace *vns_init_ipc_ns_ptr;
 
 /* [BUILD-COMPAT] The real kernel's init_user_ns, captured (never resolved
- * via kallsyms/kprobe -- it is a data symbol, see vendor_kernel.h's
- * init_user_ns macro comment) from current_user_ns() at the very start of
- * vendor_kernel_init(). NULL until then. overflowgid has no real-kernel
- * dependency at all: it is just the standard kernel.overflowgid default. */
+ * via kallsyms/kprobe -- it is a data symbol, see
+ * glue/vendor_kernel_data_syms.h's init_user_ns macro comment) from
+ * current_user_ns() at the very start of vendor_kernel_init(). NULL until
+ * then. overflowgid/overflowuid have no real-kernel dependency at all: they
+ * are just the standard kernel.overflow{u,g}id defaults. */
 struct user_namespace *vns_real_init_user_ns;
-const int vns_local_overflowgid = 65534;
+int vns_local_overflowgid = 65534;
+int vns_local_overflowuid = 65534;
 
 /*
  * [BUILD-COMPAT] Module-owned kmem_cache pointers for the four namespace-

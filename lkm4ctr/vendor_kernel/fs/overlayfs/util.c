@@ -3,6 +3,14 @@
  * Copyright (C) 2011 Novell Inc.
  * Copyright (C) 2016 Red Hat, Inc.
  */
+/*
+ * Must be included before any other header: <linux/mnt_idmapping.h>'s
+ * initial_idmapping() (reached transitively via <linux/fs.h> et al, pulled
+ * in below) has a static inline body that references the bare init_user_ns
+ * name directly -- see glue/vendor_kernel_data_syms.h for the full
+ * rationale.
+ */
+#include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/version.h>
 #include <linux/compiler_types.h>
 
