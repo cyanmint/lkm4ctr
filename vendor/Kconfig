@@ -1,0 +1,101 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# lkm4ctr - unified container-compat kernel module.
+#
+# This tree is built exclusively as a standalone out-of-tree module (see
+# Makefile: `obj-m += lkm4ctr.o` always applies, since nothing in this
+# repository sources this file from a real kernel-tree top-level Kconfig),
+# so CONFIG_LKM4CTR and CONFIG_LKM4CTR_LOG_DMESG below are never actually
+# evaluated by a real Kconfig/oldconfig flow today. This file exists as
+# documentation of the module's configuration surface, and so that a future
+# in-tree integration (dropping this directory under a kernel source tree
+# and `source`-ing this file from drivers/misc/Kconfig or similar) picks up
+# working option definitions with no source changes required. For the
+# out-of-tree build this repository actually uses, the equivalent switch is
+# the LKM4CTR_LOG_DMESG make variable documented in Makefile.
+
+config LKM4CTR
+	tristate "lkm4ctr unified container-compatibility module"
+	default n
+	help
+	  Unified out-of-tree module providing transparent syscall-hook
+	  compatibility shims (namespaces, SysV IPC, POSIX message queues,
+	  cgroup devices) for containerd/runc/dockerd on kernels missing the
+	  corresponding native support, plus a mountable "lkm4ctr" diagfs
+	  (mount -t lkm4ctr diag <mountpoint>) exposing per-submodule
+	  status/hooks/namespaces/log diagnostics and a safe self-unload
+	  control file.
+
+config LKM4CTR_LOG_DMESG
+	bool "lkm4ctr: also log to the kernel log (dmesg)"
+	depends on LKM4CTR
+	default n
+	help
+	  Every lkm4ctr log line is always recorded in an in-memory ring
+	  buffer, readable via the lkm4ctr diagfs's per-submodule and
+	  top-level `log` files regardless of this option.
+
+	  Say Y to additionally mirror every log line to the kernel log
+	  (dmesg) at the matching level.
+
+	  Say N (the default) to make lkm4ctr.ko completely silent in
+	  dmesg: it will never call printk at all, and every message is
+	  reachable only by mounting the lkm4ctr diagfs.
+
+config LKM4CTR_VENDOR_KERNEL
+	bool "vendor_kernel: Vendored kernel namespace subsystem"
+	depends on LKM4CTR
+	select NAMESPACES
+	select UTS_NS
+	select IPC_NS
+	select PID_NS
+	select USER_NS
+	select NET_NS
+	select CGROUPS
+	select TIME_NS
+	select SYSVIPC
+	select POSIX_MQUEUE
+	help
+	  Vendor the entire Linux kernel namespace subsystem as a parallel
+	  in-module implementation. Hooks all namespace syscalls unconditionally.
+	  Auto-loads at insmod time.
+
+	  vendor_kernel resolves several running kernel's namespace-private
+	  symbols (e.g. pid_ns_cachep, init_ipc_ns) by name at module load
+	  time and silently falls back to bookkeeping-only/no-op behaviour,
+	  or fails specific unshare(2)/clone(2)/setns(2) namespace types with
+	  -EINVAL, for any namespace type whose backing CONFIG_*_NS option is
+	  not built into the running kernel. PID_NS and USER_NS are the
+	  exception: vendor_kernel fully vendors its own pid/user namespace
+	  refcounting (vns_get_pid_ns()/vns_put_pid_ns()/vns_get_user_ns()/
+	  vns_put_user_ns() in kernel/pid_namespace.c and
+	  kernel/user_namespace.c) instead of depending on the target
+	  kernel's own get_pid_ns()/put_pid_ns()/get_user_ns()/put_user_ns(),
+	  so unshare(2)/clone(2)/setns(2) for CLONE_NEWPID/CLONE_NEWUSER work
+	  correctly even when the target kernel has CONFIG_PID_NS=n/
+	  CONFIG_USER_NS=n (see README.md, "Namespace
+	  refcounting is fully self-contained"). The selects above still
+	  ensure that, once this file is sourced by a real kernel tree,
+	  enabling LKM4CTR_VENDOR_KERNEL forces CONFIG_NAMESPACES,
+	  CONFIG_UTS_NS, CONFIG_IPC_NS, CONFIG_PID_NS, CONFIG_USER_NS,
+	  CONFIG_NET_NS, CONFIG_CGROUPS, CONFIG_TIME_NS, CONFIG_SYSVIPC and
+	  CONFIG_POSIX_MQUEUE to y for consistency and for any other in-tree
+	  code that assumes them, and so that the remaining (non-PID/USER)
+	  namespace types it vendors are actually available on the target
+	  kernel and unshare(2)/clone(2) for IPC/NET namespaces (among
+	  others) do not spuriously fail.
+
+config LKM4CTR_VENDOR_KERNEL_OVERLAYFS
+	bool "vendor_kernel: Vendored overlayfs"
+	depends on LKM4CTR_VENDOR_KERNEL
+	default y
+	help
+	  Vendor the entire Linux kernel overlayfs (fs/overlayfs/) into
+	  lkm4ctr.ko and always use it for "overlay" mounts. Hooks
+	  get_fs_type() so every lookup for the name "overlay" is answered
+	  by this vendored implementation, unconditionally -- regardless of
+	  whether the running kernel also ships its own built-in overlayfs
+	  or overlay.ko; the real get_fs_type() is never even consulted for
+	  that name. Auto-installs at insmod time alongside the rest of
+	  vendor_kernel; mount count is exposed via the vendor_kernel
+	  diagfs status file. See README.md.

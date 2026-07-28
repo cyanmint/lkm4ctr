@@ -13,29 +13,40 @@ Module Interface versions, e.g. `android14-6.1`), not a generic desktop
 Linux kernel.
 
 Start with `README.md` for the full module map and subsystem
-classifications ("real" vs. "bookkeeping-only" vs. "stub"); each subsystem
-directory also has its own `README.md` with implementation-specific detail
-— read the relevant one before changing that subsystem.
+classifications ("real" vs. "bookkeeping-only" vs. "stub"); `vendor/
+README.md` and `glue/README.md` have implementation-specific
+detail — read the relevant one before changing that area.
 
 ## Repository layout
 
-- `lkm4ctr/` — the unified kernel module source and kbuild `Makefile`.
-  - `lkm4ctr_main.c`, `lkm4ctr_log.c`, `lkm4ctr_diagfs.c`,
-    `lkm4ctr_hotreload.c` — module entry/exit, logging, and the `lkm4ctr`
-    diagfs (`mount -t lkm4ctr diag <mnt>`) used for runtime
-    diagnostics/log inspection.
-  - `shadow_hijack/` — shared ftrace/kprobe hook engine used by the other
-    subsystems.
-  - `vendor_kernel/` — vendored namespace/IPC/mqueue/overlayfs
-    implementation. Overlayfs now lives in a single `fs/overlayfs/` tree
-    (android16-6.12 baseline) with `glue/vendor_kernel_ovl_vfs_compat.{h,c}`
+The project is a flat, unified tree: only `glue/` and
+`lkm4ctr_checker/` are code this project writes; everything under
+`vendor/` is vendored code.
+
+- `vendor/` — the unified kernel module build directory and kbuild
+  `Makefile`/`Kconfig`, at the project root.
+  - `kernel/`, `ipc/`, `fs/` — vendored namespace/IPC/mqueue/overlayfs
+    implementation. Overlayfs lives in a single `fs/overlayfs/` tree
+    (android16-6.12 baseline) with `../glue/vendor_kernel_ovl_vfs_compat.{h,c}`
     providing the cross-KMI VFS/fs_context compatibility tiers described
     below.
-  - `shadow_cgdevices/` — cgroup-device compatibility hook shim.
+- `glue/` — the project root sibling of `vendor/`; all hand-written code:
+    - `lkm4ctr_main.c`, `lkm4ctr_log.c`, `lkm4ctr_diagfs.c`,
+      `lkm4ctr_hotreload.c` — module entry/exit, logging, and the `lkm4ctr`
+      diagfs (`mount -t lkm4ctr diag <mnt>`) used for runtime
+      diagnostics/log inspection. The diagfs is now a single, flat tree (no
+      more per-submodule `hijack`/`cgroupdevices` subdirectories) since
+      `vendor_kernel` is the only runtime-loadable subsystem.
+    - `shadow_hijack.c`, `shadow_hook.h` — the shared ftrace/kprobe hook
+      engine used by `vendor_kernel`. No longer a separately loadable
+      subsystem: it is started/stopped directly by `lkm4ctr_main.c` and has
+      no diagfs control surface of its own.
+    - `lkm4ctr_compat.h`, `lkm4ctr_log.h` — shared, header-only helpers
+      formerly under a top-level `common/` directory.
+    - `vendor_kernel_*.c`/`.h` — the vendor_kernel/VFS/overlayfs glue and
+      compat layers.
 - `lkm4ctr_checker/` — a plain **userspace** diagnostic binary (not a
   kernel module). No build-time or load-time dependency on `lkm4ctr.ko`.
-- `common/` — shared, header-only helpers (`shadow_hook.h`,
-  `lkm4ctr_compat.h`, `lkm4ctr_log.h`) included by multiple subsystems.
 - `qemu_test.sh` — a single merged script with three roles, dispatched on
   PID/argv[0]/flags (see its own header comment): host-side QEMU launcher,
   ramdisk stage-1/stage-2 init, and a `-t` "checker mode" that runs
@@ -45,11 +56,15 @@ directory also has its own `README.md` with implementation-specific detail
   a KMI matrix inside SukiSU-Ultra's DDK container images and boot-tests
   every KMI under QEMU.
 
+The `shadow_cgdevices` submodule (cgroup-device compatibility hook shim)
+has been removed entirely; it is not vendored or replaced elsewhere in this
+tree.
+
 ## Vendored overlayfs compatibility tiers
 
-`vendor_kernel/fs/overlayfs/` is now a **single** vendored overlayfs tree
+`vendor/fs/overlayfs/` is now a **single** vendored overlayfs tree
 taken from the android16-6.12 upstream snapshot. Cross-KMI support comes
-from `vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.{h,c}`, which adapts
+from `glue/vendor_kernel_ovl_vfs_compat.{h,c}`, which adapts
 that 6.12-shaped source across three `LINUX_VERSION_CODE` tiers:
 
 | Tier | Kernel version range | KMIs |
@@ -82,7 +97,7 @@ over.
   inside `ghcr.io/ylarod/ddk-min:<kmi>-<release>` DDK container images
   (see SukiSU-Ultra's `build-lkm.yml`) for exactly this reason:
   ```sh
-  make -C /opt/ddk/kdir/<kmi> M="$PWD/lkm4ctr" modules
+  make -C /opt/ddk/kdir/<kmi> M="$PWD/vendor" modules
   ```
   To compile-test locally against a plain kernel source tree instead
   (only useful as a rough syntax/API check, **not** equivalent to a real
@@ -128,15 +143,16 @@ the `build` job.
 
 ## Conventions
 
-- Header-only shared helpers go in `common/`, not duplicated per subsystem.
+- Header-only shared helpers go in `glue/`, not duplicated
+  per subsystem.
 - Vendored subsystem code is intentionally kept close to its upstream
-  kernel source layout/paths under `vendor_kernel/` for diffability against
-  `kernel/common` (see `vendor_kernel/vendor_kernel_diff.sh` and the
+  kernel source layout/paths under `vendor/` for diffability against
+  `kernel/common` (see `vendor/vendor_kernel_diff.sh` and the
   `vendor-ns-diff` CI job) — avoid gratuitous reformatting of vendored
   files.
 - `lkm4ctr_checker` intentionally has zero build/runtime dependency on
   `lkm4ctr.ko` or any kernel headers; keep it that way when adding checks.
-- Every subsystem README documents its own "real vs. bookkeeping vs. stub"
+- Every README documents its own "real vs. bookkeeping vs. stub"
   classification — update the relevant README (and the summary table in
   the top-level `README.md`) whenever a change moves a feature between
   these categories.

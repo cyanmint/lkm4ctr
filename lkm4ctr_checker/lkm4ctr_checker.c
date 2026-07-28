@@ -676,7 +676,7 @@ static void shadow_checker_user(void)
  * IPC / NET / MNT / CGROUP namespaces: none of these has a cheap, safe,
  * universal in-process "did isolation really happen" signal the way UTS/
  * PID/USER do. For these four, the remaining caveats live in
- * lkm4ctr/lkm4ctr/vendor_kernel/README.md, and genuine kernel isolation for
+ * vendor/README.md, and genuine kernel isolation for
  * them touches subsystems this tool must not perturb - e.g. mounting/
  * networking. So this tool only reports whether the unshare(2) syscall
  * itself succeeds; a successful-but-unverifiable-isolation namespace is
