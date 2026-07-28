@@ -58,6 +58,7 @@ lkm4ctr-objs := \
 	kernel/time/namespace.o \
 	../glue/vendor_kernel_module.o \
 	../glue/vendor_kernel_syscalls.o \
+	../glue/vendor_kernel_syscalls_userns.o \
 	../glue/vendor_kernel_procfs.o \
 	../glue/vendor_kernel_procfs_userns.o \
 	../glue/vendor_kernel_overlay.o \
@@ -304,6 +305,7 @@ VNS_CFI_UNSAFE_OBJS := \
 	../glue/vendor_kernel_ipc_compat.o \
 	../glue/vendor_kernel_module.o \
 	../glue/vendor_kernel_syscalls.o \
+	../glue/vendor_kernel_syscalls_userns.o \
 	../glue/vendor_kernel_overlay.o \
 	../glue/vendor_kernel_ovl_vfs_compat.o \
 	../glue/vendor_kernel_diag.o \

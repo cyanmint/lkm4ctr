@@ -364,8 +364,28 @@ int vendor_kernel_init(void)
 	else
 		total_hooked += hooked;
 
+	/*
+	 * Best-effort only: without these, getuid()/setuid()/etc. simply
+	 * observe/mutate the raw global id unchanged on a kernel genuinely
+	 * missing CONFIG_USER_NS (same as before these hooks existed)
+	 * instead of being remapped through the real per-task
+	 * user_namespace vendor_kernel_hook_unshare()/vns_unshare_userns()
+	 * already installs -- a missing observability/self-containment
+	 * nicety, not a functional regression to unshare(CLONE_NEWUSER)
+	 * itself, so a failure to resolve these syscalls by name must not
+	 * abort the whole submodule's load.
+	 */
+	hooked = shadow_hook_install_all(vendor_kernel_userns_hooks, "vendor_kernel_userns");
+	if (hooked < 0)
+		LKM4CTR_WARN("vendor_kernel",
+			     "failed to install uid/gid getter/setter syscall hooks (%d); unshare(CLONE_NEWUSER) + uid_map/gid_map still install a real user_namespace, only getuid()/setuid()/etc. observability is affected",
+			     hooked);
+	else
+		total_hooked += hooked;
+
 	hooked = vns_overlay_init();
 	if (hooked) {
+		shadow_hook_remove_all(vendor_kernel_userns_hooks);
 		shadow_hook_remove_all(vendor_kernel_procfs_hooks);
 		shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 		shadow_hook_remove_all(vendor_kernel_core_hooks);
@@ -419,6 +439,7 @@ void vendor_kernel_exit(void)
 		return;
 	vendor_kernel_enabled = false;
 	vns_overlay_exit();
+	shadow_hook_remove_all(vendor_kernel_userns_hooks);
 	shadow_hook_remove_all(vendor_kernel_procfs_hooks);
 	shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
