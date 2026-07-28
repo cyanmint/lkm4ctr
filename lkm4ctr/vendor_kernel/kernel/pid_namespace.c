@@ -220,11 +220,37 @@ unsigned long flags,
 	 * the reduced-scope cascade used here (SIGKILL everyone else in the
 	 * namespace, then stop admitting new members; orphan
 	 * reparenting/reaping is left to the host's own genuine parent chain).
+	 *
+	 * [BUILD-COMPAT] The above -- and the "leak, never free" strategy in
+	 * destroy_pid_namespace() above -- both implicitly assume the running
+	 * kernel's own get_pid_ns()/put_pid_ns() are no-ops, which is only
+	 * true when CONFIG_PID_NS=n. When the running kernel already has real
+	 * pid-namespace support (vns_pidns_runtime_supported, i.e.
+	 * vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn both resolved), the
+	 * real, unconditional alloc_pid()/free_pid() (kernel/pid.c) call the
+	 * real get_pid_ns()/put_pid_ns() on whatever pid_namespace ends up in
+	 * task_active_pid_ns() -- including one of our own vns_pid_ns_cachep
+	 * objects installed above. Those are then real refcount ops (not
+	 * no-ops), so the real put_pid_ns() eventually reaches the real
+	 * kernel's own destroy_pid_namespace(), which
+	 * kmem_cache_free()s the object against the real, private
+	 * pid_ns_cachep instead of vns_pid_ns_cachep -- a "Wrong slab cache"
+	 * mismatch (SLUB's cache_from_obj() self-corrects the actual free, so
+	 * this is not a memory-corruption risk, but it is a real, avoidable
+	 * defect observed as a live WARNING splat in delayed_free_pidns()).
+	 * In that case, delegate entirely to the real copy_pid_ns() instead:
+	 * the resulting object is allocated from the real pid_ns_cachep, so
+	 * every subsequent get_pid_ns()/put_pid_ns()/zap_pid_ns_processes()
+	 * call against it -- whether from this module or the real kernel --
+	 * is fully self-consistent. See vns_put_pid_ns() below for the
+	 * matching teardown half.
 	 */
 	if (!(flags & CLONE_NEWPID))
 		return vns_get_pid_ns(old_ns); /* [BUILD-COMPAT] */
 	if (task_active_pid_ns(current) != old_ns)
 		return ERR_PTR(-EINVAL);
+	if (vns_pidns_runtime_supported)
+		return vns_real_copy_pid_ns_fn(flags, user_ns, old_ns);
 	return create_pid_namespace(user_ns, old_ns);
 }
 
@@ -247,6 +273,21 @@ struct pid_namespace *vns_get_pid_ns(struct pid_namespace *ns) /* [BUILD-COMPAT]
 void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
 {
 	struct pid_namespace *parent;
+
+	/*
+	 * [BUILD-COMPAT] When the running kernel has real pid-namespace
+	 * support, every non-init_pid_ns object handed to this function was
+	 * created by the real copy_pid_ns() (see vns_copy_pid_ns() above),
+	 * so hand the whole put/teardown chain off to the real put_pid_ns()
+	 * too -- it already walks ->parent itself and frees against the
+	 * correct (real) pid_ns_cachep, avoiding the slab-cache mismatch a
+	 * module-owned destroy_pid_namespace() would otherwise risk.
+	 */
+	if (vns_pidns_runtime_supported) {
+		if (ns != &init_pid_ns)
+			vns_real_put_pid_ns_fn(ns);
+		return;
+	}
 
 	while (ns != &init_pid_ns) {
 		parent = ns->parent;

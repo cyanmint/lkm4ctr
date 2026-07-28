@@ -151,6 +151,29 @@ extern struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *,
 extern void (*vns_real_free_nsproxy_fn)(struct nsproxy *);
 extern bool vendor_kernel_enabled;
 extern bool vns_pidns_runtime_supported;
+/*
+ * [BUILD-COMPAT] Real kernel's own (non-static, non-exported) copy_pid_ns()
+ * and (EXPORT_SYMBOL_GPL) put_pid_ns(), resolved by name so vns_copy_pid_ns()/
+ * vns_put_pid_ns() (kernel/pid_namespace.c) can hand pid namespace creation
+ * and teardown off to the real kernel's own implementation whenever the
+ * running kernel already has real pid-namespace support (CONFIG_PID_NS=y).
+ * Both resolve together (vns_pidns_runtime_supported tracks their combined
+ * availability): on such a kernel, a module-owned pid_namespace (allocated
+ * from vns_pid_ns_cachep) installed as some task's
+ * nsproxy->pid_ns_for_children is still reached by the real, unconditional
+ * alloc_pid()/free_pid() (kernel/pid.c), whose get_pid_ns()/put_pid_ns()
+ * calls are real refcount ops (not no-ops) in that configuration -- so the
+ * real put_pid_ns() eventually calls the real kernel's own
+ * destroy_pid_namespace(), which kmem_cache_free()s the object against the
+ * real, private pid_ns_cachep instead of vns_pid_ns_cachep, triggering
+ * SLUB's "Wrong slab cache" warning (cache_from_obj() self-corrects the
+ * free, so this is not a memory-corruption risk, but it is a real, avoidable
+ * defect). Delegating entirely to the real copy_pid_ns()/put_pid_ns() in
+ * this case (see vns_copy_pid_ns()) avoids the mismatch altogether.
+ */
+extern struct pid_namespace *(*vns_real_copy_pid_ns_fn)(unsigned long flags,
+	struct user_namespace *user_ns, struct pid_namespace *old_ns);
+extern void (*vns_real_put_pid_ns_fn)(struct pid_namespace *ns);
 
 static inline void vns_count_set(void *count, int value, bool is_refcount)
 {

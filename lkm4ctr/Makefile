@@ -239,6 +239,22 @@ ccflags-y += -I$(src)/../common
 #     translation unit so they can keep normal CFI instrumentation; only
 #     each function's own outgoing resolved-pointer call is marked __nocfi
 #     individually, mirroring vns_kill_litter_super() above.
+#   - vendor_kernel/glue/vendor_kernel_procfs.o: vendor_kernel_hook_newfstatat()/
+#     vendor_kernel_hook_stat()/vendor_kernel_hook_lstat() each call through
+#     real_sys_newfstatat/real_sys_stat/real_sys_lstat, by-name-resolved via
+#     shadow_hook_resolve() in vns_procfs_hooks_init(). CI observed a live
+#     "CFI failure (target: __arm64_sys_newfstatat+...)" panic here (called
+#     back via the kretprobe_trampoline installed on the real syscall by
+#     SHADOW_HOOK()), exactly the same KCFI-vs-kprobe-resolved-pointer
+#     mismatch documented above for vendor_kernel_compat.o/
+#     vendor_kernel_ipc_callbacks.o.
+#   - vendor_kernel/kernel/pid_namespace.o: vns_copy_pid_ns()/vns_put_pid_ns()
+#     call through vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn, resolved
+#     by name (shadow_hook_resolve("copy_pid_ns")/("put_pid_ns")) so that on
+#     a kernel that already has real pid-namespace support (CONFIG_PID_NS=y),
+#     vendor_kernel hands pid namespace creation/teardown off to the real
+#     kernel's own implementation instead of risking a "Wrong slab cache"
+#     mismatch (see the comment on vns_copy_pid_ns() for the full rationale).
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_cgdevices/shadow_cgdevices.o \
@@ -251,7 +267,9 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/glue/vendor_kernel_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_overlay.o \
 	vendor_kernel/glue/vendor_kernel_ovl_vfs_compat.o \
-	vendor_kernel/glue/vendor_kernel_diag.o
+	vendor_kernel/glue/vendor_kernel_diag.o \
+	vendor_kernel/glue/vendor_kernel_procfs.o \
+	vendor_kernel/kernel/pid_namespace.o
 $(foreach o,$(VNS_CFI_UNSAFE_OBJS),$(eval CFLAGS_REMOVE_$(o) += $(CC_FLAGS_CFI)))
 
 # LKM4CTR_LOG_DMESG - build-time logging switch (see common/lkm4ctr_log.h

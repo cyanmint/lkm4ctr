@@ -20,6 +20,9 @@ struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace 
 void (*vns_put_mnt_ns_fn)(struct mnt_namespace *);
 struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *, struct net *);
 void (*vns_real_free_nsproxy_fn)(struct nsproxy *);
+struct pid_namespace *(*vns_real_copy_pid_ns_fn)(unsigned long flags,
+	struct user_namespace *user_ns, struct pid_namespace *old_ns);
+void (*vns_real_put_pid_ns_fn)(struct pid_namespace *ns);
 bool vendor_kernel_enabled;
 bool vns_pidns_runtime_supported;
 
@@ -201,7 +204,18 @@ static void vns_resolve_symbols(void)
 	vns_put_mnt_ns_fn = (void *)shadow_hook_resolve("put_mnt_ns");
 	vns_copy_net_ns_fn = (void *)shadow_hook_resolve("copy_net_ns");
 	vns_real_free_nsproxy_fn = (void *)shadow_hook_resolve("free_nsproxy");
-	vns_pidns_runtime_supported = shadow_hook_resolve("copy_pid_ns") != 0;
+	vns_real_copy_pid_ns_fn = (void *)shadow_hook_resolve("copy_pid_ns");
+	vns_real_put_pid_ns_fn = (void *)shadow_hook_resolve("put_pid_ns");
+	/*
+	 * [BUILD-COMPAT] Both must resolve for vendor_kernel to safely hand
+	 * pid namespace creation/teardown off to the real kernel (see the
+	 * declaration comment on vns_real_copy_pid_ns_fn in vendor_kernel.h);
+	 * a kernel exposing only one of the two would be unexpected (both
+	 * live in the same CONFIG_PID_NS-gated kernel/pid_namespace.c
+	 * translation unit), but fail closed to the module-owned path rather
+	 * than risk calling through a NULL/mismatched pointer.
+	 */
+	vns_pidns_runtime_supported = vns_real_copy_pid_ns_fn && vns_real_put_pid_ns_fn;
 	/*
 	 * [BUILD-COMPAT] put_net() is always a static inline in
 	 * <net/net_namespace.h> (never a standalone kernel symbol), so it
