@@ -247,18 +247,36 @@ through a function pointer; since the compiler never sees a real
 declaration/definition pair for these indirect calls the way CFI's checker
 expects, every one of them is a guaranteed, fatal false positive under CFI
 (observed as `Kernel panic - not syncing: CFI failure` during
-`vendor_kernel_init()`, e.g. inside `vns_mqueue_fs_init()`'s call to the
-resolved `fs_context_for_mount()`). `lkm4ctr/Makefile` disables CFI
-instrumentation (`CFLAGS_REMOVE_*.o += $(CC_FLAGS_CFI)`) for every object
-that performs this kind of call -- `shadow_hijack.c`/`shadow_cgdevices.c`
-(the hook engines themselves), every `glue/vendor_kernel_*_compat.c`
-real-name wrapper, and the vendored overlayfs sources (whose
-`glue/vendor_kernel_ovl_vfs_compat.h` macro-redirects every VFS helper call
-site directly to a resolved pointer) -- mirroring how upstream's own
-`arch/arm64/kernel/Makefile` disables `CC_FLAGS_FTRACE` for `ftrace.o`/
-`insn.o` for the same underlying reason (code that must transfer control to
-an address only known at runtime cannot satisfy a compile-time check). CFI
-protection for the rest of the running kernel is entirely unaffected.
+`vendor_kernel_init()`). `lkm4ctr/Makefile` disables CFI instrumentation
+(`CFLAGS_REMOVE_*.o += $(CC_FLAGS_CFI)`) for every object that performs
+this kind of call -- `shadow_hijack.c`/`shadow_cgdevices.c` (the hook
+engines themselves), every `glue/vendor_kernel_*_compat.c` real-name
+wrapper (e.g. the resolved `fs_context_for_mount()`/`fc_mount()` used by
+`vns_mq_init_ns()`/`vns_mqueue_fs_init()`), and the vendored overlayfs
+sources (whose `glue/vendor_kernel_ovl_vfs_compat.h` macro-redirects every
+VFS helper call site directly to a resolved pointer) -- mirroring how
+upstream's own `arch/arm64/kernel/Makefile` disables `CC_FLAGS_FTRACE` for
+`ftrace.o`/`insn.o` for the same underlying reason (code that must
+transfer control to an address only known at runtime cannot satisfy a
+compile-time check). CFI protection for the rest of the running kernel is
+entirely unaffected.
+
+`vendor_kernel/ipc/mqueue.o` is deliberately kept **out** of this CFI-
+disabled set, unlike the other vendored IPC objects. Its own code makes no
+unresolved-pointer indirect calls (`fs_context_for_mount()`/`fc_mount()`
+etc. are ordinary by-name calls into the compat wrapper functions in
+`glue/vendor_kernel_ipc_compat.o`, which stays CFI-disabled for the actual
+resolved-pointer call inside it); instead it *registers* `mqueue_fs_type`/
+`mqueue_super_ops`/`mqueue_file_operations`, which the real,
+CFI-instrumented kernel itself calls back into indirectly once mounted
+(e.g. `alloc_fs_context()`'s `fs_type->init_fs_context(fc)` call into
+`mqueue_init_fs_context()`). Compiling `mqueue.o` with CFI disabled strips
+the KCFI type-hash prefix the compiler would otherwise emit for those
+callback functions, so the *caller's* (real kernel's) CFI check on the
+indirect call into them fails instead -- observed as `CFI failure at
+alloc_fs_context+... (target: mqueue_init_fs_context+...)` immediately on
+`insmod`. Keeping `mqueue.o` CFI-enabled preserves those prefixes so it
+remains a valid callback target for the real kernel.
 
 ## `lookup_one` symbol resolution (KMI >= 6.3)
 

@@ -82,9 +82,28 @@ ccflags-y += -I$(src)/../common
 # is expected to opt out of CFI instrumentation for itself, not to defeat
 # CFI's protection for the rest of the kernel, which is untouched. Applied
 # to every real source object below except the two embedded-text blobs
-# (helper.sh.o/readme.txt.o, plain string data) and lkm4ctr_main.o/
+# (helper.sh.o/readme.txt.o, plain string data), lkm4ctr_main.o/
 # lkm4ctr_log.o/lkm4ctr_diagfs.o, which never call a symbol resolved this
-# way.
+# way, and vendor_kernel/ipc/mqueue.o (see below).
+#
+# vendor_kernel/ipc/mqueue.o is intentionally EXCLUDED here even though it
+# is part of the vendored IPC sources: unlike msg.c/sem.c/shm.c/util.c, it
+# registers mqueue_fs_type/mqueue_super_ops/mqueue_file_operations, which
+# the real, CFI-instrumented kernel itself calls back into indirectly
+# (e.g. alloc_fs_context()'s fs_type->init_fs_context(fc) call into
+# mqueue_init_fs_context()) once mq_create_mount()/register_filesystem()
+# make them live. Compiling mqueue.o with CFI disabled strips the KCFI
+# type-hash prefix from those callback functions, so the *caller's* (real
+# kernel's) CFI check on the indirect call fails -- observed as "CFI
+# failure at alloc_fs_context+... (target: mqueue_init_fs_context+...)"
+# immediately on insmod. mqueue.c itself makes no raw resolved-pointer
+# indirect calls (it only calls the ordinary, by-name compat wrapper
+# functions defined in glue/vendor_kernel_ipc_compat.o, e.g.
+# fs_context_for_mount()/fc_mount(), which are direct calls from mqueue.c's
+# point of view -- the actual unsafe indirect call through the resolved
+# r_<name> pointer happens inside vendor_kernel_ipc_compat.o, which stays
+# in this list), so it needs no CFI exemption of its own and must keep CFI
+# enabled to remain a valid indirect-call target for the real kernel.
 VNS_CFI_UNSAFE_OBJS := \
 	lkm4ctr_hotreload.o \
 	shadow_hijack/shadow_hijack.o \
@@ -99,7 +118,6 @@ VNS_CFI_UNSAFE_OBJS := \
 	vendor_kernel/ipc/msg.o \
 	vendor_kernel/ipc/sem.o \
 	vendor_kernel/ipc/shm.o \
-	vendor_kernel/ipc/mqueue.o \
 	vendor_kernel/ipc/compat.o \
 	vendor_kernel/glue/vendor_kernel_ipc_syscalls.o \
 	vendor_kernel/glue/vendor_kernel_ipc_mount.o \
