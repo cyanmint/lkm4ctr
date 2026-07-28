@@ -244,6 +244,7 @@ jobs:
             "$RUNNER_TEMP/kernel-common"
 
       - name: Diff vendor_kernel against kernel-common
+        if: !(always())
         run: |
           set -euo pipefail
           DIFF_OUT="$RUNNER_TEMP/vendor-ns.diff"
