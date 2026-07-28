@@ -84,6 +84,13 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #include <linux/seq_file.h>
 #include <linux/uuid.h>
 #include <linux/fs_context.h>
+/* errseq.h/namei.h/mm.h: declarations for errseq_check()/lookup_positive_unlocked()/
+ * vma_set_file() respectively (added to VNS_OVL_VFS_COMPAT_LIST below). Included
+ * directly here (not relied upon transitively) so every consumer of this header
+ * sees the real prototype needed for the typeof()-based pass-1 declare. */
+#include <linux/errseq.h>
+#include <linux/namei.h>
+#include <linux/mm.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 19, 0)
 
@@ -123,6 +130,46 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_HAVE_BACKING_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
+
+/* kernel_file_open() exists since 6.5 (pre-6.10 with an extra `struct inode *`
+ * argument, dropped again at 6.10); vfs_parse_monolithic_sep() exists since
+ * 6.6. Both, like backing_file_open() above, are real kernel helpers that may
+ * be trimmed from the module symbol table on production GKI, so they must be
+ * resolved via kallsyms/kprobe (VNS_OVL_VFS_COMPAT_LIST) rather than called as
+ * a bare (modpost-visible, possibly-unexported) symbol whenever the running
+ * kernel is new enough to have them natively. */
+#define VNS_OVL_HAVE_KERNEL_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0))
+#define VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+
+#if VNS_OVL_HAVE_KERNEL_FILE_OPEN
+#define VNS_OVL_VFSC_KFOPEN_ENTRY(X) X(kernel_file_open)
+#else
+#define VNS_OVL_VFSC_KFOPEN_ENTRY(X)
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_OPEN
+#define VNS_OVL_VFSC_BFOPEN_ENTRY(X) X(backing_file_open)
+#else
+#define VNS_OVL_VFSC_BFOPEN_ENTRY(X)
+#endif
+#if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
+#define VNS_OVL_VFSC_VPMSEP_ENTRY(X) X(vfs_parse_monolithic_sep)
+#else
+#define VNS_OVL_VFSC_VPMSEP_ENTRY(X)
+#endif
+
+/* vma_set_file() (<linux/mm.h>) is real/linkable on MID and NEW, but is only
+ * ever reached by ovl_mmap()'s manual fallback path (file.c), which is only
+ * compiled in when VNS_OVL_HAVE_BACKING_FILE_RW is false -- i.e. always on
+ * MID, and on NEW-tier kernels in [6.3, 6.8). Like every other name here it
+ * may still be trimmed from the module symbol table, so resolve it whenever
+ * that fallback path is actually compiled. VNS_OVL_TIER_OLD predates
+ * vma_set_file() entirely and uses its own local reimplementation instead
+ * (see the shim further down this file). */
+#if !VNS_OVL_HAVE_BACKING_FILE_RW
+#define VNS_OVL_VFSC_VMASETFILE_ENTRY(X) X(vma_set_file)
+#else
+#define VNS_OVL_VFSC_VMASETFILE_ENTRY(X)
+#endif
 
 /* generic_file_splice_read() was removed at 6.6 in favour of
  * filemap_splice_read() (same (file *, loff_t *, pipe_inode_info *, size_t,
@@ -442,6 +489,10 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
+	VNS_OVL_VFSC_KFOPEN_ENTRY(X) \
+	VNS_OVL_VFSC_BFOPEN_ENTRY(X) \
+	VNS_OVL_VFSC_VPMSEP_ENTRY(X) \
+	VNS_OVL_VFSC_VMASETFILE_ENTRY(X) \
 	VNS_OVL_VFSC_DTMPFILE_ENTRY(X)
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
@@ -538,6 +589,9 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_path_lookup) \
 	X(rw_verify_area) \
 	X(vfs_fadvise) \
+	X(errseq_check) \
+	X(lookup_positive_unlocked) \
+	VNS_OVL_VFSC_VMASETFILE_ENTRY(X) \
 	X(d_tmpfile)
 
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
@@ -724,6 +778,18 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #if !VNS_OVL_TIER_HAVE_D_MARK_TMPFILE
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
 #endif
+#if VNS_OVL_HAVE_BACKING_FILE_OPEN
+#define backing_file_open (*vns_ovl_vfsc_backing_file_open)
+#endif
+#if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
+#define vfs_parse_monolithic_sep (*vns_ovl_vfsc_vfs_parse_monolithic_sep)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+#define kernel_file_open (*vns_ovl_vfsc_kernel_file_open)
+#endif
+#if !VNS_OVL_HAVE_BACKING_FILE_RW
+#define vma_set_file (*vns_ovl_vfsc_vma_set_file)
+#endif
 
 #if !VNS_OVL_NEED_BACKING_FILE_FALLBACK
 #define backing_file_read_iter (*vns_ovl_vfsc_backing_file_read_iter)
@@ -813,6 +879,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #define rw_verify_area (*vns_ovl_vfsc_rw_verify_area)
 #define vfs_fadvise (*vns_ovl_vfsc_vfs_fadvise)
 #define d_tmpfile (*vns_ovl_vfsc_d_tmpfile)
+#define errseq_check (*vns_ovl_vfsc_errseq_check)
+#define lookup_positive_unlocked (*vns_ovl_vfsc_lookup_positive_unlocked)
+#define vma_set_file (*vns_ovl_vfsc_vma_set_file)
 #define vfs_iter_read (*vns_ovl_vfsc_vfs_iter_read)
 #define vfs_iter_write (*vns_ovl_vfsc_vfs_iter_write)
 #define vfs_iocb_iter_read (*vns_ovl_vfsc_vfs_iocb_iter_read)
@@ -1058,7 +1127,12 @@ static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
  * changed twice: pre-6.5 it didn't exist at all (dentry_open() with the same
  * (path, flags, cred) shape is the equivalent); [6.5,6.10) it took an extra
  * `struct inode *inode` argument (dropped again at 6.10, back to the
- * (path, flags, cred) shape overlayfs actually calls it with). */
+ * (path, flags, cred) shape overlayfs actually calls it with). Like every
+ * other name in VNS_OVL_VFS_COMPAT_LIST, kernel_file_open() may be trimmed
+ * from the module symbol table on production GKI, so both branches below
+ * reach it only through the resolved vns_ovl_vfsc_kernel_file_open pointer
+ * (see VNS_OVL_VFSC_KFOPEN_ENTRY above), never as a bare, modpost-visible
+ * symbol. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 #define kernel_file_open(path, flags, cred) dentry_open((path), (flags), (cred))
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
@@ -1066,7 +1140,7 @@ static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
 						     int flags,
 						     const struct cred *cred)
 {
-	return kernel_file_open(path, flags, d_inode(path->dentry), cred);
+	return (*vns_ovl_vfsc_kernel_file_open)(path, flags, d_inode(path->dentry), cred);
 }
 #define kernel_file_open(path, flags, cred) \
 	vns_ovl_kernel_file_open((path), (flags), (cred))

@@ -142,22 +142,50 @@ out:
 	return ERR_PTR(err);
 }
 
-static void delayed_free_pidns(struct rcu_head *p)
-{
-	struct pid_namespace *ns = container_of(p, struct pid_namespace, rcu);
-
-	dec_pid_namespaces(ns->ucounts);
-	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
-
-	kmem_cache_free(vns_pid_ns_cachep, ns); /* [BUILD-COMPAT] */
-}
-
+/*
+ * [BUILD-COMPAT] Deliberately leak the pid_namespace object itself instead
+ * of freeing it (upstream frees it here via kmem_cache_free() after
+ * call_rcu()).
+ *
+ * The real kernel's alloc_pid()/free_pid()/put_pid() (kernel/pid.c) are
+ * unconditional of CONFIG_PID_NS and keep touching this object's fields
+ * (->pid_cachep, ->idr, ->pid_allocated, ->child_reaper) for as long as any
+ * struct pid allocated against it is alive -- which, via a lingering procfs
+ * dentry/struct file, can outlive our own nsproxy-based refcounting by an
+ * arbitrary amount of time. On a real CONFIG_PID_NS=y kernel this is safe
+ * because alloc_pid() takes a get_pid_ns() reference on the namespace for
+ * every struct pid it hands out, and put_pid()'s matching put_pid_ns() is
+ * exactly what is expected to trigger this destroy path -- so the object
+ * cannot be destroyed while a struct pid still references it. But on the
+ * target GKI kernels this module exists for (CONFIG_PID_NS=n),
+ * get_pid_ns()/put_pid_ns() are no-op static inlines, so that protection is
+ * gone entirely: nothing pins the namespace alive for the lifetime of the
+ * struct pid objects allocated from it, and destroying it here (as soon as
+ * our own nsproxy attach/detach refcount hits zero) reopens a
+ * use-after-free window that crashes later (e.g. put_pid()/proc_free_inode()
+ * dereferencing a freed ns->pid_cachep/ns->child_reaper from an RCU
+ * callback, observed as a NULL-pointer oops in put_pid()).
+ *
+ * There is no cheap, safe way to hook the real (always compiled-in,
+ * unconditional-of-config) alloc_pid()/free_pid()/put_pid() to restore the
+ * missing pinning without risking further instability, so -- matching this
+ * codebase's established "leak rather than risk a UAF/crash" convention
+ * (see vns_nsproxy_put_deferred(), vns_put_foreign_nsproxy()) -- we simply
+ * never give the object's memory back to the slab allocator. The ucounts
+ * and user_ns references are still released promptly below since neither
+ * is ever touched by alloc_pid()/free_pid()/put_pid(), so keeping those
+ * indefinitely would be a needless additional (and unbounded) leak.
+ *
+ * This trades a small, bounded (sizeof(struct pid_namespace) plus its
+ * pid_cachep and proc-ns inum) per-namespace-creation memory/inum leak for
+ * eliminating a real kernel panic; pid namespaces are created far less
+ * frequently than individual tasks, so the leak is not expected to be
+ * operationally significant.
+ */
 static void destroy_pid_namespace(struct pid_namespace *ns)
 {
-	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
-
-	idr_destroy(&ns->idr);
-	call_rcu(&ns->rcu, delayed_free_pidns);
+	dec_pid_namespaces(ns->ucounts);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 }
 
 struct pid_namespace *vns_copy_pid_ns( /* [RENAME] */
