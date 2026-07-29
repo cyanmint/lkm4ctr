@@ -111,6 +111,34 @@ struct ipc_namespace *vns_copy_ipcs( /* [RENAME] */
 unsigned long flags,
 	struct user_namespace *user_ns, struct ipc_namespace *ns)
 {
+	/*
+	 * [BUILD-COMPAT] @ns is task->nsproxy->ipc_ns of the task this is
+	 * copying from (create_new_namespaces()'s tsk->nsproxy->ipc_ns,
+	 * kernel/nsproxy.c). On upstream this is never NULL: a real
+	 * CONFIG_IPC_NS=y kernel's init_nsproxy.ipc_ns is always
+	 * &init_ipc_ns. On vendor_kernel's actual target
+	 * (CONFIG_SYSVIPC=n && CONFIG_POSIX_MQUEUE=n), the real kernel's own
+	 * init_nsproxy.ipc_ns is compiled out entirely and stays NULL
+	 * (kernel/nsproxy.c's init_nsproxy initializer), so any task that
+	 * inherited that real nsproxy verbatim -- i.e. never yet had its
+	 * task->nsproxy replaced by vendor_kernel's own
+	 * create_new_namespaces()/switch_task_namespaces() path -- still has
+	 * a literal NULL ipc_ns here. Passing that straight to get_ipc_ns()
+	 * below (CLONE_NEWIPC not requested) would silently propagate NULL
+	 * into the freshly built nsproxy, which every real-kernel-invoked
+	 * proc_ns_operations callback below (ipcns_install() in particular)
+	 * unconditionally dereferences -- CI observed a live NULL-pointer
+	 * Oops in vns_put_ipc_ns() called from ipcns_install() on `docker
+	 * exec` (runc's nsexec setns(2)ing into the container's ipc
+	 * namespace from a task whose own nsproxy->ipc_ns was still this
+	 * NULL). Substitute vendor_kernel's own module-owned default ipc
+	 * namespace (vns_ipc_active_default(), glue/vendor_kernel_ipc_syscalls.c)
+	 * instead, exactly like vns_task_ipc_ns() already falls back to for
+	 * syscall lookups, so every nsproxy built from here on always
+	 * carries a valid, non-NULL ipc_ns.
+	 */
+	if (!ns)
+		ns = vns_ipc_active_default();
 	if (!(flags & CLONE_NEWIPC))
 		return get_ipc_ns(ns);
 	return create_ipc_ns(user_ns, ns);
