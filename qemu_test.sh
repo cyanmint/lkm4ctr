@@ -148,8 +148,11 @@ lkm4ctr_init_2() {
 	done
 
 	echo "=== LKM4CTR_QEMU_TEST: docker run (test container sanity) ==="
-	docker run --privileged --rm --network host -i docker.io/arm64v8/alpine:latest ps -e
-	docker run --privileged --rm --network host -i docker.io/arm64v8/ubuntu:latest ps -e
+	docker run --privileged --rm --network host --name alpine -i docker.io/arm64v8/alpine:latest init &
+	sleep 5
+	docker exec -iu 0 alpine ps -e
+	docker stop alpine
+	docker run --privileged --rm --network host --name ubuntu -i docker.io/arm64v8/ubuntu:latest ps -e
 	pkill -2 dockerd
 	sleep 15
 
