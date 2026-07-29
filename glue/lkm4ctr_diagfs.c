@@ -651,8 +651,10 @@ static struct dentry *__nocfi lkm4ctr_diagfs_create_file(struct super_block *sb,
 	if (!dentry) {
 		inode_unlock(d_inode(parent));
 		/*
-		 * iput() runs ->evict_inode(), which already kfree()s
+		 * iput() runs our sb->s_op->evict_inode callback
+		 * (lkm4ctr_diagfs_evict_inode()), which already kfree()s
 		 * inode->i_private (== info); do not free it again here.
+		 * This is module-specific, not a general VFS guarantee.
 		 */
 		iput(inode);
 		return ERR_PTR(-ENOMEM);
@@ -2328,7 +2330,11 @@ static struct dentry *__nocfi lkm4ctr_diagfs_mkdir_dyn(struct super_block *sb,
 	dentry = lkm4ctr_d_alloc_name_fn ? lkm4ctr_d_alloc_name_fn(parent, name) : NULL;
 	if (!dentry) {
 		inode_unlock(d_inode(parent));
-		/* iput()->evict_inode() frees inode->i_private (== info). */
+		/*
+		 * iput() runs our lkm4ctr_diagfs_evict_inode() (set as
+		 * sb->s_op->evict_inode), which frees inode->i_private
+		 * (== info); module-specific, not a general VFS guarantee.
+		 */
 		iput(inode);
 		return ERR_PTR(-ENOMEM);
 	}
