@@ -97,6 +97,7 @@ struct vns_registry {
 	unsigned long stat_unshare;
 	unsigned long stat_setns;
 	unsigned long stat_clone;
+	unsigned long stat_reboot;
 };
 
 extern struct vns_registry vendor_kernel_registry;

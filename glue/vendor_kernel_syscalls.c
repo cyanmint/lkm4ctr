@@ -10,6 +10,8 @@
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
 #include <linux/pid.h>
+#include <linux/pid_namespace.h>
+#include <linux/reboot.h>
 #include <uapi/linux/sched.h>
 #include <asm/ptrace.h>
 
@@ -22,6 +24,7 @@ static long (*real_sys_clone)(const struct pt_regs *regs);
 static long (*real_sys_clone3)(const struct pt_regs *regs);
 static long (*real_sys_fork)(const struct pt_regs *regs);
 static long (*real_sys_vfork)(const struct pt_regs *regs);
+static long (*real_sys_reboot)(const struct pt_regs *regs);
 
 static const char * const vendor_kernel_unshare_names[] = {
 	"__arm64_sys_unshare", "__x64_sys_unshare", "sys_unshare", NULL,
@@ -41,14 +44,19 @@ static const char * const vendor_kernel_fork_names[] = {
 static const char * const vendor_kernel_vfork_names[] = {
 	"__arm64_sys_vfork", "__x64_sys_vfork", "sys_vfork", NULL,
 };
+static const char * const vendor_kernel_reboot_names[] = {
+	"__arm64_sys_reboot", "__x64_sys_reboot", "sys_reboot", NULL,
+};
 
 #if defined(CONFIG_ARM64)
 static unsigned long vns_sys_arg0(const struct pt_regs *regs) { return regs->regs[0]; }
 static unsigned long vns_sys_arg1(const struct pt_regs *regs) { return regs->regs[1]; }
+static unsigned long vns_sys_arg2(const struct pt_regs *regs) { return regs->regs[2]; }
 static void vns_sys_set_arg0(struct pt_regs *regs, unsigned long value) { regs->regs[0] = value; }
 #elif defined(CONFIG_X86_64)
 static unsigned long vns_sys_arg0(const struct pt_regs *regs) { return regs->di; }
 static unsigned long vns_sys_arg1(const struct pt_regs *regs) { return regs->si; }
+static unsigned long vns_sys_arg2(const struct pt_regs *regs) { return regs->dx; }
 static void vns_sys_set_arg0(struct pt_regs *regs, unsigned long value) { regs->di = value; }
 #else
 #error "vendor_kernel: unsupported architecture"
@@ -213,6 +221,60 @@ static long vendor_kernel_hook_vfork(const struct pt_regs *regs)
 	return ret;
 }
 
+/*
+ * reboot(2): on the stock CONFIG_PID_NS=n kernels this module targets,
+ * reboot_pid_ns() (include/linux/pid_namespace.h) is a static-inline stub
+ * that unconditionally returns 0, so the real sys_reboot() falls straight
+ * through to kernel_restart()/kernel_power_off()/... regardless of which
+ * pid namespace the caller is actually in. That means reboot(2) from inside
+ * a vendor_kernel container (e.g. `runc`/`dockerd` handling a restart
+ * policy, or a plain `reboot` inside `docker exec`) reboots the whole host.
+ *
+ * Mirror the real kernel/reboot.c SYSCALL_DEFINE4(reboot, ...) checks here
+ * (capability + magic numbers) and route non-init pid namespaces to
+ * vns_reboot_pid_ns() -- the real reboot_pid_ns() logic, vendored verbatim
+ * -- instead of ever reaching the real syscall.
+ */
+static long vendor_kernel_hook_reboot(const struct pt_regs *regs)
+{
+	struct pid_namespace *pid_ns = task_active_pid_ns(current);
+	int magic1, magic2;
+	unsigned int cmd;
+
+	if (pid_ns == &init_pid_ns)
+		return real_sys_reboot(regs);
+
+	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+		return -EPERM;
+
+	/*
+	 * Safe truncation: reboot(2)'s real prototype is
+	 * SYSCALL_DEFINE4(reboot, int magic1, int magic2, unsigned int cmd,
+	 * void __user *arg) -- the calling convention already delivers these
+	 * arguments as 32-bit values, matching what real_sys_reboot()/the
+	 * upstream syscall wrapper itself would extract from the same regs.
+	 */
+	magic1 = (int)vns_sys_arg0(regs);
+	magic2 = (int)vns_sys_arg1(regs);
+	cmd = (unsigned int)vns_sys_arg2(regs);
+
+	if (magic1 != LINUX_REBOOT_MAGIC1 ||
+	    (magic2 != LINUX_REBOOT_MAGIC2 &&
+	     magic2 != LINUX_REBOOT_MAGIC2A &&
+	     magic2 != LINUX_REBOOT_MAGIC2B &&
+	     magic2 != LINUX_REBOOT_MAGIC2C))
+		return -EINVAL;
+
+	vendor_kernel_registry.stat_reboot++;
+	/*
+	 * For RESTART/RESTART2/POWER_OFF/HALT, vns_reboot_pid_ns() calls
+	 * do_exit() and never returns; only CAD_ON/CAD_OFF/KEXEC/SW_SUSPEND
+	 * (unsupported inside a pid namespace, matching upstream) fall
+	 * through to its -EINVAL return here.
+	 */
+	return vns_reboot_pid_ns(pid_ns, (int)cmd);
+}
+
 static struct shadow_hook vendor_kernel_unshare_hook =
 	SHADOW_HOOK(vendor_kernel_unshare_names, vendor_kernel_hook_unshare, &real_sys_unshare);
 static struct shadow_hook vendor_kernel_setns_hook =
@@ -225,6 +287,8 @@ static struct shadow_hook vendor_kernel_fork_hook =
 	SHADOW_HOOK(vendor_kernel_fork_names, vendor_kernel_hook_fork, &real_sys_fork);
 static struct shadow_hook vendor_kernel_vfork_hook =
 	SHADOW_HOOK(vendor_kernel_vfork_names, vendor_kernel_hook_vfork, &real_sys_vfork);
+static struct shadow_hook vendor_kernel_reboot_hook =
+	SHADOW_HOOK(vendor_kernel_reboot_names, vendor_kernel_hook_reboot, &real_sys_reboot);
 
 struct shadow_hook *vendor_kernel_core_hooks[] = {
 	&vendor_kernel_unshare_hook,
@@ -233,5 +297,6 @@ struct shadow_hook *vendor_kernel_core_hooks[] = {
 	&vendor_kernel_clone3_hook,
 	&vendor_kernel_fork_hook,
 	&vendor_kernel_vfork_hook,
+	&vendor_kernel_reboot_hook,
 	NULL,
 };

@@ -192,7 +192,24 @@ static void destroy_pid_namespace(struct pid_namespace *ns)
 	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 }
 
-struct pid_namespace *vns_copy_pid_ns( /* [RENAME] */
+/*
+ * [BUILD-COMPAT] __nocfi: this function's vns_real_copy_pid_ns_fn() call
+ * below is a by-name (shadow_hook_resolve()) resolved indirect call into
+ * the real kernel's copy_pid_ns(), whose KCFI type hash cannot be relied
+ * on to match what this translation unit's caller expects (the same
+ * class of CFI-unsafe indirect call documented at length in
+ * ../../glue/vendor_kernel_compat.c). Marking only this function __nocfi
+ * (rather than disabling CFI for the whole pid_namespace.o via
+ * VNS_CFI_UNSAFE_OBJS, as previously done) keeps pidns_get()/pidns_put()/
+ * pidns_install()/pidns_owner()/pidns_get_parent() below -- real-kernel
+ * -invoked via vns_pidns_operations/vns_pidns_for_children_operations and
+ * ns_get_path() (e.g. on `docker exec` opening /proc/<pid>/ns/pid) --
+ * valid CFI callback targets. CI observed a live "CFI failure at
+ * ns_get_path+... (target: pidns_get+...)" panic caused by the
+ * whole-object CFI removal stripping those functions' own KCFI type-hash
+ * prefix.
+ */
+struct pid_namespace *__nocfi vns_copy_pid_ns( /* [RENAME] */
 unsigned long flags,
 	struct user_namespace *user_ns, struct pid_namespace *old_ns)
 {
@@ -270,7 +287,7 @@ struct pid_namespace *vns_get_pid_ns(struct pid_namespace *ns) /* [BUILD-COMPAT]
 	return ns;
 }
 
-void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
+void __nocfi vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
 {
 	struct pid_namespace *parent;
 
@@ -282,6 +299,10 @@ void vns_put_pid_ns(struct pid_namespace *ns) /* [RENAME] */
 	 * too -- it already walks ->parent itself and frees against the
 	 * correct (real) pid_ns_cachep, avoiding the slab-cache mismatch a
 	 * module-owned destroy_pid_namespace() would otherwise risk.
+	 *
+	 * [BUILD-COMPAT] __nocfi: see vns_copy_pid_ns() above -- the
+	 * vns_real_put_pid_ns_fn() call just below is the same class of
+	 * CFI-unsafe resolved-pointer indirect call.
 	 */
 	if (vns_pidns_runtime_supported) {
 		if (ns != &init_pid_ns)

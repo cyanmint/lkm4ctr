@@ -208,12 +208,11 @@ ccflags-y += -I$(src)/../glue
 #     direct calls into vendor_kernel_module.o, which stays in this list;
 #     sem_exit_ns()/msg_exit_ns()/shm_exit_ns() are ordinary direct calls
 #     into their own vendored .c files).
-#   - kernel/utsname.o, kernel/pid_namespace.o,
+#   - kernel/utsname.o,
 #     kernel/user_namespace.o,
 #     kernel/cgroup/namespace.o,
 #     kernel/time/namespace.o, fs/nsfs.o: each
 #     defines its own proc_ns_operations struct (vns_utsns_operations,
-#     vns_pidns_operations/vns_pidns_for_children_operations,
 #     vns_userns_operations, vns_cgroupns_operations,
 #     vns_timens_operations/vns_timens_for_children_operations) and/or (for
 #     nsfs.o) the nsfs pseudo-filesystem's own dentry/file callbacks, all
@@ -270,13 +269,29 @@ ccflags-y += -I$(src)/../glue
 #     kept out of this list) so they can keep normal CFI instrumentation,
 #     mirroring vendor_kernel_ipc_callbacks.o's split from
 #     vendor_kernel_ipc_compat.o.
-#   - kernel/pid_namespace.o: vns_copy_pid_ns()/vns_put_pid_ns()
-#     call through vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn, resolved
-#     by name (shadow_hook_resolve("copy_pid_ns")/("put_pid_ns")) so that on
-#     a kernel that already has real pid-namespace support (CONFIG_PID_NS=y),
-#     vendor_kernel hands pid namespace creation/teardown off to the real
-#     kernel's own implementation instead of risking a "Wrong slab cache"
-#     mismatch (see the comment on vns_copy_pid_ns() for the full rationale).
+#   - kernel/pid_namespace.o: defines vns_pidns_operations/
+#     vns_pidns_for_children_operations (pidns_get()/pidns_put()/
+#     pidns_install()/pidns_owner()/pidns_get_parent()), real-kernel
+#     -invoked via /proc/pid/ns/pid opens and ns_get_path() -- e.g. on
+#     `docker exec`, which opens /proc/<pid>/ns/pid to setns(2) into a
+#     running container's pid namespace. CI observed a live "CFI failure
+#     at ns_get_path+... (target: pidns_get+...)" panic here: this object
+#     used to be in this list because vns_copy_pid_ns()/vns_put_pid_ns()
+#     call through vns_real_copy_pid_ns_fn/vns_real_put_pid_ns_fn,
+#     resolved by name (shadow_hook_resolve("copy_pid_ns")/("put_pid_ns"))
+#     so that on a kernel that already has real pid-namespace support
+#     (CONFIG_PID_NS=y), vendor_kernel hands pid namespace
+#     creation/teardown off to the real kernel's own implementation
+#     instead of risking a "Wrong slab cache" mismatch (see the comment on
+#     vns_copy_pid_ns() for the full rationale) -- but whole-object CFI
+#     removal also stripped pidns_get() etc.'s own KCFI type-hash prefix,
+#     breaking the indirect call into them. Only those two functions'
+#     own outgoing resolved-pointer calls are now marked __nocfi
+#     individually instead, mirroring kernel/nsproxy.o's
+#     create_new_namespaces()/vns_free_nsproxy() split (see above and
+#     kernel/nsproxy.c), so this object can be removed from this list and
+#     keep normal CFI instrumentation for its real-kernel-invoked
+#     callbacks.
 #   - lkm4ctr_diagfs.o: not part of the vendor_kernel/shadow_hook_resolve()
 #     machinery above at all -- it resolves kill_litter_super/
 #     generic_shutdown_super/d_alloc_name/simple_lookup/
@@ -309,8 +324,7 @@ VNS_CFI_UNSAFE_OBJS := \
 	../glue/vendor_kernel_overlay.o \
 	../glue/vendor_kernel_ovl_vfs_compat.o \
 	../glue/vendor_kernel_diag.o \
-	../glue/vendor_kernel_procfs.o \
-	kernel/pid_namespace.o
+	../glue/vendor_kernel_procfs.o
 $(foreach o,$(VNS_CFI_UNSAFE_OBJS),$(eval CFLAGS_REMOVE_$(o) += $(CC_FLAGS_CFI)))
 
 # LKM4CTR_LOG_DMESG - build-time logging switch (see ../glue/lkm4ctr_log.h
