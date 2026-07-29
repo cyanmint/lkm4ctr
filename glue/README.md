@@ -33,36 +33,49 @@ later:
 
 ```sh
 mount -t lkm4ctr diag /mnt
-cat /mnt/vendor_kernel/status          # active right after insmod
-cat /mnt/vendor_kernel/namespaces
-echo unload > /mnt/vendor_kernel/control
+cat /mnt/status                        # active right after insmod
+cat /mnt/log                           # flattened, unfiltered global log
+cat /mnt/v/status
+cat /mnt/v/namespaces
+echo unload > /mnt/v/control
 ```
 
-`vendor_kernel` exposes `control`, `status`, `log`, `hooks`, and its
-live-state listing files directly under the mount root:
+The diagfs root is flat: exactly `/status`, `/log`, `/v/`, `/helper.sh`,
+`/readme.txt` and `/resources`. `vendor_kernel` is exposed as a
+procfs-style live-resource tree under `/v/`:
 
-* `/mnt/global/{control,status,log,resources,references}`
-* `/mnt/global/hotreload/{status,log,do-hot-reload}`
+* `/mnt/status` (rw, mode 0644) — read: lifecycle state; write: the
+  module-wide command surface (`on`/`off`/`forceunload`/`force2`)
+* `/mnt/log` (read-only, mode 0444) — the flattened, unfiltered global log:
+  every log line from every subsystem, no tag filter
 * `/mnt/helper.sh` (read-only, mode 0555, mount root)
 * `/mnt/readme.txt` (read-only, mode 0444, mount root)
-* `/mnt/vendor_kernel/{control,status,hooks,log,namespaces,msg,resources,references}`
+* `/mnt/resources/` — one file per reference holder blocking a safe `rmmod`
+* `/mnt/v/{control,status,enabled,hooks,log,namespaces,resources,references}`
+* `/mnt/v/ns/<type>/` — one dir per namespace type (pid/uts/ipc/user/net/
+  time/mnt/cgroup), one file per live instance
+* `/mnt/v/ipc/{shm,msg,sem}/` — one dir per SysV IPC class, one file per
+  live object; `/mnt/v/ipc/mqueue/messages` for the POSIX mqueue listing
+* `/mnt/v/hotreload/{status,log,do-hot-reload}`
 
-`control` accepts `load`, `unload` (`remove`/`graceful` aliases), and
-`forceunload` (`force`/`force_unload` aliases). `status` is read-only and
+`/v/control` accepts `load`, `unload` (`remove`/`graceful` aliases), and
+`forceunload` (`force`/`force_unload` aliases). `/v/status` is read-only and
 prints exactly one lifecycle state: `unloaded`, `loading`, `active`,
-`graceful unloading`, or `force unloading`. The shared hook engine
-(`shadow_hijack.c`) itself has no diagfs control surface: it is always
-active for the entire lifetime of `lkm4ctr.ko`, started/stopped directly by
-`lkm4ctr_main.c`.
+`graceful unloading`, or `force unloading`. The module-wide `/status` read
+side is simplified to `active`/`inactive`/`unloading` (plus transient
+`loading`). The shared hook engine (`shadow_hijack.c`) itself has no diagfs
+control surface: it is always active for the entire lifetime of
+`lkm4ctr.ko`, started/stopped directly by `lkm4ctr_main.c`.
 
-`global` also exposes a `references` file that breaks `module_refcount()`
-down into: the diagfs mount count, currently in-flight redirected hook
-calls, and any remaining unaccounted "other" holders (most likely another
-module that itself calls an `EXPORT_SYMBOL_GPL()` from `lkm4ctr.ko`). This
-is meant to explain *why* an `rmmod`/unload attempt is stuck at "try again"
-instead of just reporting that it is.
+`/v/references` breaks `module_refcount()` down into: the diagfs mount
+count, currently in-flight redirected hook calls, and any remaining
+unaccounted "other" holders (most likely another module that itself calls
+an `EXPORT_SYMBOL_GPL()` from `lkm4ctr.ko`). `/resources/` renders the same
+breakdown as one deletable file per holder. This is meant to explain *why*
+an `rmmod`/unload attempt is stuck at "try again" instead of just reporting
+that it is.
 
-`rmmod lkm4ctr` (and `global/control`, below) always force-clean up
+`rmmod lkm4ctr` (and `/status`, below) always force-clean up
 `vendor_kernel` if it is still active on the way out, so its own state can
 never block module removal.
 
@@ -75,13 +88,13 @@ with in-flight calls: the kernel returns `-EBUSY` ("Module lkm4ctr is in use")
 until they finish, instead of panicking once their code is freed out from under
 them.
 
-## Global unload via the diagfs
+## Module unload via the diagfs
 
-Writing `unload` (or `1`/`remove`/`graceful`) to `./mnt/global/control`
+Writing `off` (or `unload`/`1`/`remove`/`graceful`) to `./mnt/status`
 triggers the module to unload itself with no further operator action:
 
 ```sh
-echo unload > /mnt/global/control
+echo off > /mnt/status
 ```
 
 This spawns a worker thread that quiesces every hook (stopping new redirected
@@ -93,43 +106,45 @@ stays loaded. Writing `forceunload`/`force`/`force_unload` instead runs the
 same sequence, except `vendor_kernel`'s resources are freed immediately after
 quiescing rather than waiting until the very end.
 
-Reading `./mnt/global/control` prints the accepted commands; reading
-`./mnt/global/status` prints the current lifecycle state. `./mnt/global/log`
-contains the combined log stream and `./mnt/global/resources` aggregates the
-live resources still tracked by `vendor_kernel`.
+Reading `./mnt/status` prints the current lifecycle state; the accepted
+commands are documented in `./mnt/readme.txt` and `./mnt/v/control`.
+`./mnt/log` contains the combined, unfiltered log stream (`./mnt/v/log` is
+the same underlying log filtered to vendor_kernel's own tag) and
+`./mnt/v/resources` aggregates the live resources still tracked by
+`vendor_kernel`.
 
 ## `force2`: aggressive forced unload
 
-Writing `force2` to `./mnt/global/control` starts (or, if a graceful/force
+Writing `force2` to `./mnt/status` starts (or, if a graceful/force
 unload is already waiting on in-flight calls to drain, immediately escalates
 it to) a more aggressive unload path, for the rare case where even
 `forceunload` still leaves `rmmod` reporting "try again" because something
 keeps re-acquiring the module reference:
 
 ```sh
-echo force2 > /mnt/global/control
+echo force2 > /mnt/status
 ```
 
 Unlike `forceunload`, `force2` does not wait for `module_refcount()` to drain
 on its own. Instead it directly loops calling `module_put(THIS_MODULE)` until
 the refcount reaches its unloaded floor (bounded, and every iteration is
-logged to `global/log`), then runs `rmmod -f` instead of a plain `rmmod`
+logged to `v/log`), then runs `rmmod -f` instead of a plain `rmmod`
 (requires the target kernel to have `CONFIG_MODULE_FORCE_UNLOAD=y` for `-f` to
 actually bypass the kernel's own refcount/version checks). Every step -- which
 hooks were quiesced, the mount/in-flight/other reference breakdown at each
 poll, and the final `rmmod`/`rmmod -f` invocation -- is logged verbosely to
-`global/log` (see `global/references` for the same breakdown on demand).
+`v/log` (see `v/references` or `/resources` for the same breakdown on demand).
 
 ## Hot reload
 
-`./mnt/global/hotreload/` lets a new build of `lkm4ctr.ko` replace the
+`./mnt/v/hotreload/` lets a new build of `lkm4ctr.ko` replace the
 currently-loaded one without an external `rmmod`/`insmod` sequence run by
 hand:
 
 ```sh
-echo /path/to/new/lkm4ctr.ko > /mnt/global/hotreload/do-hot-reload
-cat /mnt/global/hotreload/status   # progress / first-load vs hot-reloaded
-cat /mnt/global/hotreload/log      # this subsystem's own log
+echo /path/to/new/lkm4ctr.ko > /mnt/v/hotreload/do-hot-reload
+cat /mnt/v/hotreload/status   # progress / first-load vs hot-reloaded
+cat /mnt/v/hotreload/log      # this subsystem's own log
 ```
 
 The target path must be absolute, end in `.ko`, stay within a restricted
@@ -141,7 +156,7 @@ succeeds and then runs `insmod <path> hotreload=1`, before finally calling
 `module_put_and_kthread_exit()` on the old module. The reloaded module's
 `lkm4ctr_hotreload_init()` reads its own `hotreload` module parameter to tell
 whether it is a first load or a hot-reloaded restart, and reports that in
-`global/hotreload/status` and the log.
+`v/hotreload/status` and the log.
 
 ## `helper.sh`
 
@@ -153,13 +168,15 @@ functions:
 export lkm4ctr_diagfs=/mnt
 . "$lkm4ctr_diagfs/helper.sh"
 
-lkm4ctr status                       # summarise global + vendor_kernel
-lkm4ctr control vendor_kernel unload # write "unload" to vendor_kernel/control
-lkm4ctr load                         # alias for: control global load
-lkm4ctr forceunload vendor_kernel    # alias for: control vendor_kernel forceunload
-lkm4ctr force2                       # alias for: control global force2
-lkm4ctr logcat vendor_kernel         # cat vendor_kernel/log
-lkm4ctr references global            # cat global/references
+lkm4ctr status                       # summarise /status + /resources + /v
+lkm4ctr control v unload             # write "unload" to /v/control
+lkm4ctr on                           # echo on > /status
+lkm4ctr forceunload                  # echo forceunload > /status
+lkm4ctr force2                       # echo force2 > /status
+lkm4ctr logcat                       # cat /log (default; "v" or "hotreload" for other targets)
+lkm4ctr references                   # cat /v/references
+lkm4ctr resources                    # list rmmod-blocking holders under /resources
+lkm4ctr v                            # list the /v live-resource tree
 lkm4ctr hot-upgrade /path/to/new/lkm4ctr.ko
 lkm4ctr help                         # full command list
 ```

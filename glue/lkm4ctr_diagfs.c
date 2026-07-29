@@ -5,47 +5,41 @@
  * /dev/lkm4ctr_safe_unload misc device entirely (see lkm4ctr_safe_unload.c's
  * removal), plus runtime control/introspection over every linked subsystem.
  *
- * Root layout
- * -----------
- *   ./mnt/global/control          - read: command help. write: "load"
- *                                    (alias "load_all") loads every
- *                                    diagfs-managed submodule; "unload"
- *                                    (aliases "1", "remove", "graceful")
- *                                    starts the graceful self-unload
- *                                    sequence; "forceunload" (aliases
- *                                    "force", "force_unload") starts the
- *                                    force self-unload sequence; "force2"
- *                                    starts (or escalates an already
- *                                    in-progress unload to) the aggressive
- *                                    force2 sequence -- see
- *                                    lkm4ctr_force2_override_refcount() and
- *                                    lkm4ctr_run_rmmod() below.
- *   ./mnt/global/status           - one of exactly: "active", "loading",
- *                                    "graceful unloading", "force unloading".
- *                                    "unloaded" is reserved for completeness
- *                                    but is not observable once this mounted
- *                                    filesystem is reachable, because the
- *                                    module itself would already be gone.
- *   ./mnt/global/log              - every log line, unfiltered.
- *   ./mnt/global/resources        - best-effort aggregate of live resources
- *                                    already tracked by the vendor_kernel and
- *                                    hook registries.
- *   ./mnt/global/references       - breaks module_refcount() down into diagfs
- *                                    mount count + in-flight shadow_hook
- *                                    calls + unaccounted "other" holders, to
- *                                    explain why rmmod is refusing to unload.
- *   ./mnt/global/hotreload/status - "first load" vs "hot-reloaded" boot kind,
- *                                    plus in-progress hot-reload state.
- *   ./mnt/global/hotreload/log    - hot-reload subsystem's own log.
- *   ./mnt/global/hotreload/do-hot-reload
- *                                  - write-only: an absolute path to a
- *                                    replacement lkm4ctr.ko triggers a hot
- *                                    reload (validate path -> quiesce hooks
- *                                    -> drain refcount -> unmount diagfs ->
- *                                    hand off to a detached
- *                                    "rmmod && insmod <path> hotreload=1"
- *                                    shell -> module_put_and_kthread_exit()).
- *                                    See lkm4ctr_hotreload.c.
+ * Root layout (flattened)
+ * ------------------------
+ * The tree root is now exactly five entries plus one subtree:
+ *
+ *   ./mnt/status                   - read/write (0644). READ: the whole
+ *                                    module's lifecycle state, one of
+ *                                    "active" / "inactive" / "unloading"
+ *                                    (plus the transient "loading"). WRITE:
+ *                                    the merged control surface that the old
+ *                                    split global/status + global/control
+ *                                    pair used to provide --
+ *                                      on           (alias: load, load_all)
+ *                                                   -> (re)load every
+ *                                                   diagfs-managed submodule
+ *                                      off          (aliases: unload, 1,
+ *                                                   remove, graceful)
+ *                                                   -> graceful self-unload
+ *                                      forceunload  (aliases: force,
+ *                                                   force_unload)
+ *                                                   -> force self-unload
+ *                                      force2       -> start (or escalate an
+ *                                                   in-progress unload to) the
+ *                                                   aggressive force2 sequence
+ *                                                   -- see
+ *                                                   lkm4ctr_force2_override_refcount()
+ *                                                   and lkm4ctr_run_rmmod().
+ *
+ *   ./mnt/log                      - read-only (0444), the flattened,
+ *                                    unfiltered global log (replacing the
+ *                                    old global/log): every log line from
+ *                                    every subsystem, tag-unfiltered. The
+ *                                    per-subsystem ./mnt/v/log and
+ *                                    ./mnt/v/hotreload/log files remain for
+ *                                    tag-filtered views of the same
+ *                                    underlying ring buffer.
  *
  *   ./mnt/helper.sh                - read-only (0555), a POSIX-sh helper
  *                                    script (contents generated into
@@ -54,9 +48,9 @@
  *                                    exported $lkm4ctr_diagfs to this mount's
  *                                    path: `. "$lkm4ctr_diagfs/helper.sh"`
  *                                    then defines an `lkm4ctr` dispatcher
- *                                    function (mount/umount/status/control/
- *                                    load/unload/forceunload/force2/logcat/
- *                                    references/hot-upgrade/help).
+ *                                    function (mount/umount/status/on/off/
+ *                                    forceunload/force2/logcat/references/
+ *                                    resources/v/hot-upgrade/help).
  *
  *   ./mnt/readme.txt               - read-only (0444), a full plain-text
  *                                    description of this whole diagfs tree
@@ -66,43 +60,128 @@
  *                                    hand). Self-contained: readable with
  *                                    "cat" alone, no source tree needed.
  *
- *   ./mnt/vendor_kernel/{control,status,hooks,log,namespaces,msg,resources,references}
- *                                  - vendor_kernel's lifecycle, hook list,
- *                                    namespace registry dump, POSIX mqueue
- *                                    listing and SysV IPC resource listing.
- *                                    vendor_kernel auto-loads at insmod time,
- *                                    but its control file can still unload or
- *                                    reload it later. It is now the only
- *                                    runtime-loadable subsystem linked into
- *                                    lkm4ctr.ko (the shared ftrace/kprobe hook
- *                                    engine and shadow_cgdevices, formerly
- *                                    separate submodules exposed at
- *                                    ./mnt/hijack and ./mnt/cgroupdevices,
- *                                    have been folded into vendor_kernel's own
- *                                    glue/ code and removed respectively; the
- *                                    hook engine is always active for the
- *                                    lifetime of lkm4ctr.ko and has no
- *                                    separate diagfs control surface of its
- *                                    own any more).
+ *   ./mnt/resources/               - a dynamic directory with one file per
+ *                                    real reference that is currently
+ *                                    preventing a safe `rmmod` -- the same
+ *                                    breakdown the "references" renderer
+ *                                    reports, but one dentry per holder:
+ *                                      mount-<n>  each active lkm4ctr diagfs
+ *                                                 mount (file_system_type->
+ *                                                 owner reference)
+ *                                      hook-<n>   each in-flight shadow_hook-
+ *                                                 redirected call
+ *                                      other-<n>  each still-unaccounted
+ *                                                 external reference
+ *                                    `cat`ing one describes that specific
+ *                                    holder; deleting one forcibly clears it
+ *                                    where possible (see the per-type notes
+ *                                    in lkm4ctr_diag_res_delete(): mount and
+ *                                    hook deletions are honestly *aggregate*
+ *                                    -- they umount all lkm4ctr mounts /
+ *                                    drain all in-flight hooks respectively,
+ *                                    since individual ones are not targetable
+ *                                    today; "other" holders cannot be cleared
+ *                                    from here at all).
  *
- * The earlier ./mnt/modules/<subsystem>/status tree and the root-level
- * ./mnt/safe_unload / ./mnt/log files are intentionally gone. control/status
- * are split everywhere: control is the command surface, status is a strict
- * lifecycle-state readout.
+ *                                    SAFE-RMMOD RULE: when ./mnt/resources/
+ *                                    contains only the file(s) for the diagfs
+ *                                    mount(s) actively keeping it busy (i.e.
+ *                                    no hook-* or other-* remain, only the very
+ *                                    mount you are reading through), it is
+ *                                    safe to `umount` diagfs and then `rmmod
+ *                                    lkm4ctr` -- exactly the self-referential
+ *                                    caveat the "references"/auto-umount code
+ *                                    already documents about the mount you
+ *                                    read/write through itself holding a
+ *                                    reference.
+ *
+ *   ./mnt/v/                       - vendor_kernel: the only runtime-loadable
+ *                                    subsystem linked into lkm4ctr.ko (the
+ *                                    shared ftrace/kprobe hook engine and the
+ *                                    former shadow_cgdevices submodule are no
+ *                                    longer separately loadable). A procfs-
+ *                                    style live-resource tree:
+ *       ./mnt/v/control            (0644) per-subsystem command help / load /
+ *                                    unload / forceunload (force2 is a
+ *                                    module-wide escalation on ./mnt/status
+ *                                    only).
+ *       ./mnt/v/status             (0444) vendor_kernel's own lifecycle state.
+ *       ./mnt/v/enabled            (0644) read: "1"/"0" (vendor_kernel_enabled);
+ *                                    write: "1"/"on" loads, "0"/"off" unloads
+ *                                    vendor_kernel -- a meaningful debug toggle
+ *                                    of that flag/subsystem, same parse style
+ *                                    as the control files.
+ *       ./mnt/v/hooks              (0444) vendor_kernel's installed hooks.
+ *       ./mnt/v/log                (0444) vendor_kernel's own log lines.
+ *       ./mnt/v/references         (0444) vendor_kernel's contribution to
+ *                                    module_refcount(), broken down.
+ *       ./mnt/v/namespaces         (0444) full registry dump (every tracked
+ *                                    tgid->nsproxy) + overlay diag.
+ *       ./mnt/v/resources          (0444) aggregate live-resource dump.
+ *       ./mnt/v/ns/<type>/         one dynamic directory per namespace type
+ *                                    (pid, uts, ipc, user, net, time, mnt,
+ *                                    cgroup). Each lists one file per live
+ *                                    instance vendor_kernel tracks, named by
+ *                                    the owning tgid; `cat` shows detail,
+ *                                    delete SIGKILLs that thread group and
+ *                                    frees its vendored nsproxy (see
+ *                                    vns_diag_res_delete()).
+ *       ./mnt/v/ipc/shm|msg|sem/   one dynamic directory per SysV IPC class.
+ *                                    Each lists one file per live object in
+ *                                    the default vendored ipc namespace,
+ *                                    named by ipc id; delete performs
+ *                                    IPC_RMID.
+ *       ./mnt/v/ipc/mqueue/messages
+ *                                    (0444) POSIX mqueue listing (aggregate;
+ *                                    per-object mqueue delete is not wired --
+ *                                    see the note there).
+ *       ./mnt/v/hotreload/{status,log,do-hot-reload}
+ *                                    hot-reload state, log, and the
+ *                                    write-only absolute-path trigger for an
+ *                                    in-place .ko replacement (validate path
+ *                                    -> quiesce hooks -> drain refcount ->
+ *                                    unmount diagfs -> hand off to a detached
+ *                                    "rmmod && insmod <path> hotreload=1"
+ *                                    shell -> module_put_and_kthread_exit()).
+ *                                    See lkm4ctr_hotreload.c.
+ *
+ * The earlier ./mnt/global and ./mnt/vendor_kernel trees and the
+ * ./mnt/modules/<subsystem>/status tree are intentionally gone; the
+ * root-level ./mnt/safe_unload misc-device-era file never existed in this
+ * filesystem and stays gone, but a root-level ./mnt/log is back (see above)
+ * as the flattened, unfiltered global log. control/status stay split: on
+ * ./mnt/status the read side is a strict lifecycle-state readout and the
+ * write side is the command surface; ./mnt/v/control keeps that same split
+ * per-subsystem.
  *
  * Implementation
  * --------------
- * This is a small, fully in-memory pseudo-filesystem in the same spirit as
- * ramfs/securityfs: every dentry/inode in the tree is created once, up
- * front, at mount time (mount_nodev() + fill_super()); nothing is created or
- * destroyed lazily afterwards. File contents are regenerated fresh on every
- * open() via seq_file single_open(). That static-tree design is preserved for
- * the new layout too, so categories whose underlying live-object ids are not
- * naturally knowable before mount time (e.g. currently queued mqueue messages
- * or live vendor_kernel objects that may come and go after mount) are
- * exposed as readable listing files rather than on-demand per-object dentries.
- * This keeps the filesystem simple and race-resistant while still surfacing
- * the underlying registries' current state.
+ * The fixed skeleton (./mnt/status, ./mnt/log, ./mnt/helper.sh, ./mnt/readme.txt, the
+ * ./mnt/v control/status/listing files, and the always-present per-type
+ * directories ./mnt/resources/, ./mnt/v/ns/<type>/, ./mnt/v/ipc/<class>/) is
+ * still built once, up front, at mount time (mount_nodev() + fill_super()),
+ * in the same in-memory ramfs/securityfs spirit as before; the contents of
+ * every readable file are regenerated fresh on every open() via seq_file
+ * single_open().
+ *
+ * What is new is that the *leaf* per-instance entries under those per-type
+ * directories are genuinely dynamic: they are not enumerated at mount time
+ * (the live vendored namespaces / SysV IPC objects / reference holders come
+ * and go at runtime), so ./mnt/resources/, ./mnt/v/ns/<type>/ and
+ * ./mnt/v/ipc/<class>/ are backed by a small dynamic
+ * .lookup/.iterate_shared/.unlink implementation
+ * (lkm4ctr_diagfs_dyn_*()): .iterate_shared snapshots the live registry and
+ * emits a dentry name per instance, .lookup materialises a
+ * matching-and-still-present instance file on demand, and .unlink resolves
+ * the instance's key back to its provider and tears the underlying resource
+ * down (kill/RMID/quiesce) before removing the dentry. The provider backend
+ * for the ./mnt/v/ trees lives in glue/vendor_kernel_diag.c behind the
+ * vns_diag_res_* vtable (see glue/vendor_kernel_diag.h); the ./mnt/resources/
+ * provider is diagfs-local (lkm4ctr_diag_res_*() below) because its holders
+ * are diagfs/hook bookkeeping, not vendor_kernel objects. Aggregate registry
+ * dumps that are not naturally one-object-per-dentry (the namespace registry
+ * dump, the POSIX mqueue listing) remain readable listing files rather than
+ * dynamic directories.
  *
  * Directory traversal reuses the kernel's own simple_lookup() (fs/libfs.c)
  * -- a plain function symbol, resolved lazily via lkm4ctr_diagfs_resolve()
@@ -142,6 +221,7 @@
 
 #include "shadow_hook.h"
 #include "../vendor/vendor_kernel.h"
+#include "vendor_kernel_diag.h"
 #include "lkm4ctr_log.h"
 #include "lkm4ctr_compat.h"
 
@@ -230,11 +310,20 @@ typedef struct dentry *(*lkm4ctr_d_alloc_name_t)(struct dentry *parent,
 typedef struct dentry *(*lkm4ctr_simple_lookup_t)(struct inode *dir,
 						   struct dentry *dentry,
 						   unsigned int flags);
+/*
+ * simple_unlink() (fs/libfs.c) is resolved lazily too, exactly like
+ * simple_lookup() above and for the same "Protected symbol"/CONFIG_TRIM
+ * reasons -- the dynamic ./mnt/resources/ and ./mnt/v/{ns,ipc}/ directories'
+ * .unlink callback uses it to drop the freed instance's dentry once the
+ * underlying resource has been torn down.
+ */
+typedef int (*lkm4ctr_simple_unlink_t)(struct inode *dir, struct dentry *dentry);
 
 static lkm4ctr_kill_litter_super_t lkm4ctr_kill_litter_super_fn;
 static lkm4ctr_generic_shutdown_super_t lkm4ctr_generic_shutdown_super_fn;
 static lkm4ctr_d_alloc_name_t lkm4ctr_d_alloc_name_fn;
 static lkm4ctr_simple_lookup_t lkm4ctr_simple_lookup_fn;
+static lkm4ctr_simple_unlink_t lkm4ctr_simple_unlink_fn;
 
 
 static struct dentry *__nocfi lkm4ctr_diagfs_dir_lookup(struct inode *dir,
@@ -300,6 +389,7 @@ extern const unsigned long lkm4ctr_readme_txt_size;
 enum lkm4ctr_diagfs_kind {
 	LKM4CTR_DIAG_CONTROL,
 	LKM4CTR_DIAG_STATUS,
+	LKM4CTR_DIAG_ENABLED,
 	LKM4CTR_DIAG_HOOKS,
 	LKM4CTR_DIAG_NAMESPACES,
 	LKM4CTR_DIAG_LOG,
@@ -311,7 +401,30 @@ enum lkm4ctr_diagfs_kind {
 	LKM4CTR_DIAG_HOTRELOAD_TRIGGER,
 	LKM4CTR_DIAG_HELPER_SCRIPT,
 	LKM4CTR_DIAG_README,
+	/* per-instance leaf under a dynamic ./mnt/resources or ./mnt/v/{ns,ipc} dir */
+	LKM4CTR_DIAG_DYN_INSTANCE,
 };
+
+/*
+ * Dynamic-directory "domains": which provider backs a dynamic dir's
+ * .lookup/.iterate_shared/.unlink and its per-instance leaf files.
+ *   VNS - vendor_kernel's live namespaces / SysV IPC objects, via the
+ *         vns_diag_res_* vtable (glue/vendor_kernel_diag.c); dyn_provider is
+ *         an enum vns_diag_res value, dyn_key is a tgid or ipc id.
+ *   RES - the diagfs-local ./mnt/resources holders (mounts / in-flight hooks
+ *         / other refs); dyn_provider is unused, dyn_key packs a holder type
+ *         in its high 32 bits and an index in its low 32 bits.
+ */
+enum lkm4ctr_diagfs_dyn_domain {
+	LKM4CTR_DYN_DOMAIN_NONE = 0,
+	LKM4CTR_DYN_DOMAIN_VNS,
+	LKM4CTR_DYN_DOMAIN_RES,
+};
+
+/* ./mnt/resources holder types packed into the high 32 bits of dyn_key. */
+#define LKM4CTR_RES_MOUNT	1
+#define LKM4CTR_RES_HOOK	2
+#define LKM4CTR_RES_OTHER	3
 
 enum lkm4ctr_diagfs_lifecycle_state {
 	LKM4CTR_STATE_UNLOADED,
@@ -327,6 +440,9 @@ struct lkm4ctr_diagfs_info {
 	u32					ns_type;
 	bool					has_ns_type;
 	bool					is_global;
+	int					dyn_domain;	/* enum lkm4ctr_diagfs_dyn_domain */
+	int					dyn_provider;	/* enum vns_diag_res (VNS domain) */
+	u64					dyn_key;	/* per-instance key (leaf files) */
 };
 
 struct lkm4ctr_diagfs_module {
@@ -340,7 +456,7 @@ struct lkm4ctr_diagfs_module {
 };
 
 static struct lkm4ctr_diagfs_module lkm4ctr_diagfs_modules[] = {
-	{ "vendor_kernel", 	"vendor_kernel", 	true,  true,  vendor_kernel_init,	vendor_kernel_exit,	LKM4CTR_STATE_ACTIVE },
+	{ "v", 	"vendor_kernel", 	true,  true,  vendor_kernel_init,	vendor_kernel_exit,	LKM4CTR_STATE_ACTIVE },
 };
 
 static enum lkm4ctr_diagfs_lifecycle_state lkm4ctr_diagfs_global_state =
@@ -427,7 +543,10 @@ static bool lkm4ctr_diagfs_any_module_transition_locked(void)
 
 static const struct file_operations lkm4ctr_diagfs_ro_fops;
 static const struct file_operations lkm4ctr_diagfs_control_fops;
+static const struct file_operations lkm4ctr_diagfs_enabled_fops;
 static const struct file_operations lkm4ctr_diagfs_hotreload_trigger_fops;
+static const struct inode_operations lkm4ctr_diagfs_dyn_dir_inode_operations;
+static struct file_operations lkm4ctr_diagfs_dyn_dir_fops;
 
 static struct inode *lkm4ctr_diagfs_make_inode(struct super_block *sb, umode_t mode)
 {
@@ -506,6 +625,19 @@ static struct dentry *__nocfi lkm4ctr_diagfs_create_file(struct super_block *sb,
 	case LKM4CTR_DIAG_CONTROL:
 		inode->i_fop = &lkm4ctr_diagfs_control_fops;
 		break;
+	case LKM4CTR_DIAG_STATUS:
+		/*
+		 * The module-wide ./mnt/status is the merged status+control
+		 * file: readable lifecycle state, writable command surface
+		 * (on/off/forceunload/force2). Per-subsystem ./mnt/v/status
+		 * stays read-only (its control lives in ./mnt/v/control).
+		 */
+		inode->i_fop = is_global ? &lkm4ctr_diagfs_control_fops :
+					   &lkm4ctr_diagfs_ro_fops;
+		break;
+	case LKM4CTR_DIAG_ENABLED:
+		inode->i_fop = &lkm4ctr_diagfs_enabled_fops;
+		break;
 	case LKM4CTR_DIAG_HOTRELOAD_TRIGGER:
 		inode->i_fop = &lkm4ctr_diagfs_hotreload_trigger_fops;
 		break;
@@ -518,8 +650,11 @@ static struct dentry *__nocfi lkm4ctr_diagfs_create_file(struct super_block *sb,
 	dentry = lkm4ctr_d_alloc_name_fn ? lkm4ctr_d_alloc_name_fn(parent, name) : NULL;
 	if (!dentry) {
 		inode_unlock(d_inode(parent));
+		/*
+		 * iput() runs ->evict_inode(), which already kfree()s
+		 * inode->i_private (== info); do not free it again here.
+		 */
 		iput(inode);
-		kfree(info);
 		return ERR_PTR(-ENOMEM);
 	}
 	d_add(dentry, inode);
@@ -577,11 +712,34 @@ static size_t lkm4ctr_diagfs_status_snprintf(const struct lkm4ctr_diagfs_info *i
 	struct lkm4ctr_diagfs_module *mod;
 
 	if (info->is_global) {
+		const char *name;
+
 		mutex_lock(&lkm4ctr_unload_lock);
 		state = lkm4ctr_diagfs_global_state;
 		mutex_unlock(&lkm4ctr_unload_lock);
-		return scnprintf(buf, buflen, "%s\n",
-				 lkm4ctr_diagfs_state_name(state));
+		/*
+		 * The module-wide ./mnt/status uses the spec's three-value
+		 * vocabulary "active"/"inactive"/"unloading" (plus the
+		 * transient "loading"), a simplification of the richer
+		 * internal state names used by the per-subsystem ./mnt/v/status.
+		 */
+		switch (state) {
+		case LKM4CTR_STATE_ACTIVE:
+			name = "active";
+			break;
+		case LKM4CTR_STATE_LOADING:
+			name = "loading";
+			break;
+		case LKM4CTR_STATE_GRACEFUL_UNLOADING:
+		case LKM4CTR_STATE_FORCE_UNLOADING:
+			name = "unloading";
+			break;
+		case LKM4CTR_STATE_UNLOADED:
+		default:
+			name = "inactive";
+			break;
+		}
+		return scnprintf(buf, buflen, "%s\n", name);
 	}
 
 	mod = lkm4ctr_diagfs_find_module(info->tag);
@@ -593,6 +751,18 @@ static size_t lkm4ctr_diagfs_status_snprintf(const struct lkm4ctr_diagfs_info *i
 	mutex_unlock(&lkm4ctr_unload_lock);
 
 	return scnprintf(buf, buflen, "%s\n", lkm4ctr_diagfs_state_name(state));
+}
+
+/*
+ * ./mnt/v/enabled - read the vendor_kernel_enabled flag as "1"/"0".
+ * The write side (a meaningful debug toggle: "1"/"on" loads vendor_kernel,
+ * "0"/"off" unloads it) is handled by lkm4ctr_diagfs_enabled_write() below.
+ */
+static size_t lkm4ctr_diagfs_enabled_snprintf(const struct lkm4ctr_diagfs_info *info,
+					      char *buf, size_t buflen)
+{
+	(void)info;
+	return scnprintf(buf, buflen, "%d\n", vendor_kernel_enabled ? 1 : 0);
 }
 
 static size_t lkm4ctr_diagfs_hooks_snprintf(const struct lkm4ctr_diagfs_info *info,
@@ -647,6 +817,137 @@ static size_t lkm4ctr_diagfs_sysvipc_resources_snprintf(const struct lkm4ctr_dia
 	return vendor_kernel_diag_snprintf(buf, buflen);
 }
 
+/* ------------------------------------------------------------------- */
+/* ./mnt/resources/ provider (diagfs-local reference holders)           */
+/* ------------------------------------------------------------------- */
+
+/*
+ * The ./mnt/resources/ directory breaks the same module_refcount() total the
+ * "references" renderer explains into one dynamic file per real holder:
+ *   mount-<n>  each active lkm4ctr diagfs mount (file_system_type->owner)
+ *   hook-<n>   each in-flight shadow_hook-redirected call
+ *   other-<n>  each still-unaccounted external reference
+ * These counts are diagfs/hook bookkeeping, not vendor_kernel objects, so
+ * they are served by this diagfs-local provider rather than the vns_diag_res_*
+ * vtable used by ./mnt/v/{ns,ipc}/.
+ */
+static void lkm4ctr_diag_res_counts(int *mounts, int *hooks, int *other)
+{
+	int refcount = -1;
+
+	*mounts = atomic_read(&lkm4ctr_diagfs_mount_count);
+	*hooks = shadow_hook_inflight_count();
+	if (lkm4ctr_module_refcount_fn)
+		refcount = lkm4ctr_module_refcount_fn(THIS_MODULE);
+	*other = (refcount < 0) ? 0 : max(0, (refcount - 1) - *mounts - *hooks);
+}
+
+static int lkm4ctr_diag_res_snapshot(u64 *keys, int max)
+{
+	int mounts, hooks, other, i, n = 0;
+
+	lkm4ctr_diag_res_counts(&mounts, &hooks, &other);
+	for (i = 0; i < mounts; i++, n++)
+		if (n < max)
+			keys[n] = ((u64)LKM4CTR_RES_MOUNT << 32) | (u32)i;
+	for (i = 0; i < hooks; i++, n++)
+		if (n < max)
+			keys[n] = ((u64)LKM4CTR_RES_HOOK << 32) | (u32)i;
+	for (i = 0; i < other; i++, n++)
+		if (n < max)
+			keys[n] = ((u64)LKM4CTR_RES_OTHER << 32) | (u32)i;
+	return n;
+}
+
+static bool lkm4ctr_diag_res_present(u64 key)
+{
+	int mounts, hooks, other;
+	int type = (int)(key >> 32);
+	u32 idx = (u32)key;
+
+	lkm4ctr_diag_res_counts(&mounts, &hooks, &other);
+	switch (type) {
+	case LKM4CTR_RES_MOUNT:
+		return idx < (u32)mounts;
+	case LKM4CTR_RES_HOOK:
+		return idx < (u32)hooks;
+	case LKM4CTR_RES_OTHER:
+		return idx < (u32)other;
+	default:
+		return false;
+	}
+}
+
+static size_t lkm4ctr_diag_res_render(u64 key, char *buf, size_t buflen)
+{
+	int type = (int)(key >> 32);
+	u32 idx = (u32)key;
+	size_t pos = 0;
+
+	switch (type) {
+	case LKM4CTR_RES_MOUNT:
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "holder: lkm4ctr diagfs mount #%u\n"
+				 "type: file_system_type->owner reference\n"
+				 "detail: each active `mount -t lkm4ctr` pins module_refcount(), exactly like any other in-use filesystem module\n",
+				 idx);
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "delete: umounts ALL lkm4ctr diagfs mounts (aggregate; individual mounts are not targetable today -- honest limitation)\n");
+		break;
+	case LKM4CTR_RES_HOOK:
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "holder: in-flight shadow_hook-redirected call #%u\n"
+				 "type: shadow_hook_inflight_count() contributor\n"
+				 "detail: a hooked syscall is currently executing in another task and holds a module reference until it returns\n",
+				 idx);
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "delete: quiesces new redirects and drains ALL in-flight hook calls (aggregate; a single call is not targetable, and a genuinely stuck call cannot be force-killed -- honest limitation)\n");
+		break;
+	case LKM4CTR_RES_OTHER:
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "holder: unaccounted external reference #%u\n"
+				 "type: other/unexplained module_refcount() contributor\n"
+				 "detail: typically another module using an EXPORT_SYMBOL_GPL() of lkm4ctr.ko, or a reference this file does not yet break out\n",
+				 idx);
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "delete: not supported (an external holder cannot be cleared from here) -- use `echo force2 > ../status` for the aggressive override\n");
+		break;
+	default:
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "unknown resource holder\n");
+		break;
+	}
+
+	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+			 "\n"
+			 "SAFE-RMMOD RULE: when this directory contains only the mount-* file(s) for the diagfs mount(s) actively keeping it busy (i.e. no hook-*/other-* remain, only the very mount you are reading through), it is safe to `umount` diagfs and then `rmmod lkm4ctr`.\n");
+	return pos;
+}
+
+/*
+ * lkm4ctr_diag_res_delete() forward declaration: the actual teardown reuses
+ * lkm4ctr_auto_umount_diagfs()/shadow_hook_quiesce(), which are defined
+ * further down with the self-unload machinery, so the body lives there.
+ */
+static int lkm4ctr_diag_res_delete(u64 key);
+
+/*
+ * lkm4ctr_diagfs_dyn_instance_snprintf() - render one per-instance leaf file
+ * under a dynamic directory, dispatching on its domain: vendor_kernel
+ * namespaces/IPC via the vns_diag_res_* vtable, or a diagfs-local resource
+ * holder.
+ */
+static size_t lkm4ctr_diagfs_dyn_instance_snprintf(const struct lkm4ctr_diagfs_info *info,
+						   char *buf, size_t buflen)
+{
+	if (info->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS)
+		return vns_diag_res_render(info->dyn_provider, info->dyn_key,
+					   buf, buflen);
+	if (info->dyn_domain == LKM4CTR_DYN_DOMAIN_RES)
+		return lkm4ctr_diag_res_render(info->dyn_key, buf, buflen);
+	return scnprintf(buf, buflen, "unknown dynamic resource\n");
+}
+
 /*
  * lkm4ctr_diagfs_references_snprintf() - explain *why* module_refcount() is
  * whatever it currently is, i.e. who is actually holding a reference to
@@ -686,7 +987,7 @@ static size_t lkm4ctr_diagfs_references_snprintf(const struct lkm4ctr_diagfs_inf
 
 	if (refcount < 0) {
 		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
-				 "module_refcount() unavailable (module_refcount symbol not yet resolved; write to global/control at least once to trigger resolution)\n");
+				 "module_refcount() unavailable (module_refcount symbol not yet resolved; write to /status at least once to trigger resolution)\n");
 	} else {
 		accounted = mounts + inflight;
 		other = max(0, (refcount - 1) - accounted);
@@ -785,6 +1086,8 @@ static lkm4ctr_diagfs_render_fn lkm4ctr_diagfs_render_for(enum lkm4ctr_diagfs_ki
 		return lkm4ctr_diagfs_control_snprintf;
 	case LKM4CTR_DIAG_STATUS:
 		return lkm4ctr_diagfs_status_snprintf;
+	case LKM4CTR_DIAG_ENABLED:
+		return lkm4ctr_diagfs_enabled_snprintf;
 	case LKM4CTR_DIAG_HOOKS:
 		return lkm4ctr_diagfs_hooks_snprintf;
 	case LKM4CTR_DIAG_NAMESPACES:
@@ -807,6 +1110,8 @@ static lkm4ctr_diagfs_render_fn lkm4ctr_diagfs_render_for(enum lkm4ctr_diagfs_ki
 		return lkm4ctr_diagfs_helper_script_snprintf;
 	case LKM4CTR_DIAG_README:
 		return lkm4ctr_diagfs_readme_snprintf;
+	case LKM4CTR_DIAG_DYN_INSTANCE:
+		return lkm4ctr_diagfs_dyn_instance_snprintf;
 	default:
 		return NULL;
 	}
@@ -907,13 +1212,16 @@ static bool lkm4ctr_diagfs_is_unload_cmd(const char *cmd, bool is_global)
 {
 	if (!strcmp(cmd, "unload") || !strcmp(cmd, "remove") || !strcmp(cmd, "graceful"))
 		return true;
-	return is_global && !strcmp(cmd, "1");
+	/* "1" and "off" are the module-wide ./mnt/status "turn it off" aliases. */
+	return is_global && (!strcmp(cmd, "1") || !strcmp(cmd, "off"));
 }
 
 static int lkm4ctr_diagfs_parse_control_cmd(const char *cmd, bool is_global,
 					    enum lkm4ctr_diagfs_control_cmd *out)
 {
-	if (!strcmp(cmd, "load") || (is_global && !strcmp(cmd, "load_all"))) {
+	if (!strcmp(cmd, "load") ||
+	    (is_global && (!strcmp(cmd, "load_all") || !strcmp(cmd, "on")))) {
+		/* "on" is the module-wide ./mnt/status "turn it on" alias. */
 		*out = LKM4CTR_CONTROL_LOAD;
 	} else if (lkm4ctr_diagfs_is_unload_cmd(cmd, is_global)) {
 		*out = LKM4CTR_CONTROL_UNLOAD;
@@ -922,9 +1230,9 @@ static int lkm4ctr_diagfs_parse_control_cmd(const char *cmd, bool is_global,
 		*out = LKM4CTR_CONTROL_FORCE_UNLOAD;
 	} else if (is_global && !strcmp(cmd, "force2")) {
 		/*
-		 * "force2" is a global-only escalation, deliberately not
+		 * "force2" is a module-wide-only escalation, deliberately not
 		 * accepted as a first command on a fresh (not-yet-unloading)
-		 * global/control -- see the file header note above and
+		 * ./mnt/status -- see the file header note above and
 		 * lkm4ctr_diagfs_control_write() below: it either escalates
 		 * an already-running force-unload to the aggressive path, or
 		 * (same as writing "force" then immediately "force2") starts
@@ -1365,7 +1673,7 @@ static int lkm4ctr_safe_unload_fn(void *unused)
 					    "cause: this lkm4ctr diagfs is currently mounted %d time(s); every active mount pins module_refcount() via file_system_type->owner, exactly like rmmod refuses any other in-use filesystem module, and this alone will block self-unload forever",
 					    mounts);
 				LKM4CTR_ERR(LKM4CTR_SAFE_UNLOAD_TAG,
-					    "resolution: `umount` every mountpoint of type \"lkm4ctr\" (check with `grep lkm4ctr /proc/mounts`) -- including the one you may be reading/writing global/control through right now -- then write to global/control again, or escalate to `echo force2 > global/control` to override it forcibly");
+					    "resolution: `umount` every mountpoint of type \"lkm4ctr\" (check with `grep lkm4ctr /proc/mounts`) -- including the one you may be reading/writing /status through right now -- then write to /status again, or escalate to `echo force2 > /status` to override it forcibly");
 			} else {
 				if (force)
 					LKM4CTR_ERR(LKM4CTR_SAFE_UNLOAD_TAG,
@@ -1376,7 +1684,7 @@ static int lkm4ctr_safe_unload_fn(void *unused)
 						    "cause: %d extra reference(s) remain with no lkm4ctr diagfs mounted, so a shadow_hook-redirected syscall is most likely still executing in another task (%d currently tracked in-flight), or a resource created via a hook (e.g. an anon-inode fd) is still held open",
 						    refcount - 1, shadow_hook_inflight_count());
 				LKM4CTR_ERR(LKM4CTR_SAFE_UNLOAD_TAG,
-					    "resolution: this is a real in-flight kernel call still executing somewhere -- it cannot be forced to finish sooner without risking a crash, so simply wait and retry; if the count never drops on retry this may be a reference leak worth reporting, or escalate to `echo force2 > global/control` to override it forcibly (unsafe, last resort)");
+					    "resolution: this is a real in-flight kernel call still executing somewhere -- it cannot be forced to finish sooner without risking a crash, so simply wait and retry; if the count never drops on retry this may be a reference leak worth reporting, or escalate to `echo force2 > /status` to override it forcibly (unsafe, last resort)");
 			}
 
 			if (force) {
@@ -1615,6 +1923,56 @@ static const struct file_operations lkm4ctr_diagfs_control_fops = {
 };
 
 /*
+ * ./mnt/v/enabled write handler - a meaningful debug toggle of the
+ * vendor_kernel_enabled flag/subsystem: "1"/"on" loads vendor_kernel,
+ * "0"/"off" unloads it (routing through the same
+ * lkm4ctr_diagfs_module_load()/unload() paths ./mnt/v/control uses, so the
+ * lifecycle bookkeeping and locking stay identical). Read renders the flag.
+ */
+static ssize_t lkm4ctr_diagfs_enabled_write(struct file *file,
+					    const char __user *ubuf,
+					    size_t count, loff_t *ppos)
+{
+	char cmd[16];
+	struct lkm4ctr_diagfs_module *mod;
+	bool enable;
+	int ret;
+
+	(void)file;
+	(void)ppos;
+	if (count == 0 || count >= sizeof(cmd))
+		return -EINVAL;
+	if (copy_from_user(cmd, ubuf, count))
+		return -EFAULT;
+	cmd[count] = '\0';
+	strim(cmd);
+
+	if (!strcmp(cmd, "1") || !strcmp(cmd, "on"))
+		enable = true;
+	else if (!strcmp(cmd, "0") || !strcmp(cmd, "off"))
+		enable = false;
+	else
+		return -EINVAL;
+
+	mod = lkm4ctr_diagfs_find_module("vendor_kernel");
+	if (!mod)
+		return -ENOSYS;
+
+	ret = enable ? lkm4ctr_diagfs_module_load(mod, false) :
+		       lkm4ctr_diagfs_module_unload(mod, false, false);
+	return ret ? ret : count;
+}
+
+static const struct file_operations lkm4ctr_diagfs_enabled_fops = {
+	.owner		= THIS_MODULE,
+	.open		= lkm4ctr_diagfs_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= lkm4ctr_diagfs_enabled_write,
+};
+
+/*
  * do-hot-reload write handler. Deliberately tiny: all the real work
  * (validation, quiesce/drain, spawning the rmmod+insmod handoff) lives in
  * lkm4ctr_hotreload.c's lkm4ctr_hotreload_trigger(); this is purely the
@@ -1657,6 +2015,343 @@ static const struct file_operations lkm4ctr_diagfs_hotreload_trigger_fops = {
 };
 
 /* ------------------------------------------------------------------- */
+/* dynamic directories: ./mnt/resources/ and ./mnt/v/{ns,ipc}/<type>/   */
+/* ------------------------------------------------------------------- */
+
+#define LKM4CTR_RES_HOOK_DRAIN_ITERS	200
+#define LKM4CTR_RES_HOOK_DRAIN_POLL_MS	25
+
+/*
+ * lkm4ctr_diag_res_delete() (declared far above with the other renderers) -
+ * tear down one ./mnt/resources holder. Defined here because it reuses the
+ * self-unload machinery (lkm4ctr_auto_umount_diagfs(), shadow_hook_quiesce())
+ * defined above.
+ */
+static int lkm4ctr_diag_res_delete(u64 key)
+{
+	int type = (int)(key >> 32);
+	int i;
+
+	switch (type) {
+	case LKM4CTR_RES_MOUNT:
+		if (!lkm4ctr_safe_unload_resolve())
+			return -EOPNOTSUPP;
+		/*
+		 * Aggregate (honest limitation): there is no way to umount one
+		 * specific lkm4ctr mount by index, so this lazily umounts every
+		 * lkm4ctr diagfs mount, reusing the exact auto-umount path the
+		 * self-unload sequence already uses. Because it is a lazy
+		 * detach ("umount -l"), doing this through the very mount being
+		 * unmounted does not deadlock on the dentry we hold.
+		 */
+		lkm4ctr_auto_umount_diagfs();
+		return 0;
+	case LKM4CTR_RES_HOOK:
+		/*
+		 * Aggregate (honest limitation): quiesce new redirects, drain
+		 * ALL in-flight hook calls with the same bounded msleep-poll
+		 * idiom as lkm4ctr_safe_unload_fn(), then re-enable. A single
+		 * in-flight call is not individually targetable, and a
+		 * genuinely stuck call cannot be force-killed here.
+		 */
+		shadow_hook_quiesce(true);
+		for (i = 0; i < LKM4CTR_RES_HOOK_DRAIN_ITERS &&
+			    shadow_hook_inflight_count() > 0; i++)
+			msleep(LKM4CTR_RES_HOOK_DRAIN_POLL_MS);
+		shadow_hook_quiesce(false);
+		return 0;
+	case LKM4CTR_RES_OTHER:
+	default:
+		/* An external holder cannot be cleared from here. */
+		return -EOPNOTSUPP;
+	}
+}
+
+/* Name <-> key codec for a dynamic directory, dispatched on its domain. */
+static bool lkm4ctr_diagfs_dyn_name_to_key(const struct lkm4ctr_diagfs_info *di,
+					   const char *name, u64 *key)
+{
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS) {
+		unsigned long long v;
+
+		if (kstrtoull(name, 10, &v))
+			return false;
+		*key = v;
+		return true;
+	}
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_RES) {
+		unsigned long long v;
+		const char *num;
+		int type;
+
+		if (!strncmp(name, "mount-", 6)) {
+			type = LKM4CTR_RES_MOUNT;
+			num = name + 6;
+		} else if (!strncmp(name, "hook-", 5)) {
+			type = LKM4CTR_RES_HOOK;
+			num = name + 5;
+		} else if (!strncmp(name, "other-", 6)) {
+			type = LKM4CTR_RES_OTHER;
+			num = name + 6;
+		} else {
+			return false;
+		}
+		if (kstrtoull(num, 10, &v) || v > U32_MAX)
+			return false;
+		*key = ((u64)type << 32) | (u32)v;
+		return true;
+	}
+	return false;
+}
+
+static int lkm4ctr_diagfs_dyn_key_to_name(const struct lkm4ctr_diagfs_info *di,
+					  u64 key, char *buf, size_t sz)
+{
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS)
+		return scnprintf(buf, sz, "%llu", key);
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_RES) {
+		int type = (int)(key >> 32);
+		u32 idx = (u32)key;
+		const char *p = type == LKM4CTR_RES_MOUNT ? "mount" :
+				type == LKM4CTR_RES_HOOK ? "hook" : "other";
+
+		return scnprintf(buf, sz, "%s-%u", p, idx);
+	}
+	return 0;
+}
+
+static bool lkm4ctr_diagfs_dyn_present(const struct lkm4ctr_diagfs_info *di, u64 key)
+{
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS)
+		return vns_diag_res_present(di->dyn_provider, key);
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_RES)
+		return lkm4ctr_diag_res_present(key);
+	return false;
+}
+
+static int lkm4ctr_diagfs_dyn_snapshot(const struct lkm4ctr_diagfs_info *di,
+				       u64 *keys, int max)
+{
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS)
+		return vns_diag_res_snapshot(di->dyn_provider, keys, max);
+	if (di->dyn_domain == LKM4CTR_DYN_DOMAIN_RES)
+		return lkm4ctr_diag_res_snapshot(keys, max);
+	return 0;
+}
+
+static int lkm4ctr_diagfs_dyn_delete(const struct lkm4ctr_diagfs_info *fi)
+{
+	if (fi->dyn_domain == LKM4CTR_DYN_DOMAIN_VNS)
+		return vns_diag_res_delete(fi->dyn_provider, fi->dyn_key);
+	if (fi->dyn_domain == LKM4CTR_DYN_DOMAIN_RES)
+		return lkm4ctr_diag_res_delete(fi->dyn_key);
+	return -EINVAL;
+}
+
+/*
+ * .lookup for a dynamic directory: parse the requested name back to a key,
+ * and if that key is a live instance right now, materialise a read-only leaf
+ * file for it (its contents render fresh on open via LKM4CTR_DIAG_DYN_INSTANCE,
+ * and it can be unlinked to tear the underlying resource down). Otherwise the
+ * dentry is left negative (ENOENT). Real-kernel-invoked VFS callback, so
+ * __nocfi like every other inode_operations member in this file.
+ */
+static struct dentry *__nocfi lkm4ctr_diagfs_dyn_lookup(struct inode *dir,
+							struct dentry *dentry,
+							unsigned int flags)
+{
+	struct lkm4ctr_diagfs_info *di = dir->i_private;
+	struct lkm4ctr_diagfs_info *info;
+	struct inode *inode;
+	u64 key;
+
+	(void)flags;
+	if (!di)
+		return ERR_PTR(-ENOENT);
+	if (dentry->d_name.len >= NAME_MAX)
+		return ERR_PTR(-ENAMETOOLONG);
+	if (!lkm4ctr_diagfs_dyn_name_to_key(di, dentry->d_name.name, &key) ||
+	    !lkm4ctr_diagfs_dyn_present(di, key)) {
+		d_add(dentry, NULL);
+		return NULL;
+	}
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return ERR_PTR(-ENOMEM);
+	info->kind = LKM4CTR_DIAG_DYN_INSTANCE;
+	info->dyn_domain = di->dyn_domain;
+	info->dyn_provider = di->dyn_provider;
+	info->dyn_key = key;
+
+	inode = lkm4ctr_diagfs_make_inode(dir->i_sb, S_IFREG | 0444);
+	if (!inode) {
+		kfree(info);
+		return ERR_PTR(-ENOMEM);
+	}
+	inode->i_private = info;
+	inode->i_fop = &lkm4ctr_diagfs_ro_fops;
+	d_add(dentry, inode);
+	return NULL;
+}
+
+/*
+ * .iterate_shared for a dynamic directory: snapshot the live registry once
+ * and emit a name per instance. The snapshot is per-getdents-pass, so an
+ * instance that appears/disappears mid-scan may be shown once or skipped --
+ * acceptable "live view" semantics for a diagnostics fs, and never unsafe
+ * (each name is re-validated by .lookup before a leaf file is created).
+ */
+#define LKM4CTR_DIAG_DYN_MAX	4096
+
+static int __nocfi lkm4ctr_diagfs_dyn_iterate(struct file *file,
+					      struct dir_context *ctx)
+{
+	struct inode *dir = file_inode(file);
+	struct lkm4ctr_diagfs_info *di = dir->i_private;
+	char name[40];
+	u64 *keys;
+	int total, i, len;
+
+	if (!dir_emit_dots(file, ctx))
+		return 0;
+	if (!di)
+		return 0;
+
+	keys = kmalloc_array(LKM4CTR_DIAG_DYN_MAX, sizeof(*keys), GFP_KERNEL);
+	if (!keys)
+		return -ENOMEM;
+	total = lkm4ctr_diagfs_dyn_snapshot(di, keys, LKM4CTR_DIAG_DYN_MAX);
+	if (total > LKM4CTR_DIAG_DYN_MAX)
+		total = LKM4CTR_DIAG_DYN_MAX;
+
+	/* pos 0,1 are "."/".."; entry i is at pos 2 + i. */
+	for (i = (int)ctx->pos - 2; i >= 0 && i < total; i++) {
+		len = lkm4ctr_diagfs_dyn_key_to_name(di, keys[i], name, sizeof(name));
+		if (len <= 0) {
+			ctx->pos++;
+			continue;
+		}
+		if (!dir_emit(ctx, name, len, (u64)(2 + i), DT_REG))
+			break;
+		ctx->pos++;
+	}
+	kfree(keys);
+	return 0;
+}
+
+/*
+ * .unlink for a dynamic directory: resolve the leaf's key back to its
+ * provider and gracefully tear the underlying resource down (kill a thread
+ * group + free its nsproxy / IPC_RMID / quiesce+drain), then drop the dentry.
+ * If teardown fails, the error is propagated and the dentry is left in place.
+ * Real-kernel-invoked VFS callback, so __nocfi.
+ */
+static int __nocfi lkm4ctr_diagfs_dyn_unlink(struct inode *dir,
+					     struct dentry *dentry)
+{
+	struct inode *inode = d_inode(dentry);
+	struct lkm4ctr_diagfs_info *fi = inode ? inode->i_private : NULL;
+	int ret;
+
+	if (!fi)
+		return -EPERM;
+
+	ret = lkm4ctr_diagfs_dyn_delete(fi);
+	if (ret)
+		return ret;
+
+	if (lkm4ctr_simple_unlink_fn)
+		return lkm4ctr_simple_unlink_fn(dir, dentry);
+	/*
+	 * Fallback if simple_unlink() could not be resolved: drop the link
+	 * count so the now-freed resource's dentry becomes negative. The VFS
+	 * still dput()s it after we return 0.
+	 */
+	drop_nlink(inode);
+	return 0;
+}
+
+static const struct inode_operations lkm4ctr_diagfs_dyn_dir_inode_operations = {
+	.lookup		= lkm4ctr_diagfs_dyn_lookup,
+	.unlink		= lkm4ctr_diagfs_dyn_unlink,
+};
+
+/*
+ * .read/.llseek are copied from simple_dir_operations at init (see
+ * lkm4ctr_diagfs_init()); this file already references simple_dir_operations
+ * directly for the static dirs, so borrowing its plain generic_read_dir/
+ * generic_file_llseek members avoids importing those symbols by name (and the
+ * attendant CONFIG_TRIM_UNUSED_KSYMS risk).
+ */
+static struct file_operations lkm4ctr_diagfs_dyn_dir_fops = {
+	.owner		= THIS_MODULE,
+	.iterate_shared	= lkm4ctr_diagfs_dyn_iterate,
+};
+
+static struct dentry *__nocfi lkm4ctr_diagfs_mkdir_dyn(struct super_block *sb,
+						       struct dentry *parent,
+						       const char *name,
+						       int dyn_domain,
+						       int dyn_provider)
+{
+	struct inode *inode;
+	struct dentry *dentry;
+	struct lkm4ctr_diagfs_info *info;
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return ERR_PTR(-ENOMEM);
+	info->kind = LKM4CTR_DIAG_DYN_INSTANCE; /* unused for the dir itself */
+	info->dyn_domain = dyn_domain;
+	info->dyn_provider = dyn_provider;
+
+	/*
+	 * 0755 (not 0555 like the static dirs): the VFS checks unlink
+	 * permission against the *parent directory*, so these dynamic dirs must
+	 * be writable for `rm <leaf>` (routed to our .unlink) to be permitted
+	 * by DAC without relying on CAP_DAC_OVERRIDE. There is still no
+	 * .create/.mkdir op, so the write bit cannot add anything -- it only
+	 * allows deleting the module-owned per-instance leaves.
+	 */
+	inode = lkm4ctr_diagfs_make_inode(sb, S_IFDIR | 0755);
+	if (!inode) {
+		kfree(info);
+		return ERR_PTR(-ENOMEM);
+	}
+	inode->i_op = &lkm4ctr_diagfs_dyn_dir_inode_operations;
+	inode->i_fop = &lkm4ctr_diagfs_dyn_dir_fops;
+	inode->i_private = info;
+	set_nlink(inode, 2);
+
+	inode_lock(d_inode(parent));
+	dentry = lkm4ctr_d_alloc_name_fn ? lkm4ctr_d_alloc_name_fn(parent, name) : NULL;
+	if (!dentry) {
+		inode_unlock(d_inode(parent));
+		/* iput()->evict_inode() frees inode->i_private (== info). */
+		iput(inode);
+		return ERR_PTR(-ENOMEM);
+	}
+	d_add(dentry, inode);
+	inc_nlink(d_inode(parent));
+	inode_unlock(d_inode(parent));
+
+	return dentry;
+}
+
+static int lkm4ctr_diagfs_mkdir_dyn_checked(struct super_block *sb,
+					    struct dentry *parent,
+					    const char *name,
+					    int dyn_domain, int dyn_provider)
+{
+	struct dentry *dentry;
+
+	dentry = lkm4ctr_diagfs_mkdir_dyn(sb, parent, name, dyn_domain,
+					  dyn_provider);
+	return IS_ERR(dentry) ? PTR_ERR(dentry) : 0;
+}
+
+/* ------------------------------------------------------------------- */
 /* superblock / filesystem_type registration                           */
 /* ------------------------------------------------------------------- */
 
@@ -1680,9 +2375,119 @@ static const struct super_operations lkm4ctr_diagfs_super_ops = {
 	.evict_inode	= lkm4ctr_diagfs_evict_inode,
 };
 
-static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
-					  struct dentry *root,
-					  struct lkm4ctr_diagfs_module *mod)
+/*
+ * ./mnt/v/ns/ - one dynamic directory per namespace type vendor_kernel
+ * tracks. The provider (vns_diag_res_name()) supplies each directory's short
+ * name ("pid", "uts", ...); each dir lists one file per live instance.
+ */
+static const int lkm4ctr_diagfs_ns_providers[] = {
+	VNS_DIAG_NS_PID, VNS_DIAG_NS_UTS, VNS_DIAG_NS_IPC, VNS_DIAG_NS_USER,
+	VNS_DIAG_NS_NET, VNS_DIAG_NS_TIME, VNS_DIAG_NS_MNT, VNS_DIAG_NS_CGROUP,
+};
+
+/* ./mnt/v/ipc/ - one dynamic directory per SysV IPC class. */
+static const int lkm4ctr_diagfs_ipc_providers[] = {
+	VNS_DIAG_IPC_SHM, VNS_DIAG_IPC_MSG, VNS_DIAG_IPC_SEM,
+};
+
+static int lkm4ctr_diagfs_fill_v_ns_dir(struct super_block *sb,
+					struct dentry *v_dir)
+{
+	struct dentry *dir;
+	unsigned int i;
+	int ret;
+
+	dir = lkm4ctr_diagfs_mkdir(sb, v_dir, "ns");
+	if (IS_ERR(dir))
+		return PTR_ERR(dir);
+
+	for (i = 0; i < ARRAY_SIZE(lkm4ctr_diagfs_ns_providers); i++) {
+		int prov = lkm4ctr_diagfs_ns_providers[i];
+		const char *name = vns_diag_res_name(prov);
+
+		if (!name)
+			continue;
+		ret = lkm4ctr_diagfs_mkdir_dyn_checked(sb, dir, name,
+						       LKM4CTR_DYN_DOMAIN_VNS,
+						       prov);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int lkm4ctr_diagfs_fill_v_ipc_dir(struct super_block *sb,
+					 struct dentry *v_dir)
+{
+	struct dentry *dir, *mq;
+	unsigned int i;
+	int ret;
+
+	dir = lkm4ctr_diagfs_mkdir(sb, v_dir, "ipc");
+	if (IS_ERR(dir))
+		return PTR_ERR(dir);
+
+	for (i = 0; i < ARRAY_SIZE(lkm4ctr_diagfs_ipc_providers); i++) {
+		int prov = lkm4ctr_diagfs_ipc_providers[i];
+		const char *name = vns_diag_res_name(prov);
+
+		if (!name)
+			continue;
+		ret = lkm4ctr_diagfs_mkdir_dyn_checked(sb, dir, name,
+						       LKM4CTR_DYN_DOMAIN_VNS,
+						       prov);
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * POSIX mqueue: per-object enumeration/delete is not feasible without
+	 * a new vendored mqueuefs-walk accessor, so ./mnt/v/ipc/mqueue/ is a
+	 * plain directory with a single read-only "messages" listing file
+	 * rather than a dynamic per-object directory (honest limitation:
+	 * individual mqueue objects cannot be deleted here today).
+	 */
+	mq = lkm4ctr_diagfs_mkdir(sb, dir, "mqueue");
+	if (IS_ERR(mq))
+		return PTR_ERR(mq);
+	return lkm4ctr_diagfs_create_checked(sb, mq, "messages", 0444,
+					     LKM4CTR_DIAG_MQUEUE_MSG,
+					     "vendor_kernel", false, false, 0);
+}
+
+static int lkm4ctr_diagfs_fill_v_hotreload_dir(struct super_block *sb,
+					       struct dentry *v_dir)
+{
+	struct dentry *dir;
+	int ret;
+
+	dir = lkm4ctr_diagfs_mkdir(sb, v_dir, "hotreload");
+	if (IS_ERR(dir))
+		return PTR_ERR(dir);
+
+	ret = lkm4ctr_diagfs_create_checked(sb, dir, "status", 0444,
+					    LKM4CTR_DIAG_HOTRELOAD_STATUS,
+					    NULL, false, false, 0);
+	if (ret)
+		return ret;
+	ret = lkm4ctr_diagfs_create_checked(sb, dir, "log", 0444,
+					    LKM4CTR_DIAG_LOG,
+					    "hotreload", false, false, 0);
+	if (ret)
+		return ret;
+	return lkm4ctr_diagfs_create_checked(sb, dir, "do-hot-reload", 0200,
+					    LKM4CTR_DIAG_HOTRELOAD_TRIGGER,
+					    NULL, false, false, 0);
+}
+
+/*
+ * ./mnt/v/ - vendor_kernel's procfs-style subtree: control/status/enabled,
+ * the aggregate listing files, and the dynamic ns/ and ipc/ resource trees,
+ * plus the hot-reload control directory.
+ */
+static int lkm4ctr_diagfs_fill_v_dir(struct super_block *sb,
+				     struct dentry *root,
+				     struct lkm4ctr_diagfs_module *mod)
 {
 	struct dentry *dir;
 	int ret;
@@ -1698,6 +2503,11 @@ static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
 		return ret;
 	ret = lkm4ctr_diagfs_create_checked(sb, dir, "status", 0444,
 					    LKM4CTR_DIAG_STATUS,
+					    mod->tag, false, false, 0);
+	if (ret)
+		return ret;
+	ret = lkm4ctr_diagfs_create_checked(sb, dir, "enabled", 0644,
+					    LKM4CTR_DIAG_ENABLED,
 					    mod->tag, false, false, 0);
 	if (ret)
 		return ret;
@@ -1720,86 +2530,24 @@ static int lkm4ctr_diagfs_fill_module_dir(struct super_block *sb,
 			return ret;
 	}
 
-	if (!strcmp(mod->tag, "vendor_kernel")) {
-		ret = lkm4ctr_diagfs_create_checked(sb, dir, "namespaces", 0444,
+	ret = lkm4ctr_diagfs_create_checked(sb, dir, "namespaces", 0444,
 					    LKM4CTR_DIAG_NAMESPACES,
 					    mod->tag, false, false, 0);
-		if (ret)
-			return ret;
-		ret = lkm4ctr_diagfs_create_checked(sb, dir, "msg", 0444,
-					    LKM4CTR_DIAG_MQUEUE_MSG,
-					    mod->tag, false, false, 0);
-		if (ret)
-			return ret;
-		return lkm4ctr_diagfs_create_checked(sb, dir, "resources", 0444,
-					    LKM4CTR_DIAG_SYSVIPC_RESOURCES,
-					    mod->tag, false, false, 0);
-	}
-
-	return 0;
-}
-
-static int lkm4ctr_diagfs_fill_hotreload_dir(struct super_block *sb,
-					     struct dentry *global_dir)
-{
-	struct dentry *dir;
-	int ret;
-
-	dir = lkm4ctr_diagfs_mkdir(sb, global_dir, "hotreload");
-	if (IS_ERR(dir))
-		return PTR_ERR(dir);
-
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "status", 0444,
-					    LKM4CTR_DIAG_HOTRELOAD_STATUS,
-					    NULL, false, false, 0);
-	if (ret)
-		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "log", 0444,
-					    LKM4CTR_DIAG_LOG,
-					    "hotreload", false, false, 0);
-	if (ret)
-		return ret;
-	return lkm4ctr_diagfs_create_checked(sb, dir, "do-hot-reload", 0200,
-					    LKM4CTR_DIAG_HOTRELOAD_TRIGGER,
-					    NULL, false, false, 0);
-}
-
-static int lkm4ctr_diagfs_fill_global_dir(struct super_block *sb,
-					  struct dentry *root)
-{
-	struct dentry *dir;
-	int ret;
-
-	dir = lkm4ctr_diagfs_mkdir(sb, root, "global");
-	if (IS_ERR(dir))
-		return PTR_ERR(dir);
-
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "control", 0644,
-					    LKM4CTR_DIAG_CONTROL,
-					    NULL, true, false, 0);
-	if (ret)
-		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "status", 0444,
-					    LKM4CTR_DIAG_STATUS,
-					    NULL, true, false, 0);
-	if (ret)
-		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "log", 0444,
-					    LKM4CTR_DIAG_LOG,
-					    NULL, false, false, 0);
 	if (ret)
 		return ret;
 	ret = lkm4ctr_diagfs_create_checked(sb, dir, "resources", 0444,
-					    LKM4CTR_DIAG_GLOBAL_RESOURCES,
-					    NULL, true, false, 0);
+					    LKM4CTR_DIAG_SYSVIPC_RESOURCES,
+					    mod->tag, false, false, 0);
 	if (ret)
 		return ret;
-	ret = lkm4ctr_diagfs_create_checked(sb, dir, "references", 0444,
-					    LKM4CTR_DIAG_REFERENCES,
-					    NULL, true, false, 0);
+
+	ret = lkm4ctr_diagfs_fill_v_ns_dir(sb, dir);
 	if (ret)
 		return ret;
-	return lkm4ctr_diagfs_fill_hotreload_dir(sb, dir);
+	ret = lkm4ctr_diagfs_fill_v_ipc_dir(sb, dir);
+	if (ret)
+		return ret;
+	return lkm4ctr_diagfs_fill_v_hotreload_dir(sb, dir);
 }
 
 static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int silent)
@@ -1830,16 +2578,34 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 	if (!sb->s_root)
 		return -ENOMEM;
 
-	ret = lkm4ctr_diagfs_fill_global_dir(sb, sb->s_root);
+	/*
+	 * ./mnt/status - the flattened, merged status+control file at the
+	 * root (replacing the old split global/status + global/control):
+	 * readable lifecycle state, writable on/off/forceunload/force2
+	 * command surface. is_global => control_fops (see create_file).
+	 */
+	ret = lkm4ctr_diagfs_create_checked(sb, sb->s_root, "status", 0644,
+					    LKM4CTR_DIAG_STATUS, NULL,
+					    true, false, 0);
 	if (ret)
 		return ret;
 
 	/*
-	 * helper.sh lives at the diagfs mount root (a sibling of global/ and
-	 * every submodule directory), not under global/, so that
-	 * `. "$lkm4ctr_diagfs/helper.sh"` reads naturally regardless of
-	 * which submodules happen to be present. 0555 matches the
-	 * user-requested "chmod 555 r-x" read+execute-only permission.
+	 * ./mnt/log - the flattened, unfiltered global log (replacing the
+	 * old global/log): every log line from every subsystem, no tag
+	 * filter (NULL tag => lkm4ctr_log_snprintf() returns everything).
+	 * Read-only; the per-subsystem v/log and v/hotreload/log files
+	 * still exist for tag-filtered views.
+	 */
+	ret = lkm4ctr_diagfs_create_checked(sb, sb->s_root, "log", 0444,
+					    LKM4CTR_DIAG_LOG, NULL,
+					    true, false, 0);
+	if (ret)
+		return ret;
+
+	/*
+	 * helper.sh lives at the diagfs mount root so that
+	 * `. "$lkm4ctr_diagfs/helper.sh"` reads naturally. 0555 = read+execute.
 	 */
 	ret = lkm4ctr_diagfs_create_checked(sb, sb->s_root, "helper.sh", 0555,
 					    LKM4CTR_DIAG_HELPER_SCRIPT, NULL,
@@ -1849,10 +2615,7 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 
 	/*
 	 * readme.txt lives alongside helper.sh at the diagfs mount root: a
-	 * full plain-text description of this whole tree and how to use it,
-	 * self-contained so it is useful even without this repository's
-	 * source tree. Read-only, not executable (0444), unlike helper.sh's
-	 * 0555.
+	 * full plain-text description of this whole tree. Read-only (0444).
 	 */
 	ret = lkm4ctr_diagfs_create_checked(sb, sb->s_root, "readme.txt", 0444,
 					    LKM4CTR_DIAG_README, NULL,
@@ -1860,9 +2623,19 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 	if (ret)
 		return ret;
 
+	/*
+	 * ./mnt/resources/ - dynamic directory, one file per live reference
+	 * holder currently blocking a safe rmmod (see the file header's
+	 * SAFE-RMMOD RULE and lkm4ctr_diag_res_*()).
+	 */
+	ret = lkm4ctr_diagfs_mkdir_dyn_checked(sb, sb->s_root, "resources",
+					       LKM4CTR_DYN_DOMAIN_RES, 0);
+	if (ret)
+		return ret;
+
 	for (i = 0; i < ARRAY_SIZE(lkm4ctr_diagfs_modules); i++) {
-		ret = lkm4ctr_diagfs_fill_module_dir(sb, sb->s_root,
-						   &lkm4ctr_diagfs_modules[i]);
+		ret = lkm4ctr_diagfs_fill_v_dir(sb, sb->s_root,
+						&lkm4ctr_diagfs_modules[i]);
 		if (ret)
 			return ret;
 	}
@@ -1917,6 +2690,8 @@ int lkm4ctr_diagfs_init(void)
 		(lkm4ctr_d_alloc_name_t)lkm4ctr_diagfs_resolve("d_alloc_name");
 	lkm4ctr_simple_lookup_fn =
 		(lkm4ctr_simple_lookup_t)lkm4ctr_diagfs_resolve("simple_lookup");
+	lkm4ctr_simple_unlink_fn =
+		(lkm4ctr_simple_unlink_t)lkm4ctr_diagfs_resolve("simple_unlink");
 
 	if (!lkm4ctr_mount_nodev_fn || !lkm4ctr_generic_delete_inode_fn ||
 	    !lkm4ctr_d_alloc_name_fn || !lkm4ctr_simple_lookup_fn) {
@@ -1924,6 +2699,19 @@ int lkm4ctr_diagfs_init(void)
 			    "could not resolve mount_nodev/generic_delete_inode/d_alloc_name/simple_lookup; diagfs unavailable");
 		return -ENOSYS;
 	}
+	if (!lkm4ctr_simple_unlink_fn)
+		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
+			     "simple_unlink unresolved; dynamic resource delete falls back to drop_nlink() (resource is still torn down, only the dentry cleanup differs)");
+
+	/*
+	 * Borrow generic_read_dir()/generic_file_llseek() from the always-
+	 * present simple_dir_operations for the dynamic directory fops rather
+	 * than importing those symbols by name (avoids CONFIG_TRIM_UNUSED_KSYMS
+	 * breakage). Only .iterate_shared is our own callback.
+	 */
+	lkm4ctr_diagfs_dyn_dir_fops.read = simple_dir_operations.read;
+	lkm4ctr_diagfs_dyn_dir_fops.llseek = simple_dir_operations.llseek;
+
 	if (!lkm4ctr_kill_litter_super_fn && !lkm4ctr_generic_shutdown_super_fn)
 		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
 			     "kill_litter_super and generic_shutdown_super both unresolved; diagfs unmount will leak the superblock");

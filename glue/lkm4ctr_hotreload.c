@@ -2,7 +2,7 @@
 /*
  * lkm4ctr_hotreload - hot-reload this module in place from a new .ko on
  * disk, orchestrated entirely from inside the kernel via the diagfs
- * ("echo /path/to/new/lkm4ctr.ko > global/hotreload/do-hot-reload").
+ * ("echo /path/to/new/lkm4ctr.ko > v/hotreload/do-hot-reload").
  *
  * The self-unload hazard already documented at length in lkm4ctr_diagfs.c
  * (a module can never free the memory its own currently executing code
@@ -25,7 +25,7 @@
  *     finit_module(2) hook (hotreload_hooks[] below) so that any insmod of
  *     the target path anywhere on the system is logged -- this is the
  *     "hook insmod syscalls" requirement: it never denies or redirects the
- *     call, it only lets the operator see (via global/hotreload/log) the
+ *     call, it only lets the operator see (via v/hotreload/log) the
  *     moment the kernel's own module loader actually starts reading the
  *     new .ko, which is the closest observable proxy for "the kernel is
  *     now reloading code of this module from path" a hook operating at
@@ -541,7 +541,7 @@ size_t lkm4ctr_hotreload_status_snprintf(char *buf, size_t buflen)
 int lkm4ctr_hotreload_init(void)
 {
 	LKM4CTR_INFO(LKM4CTR_HOTRELOAD_TAG,
-		     "loaded: %s (write an absolute /path/to/new/lkm4ctr.ko to global/hotreload/do-hot-reload to hot reload)",
+		     "loaded: %s (write an absolute /path/to/new/lkm4ctr.ko to v/hotreload/do-hot-reload to hot reload)",
 		     lkm4ctr_hotreload_is_reloaded_boot ?
 		     "this is a hot-reloaded instance" : "this is a first load");
 	return 0;

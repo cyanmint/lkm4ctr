@@ -6,7 +6,7 @@
  *
  * See lkm4ctr_hotreload.c for the full design. In short:
  *
- *   echo /path/to/new/lkm4ctr.ko > <mnt>/global/hotreload/do-hot-reload
+ *   echo /path/to/new/lkm4ctr.ko > <mnt>/v/hotreload/do-hot-reload
  *
  * quiesces every hook, waits (best-effort) for module_refcount() to drain,
  * unmounts any lkm4ctr diagfs mount, then hands off to a detached userspace
@@ -16,7 +16,7 @@
  * lkm4ctr_init()) tells a genuine first `insmod` apart from a hot-reloaded
  * one.
  *
- * <mnt>/global/hotreload/status and .../log (tag "hotreload") report
+ * <mnt>/v/hotreload/status and .../log (tag "hotreload") report
  * progress; see lkm4ctr_diagfs.c for how these three files are wired into
  * the diagfs tree.
  */
