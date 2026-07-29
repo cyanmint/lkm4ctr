@@ -27,8 +27,9 @@ lkm4ctr_run_qemu_mode() {
 			-M virt -cpu max -m 2G -smp 2 -nographic -no-reboot \
 			-kernel "$KERNEL" \
 			-initrd "$RAMDISK" \
-			-drive file="$IMAGE1",if=none,id=image1,format=raw \
-			-device nvme,serial=11451401,drive=image1 \
+			-device qemu-xhci,id=usb0 \
+			-drive file="$IMAGE1",if=none,format=raw,id=usb1 \
+			-device usb-storage,bus=usb0.0,drive=usb1,id=disk1 \
 			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1"
 	else
 		echo "=== booting kernel: $KERNEL (no ramdisk, init=$INIT) ==="
@@ -78,6 +79,22 @@ lkm4ctr_init_1() {
 
 	if test -e /dev/nvme0n1 && mount -t ext4 /dev/nvme0n1 /newroot; then
 		echo "=== LKM4CTR_QEMU_TEST: nvme available, proceeding to stage 2 ==="
+
+		cp /lkm4ctr_checker /newroot/
+		cp /lkm4ctr.ko /newroot/
+		cat /init > /newroot/second_init
+		chmod 755 /newroot/second_init
+
+		echo "=== LKM4CTR_QEMU_TEST: exec second init ==="
+		# switch_root replaces PID 1 with the given command, run under the new
+		# root; /busybox (copied onto image1.ext4 above) provides "env" here
+		# since image1.ext4's own /system/bin/env may not exist yet at this
+		# point, but /system/bin/sh (the real root's bionic-linked shell,
+		# already baked into image1.ext4) is used to interpret /second_init so
+		# stage 2 runs under the actual target userland's shell, not busybox's.
+		exec switch_root /newroot /busybox env -i /system/bin/sh /second_init
+	elif test -e /dev/sda && mount -t ext4 /dev/sda /newroot; then
+		echo "=== LKM4CTR_QEMU_TEST: sda available, proceeding to stage 2 ==="
 
 		cp /lkm4ctr_checker /newroot/
 		cp /lkm4ctr.ko /newroot/
