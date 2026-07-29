@@ -165,6 +165,9 @@ support.
 9. Tested **not** working:
    [systemd](https://github.com/systemd/systemd),
    [redroid](https://github.com/remote-android/redroid-doc).
+10. Upgrading lkm4ctr: currently `sudo rmmod lkm4ctr` will cause a kernel panic
+    the only way to unload the currently module and insmod a new one is to
+    reboot your phone with no lkm4ctr.ko loaded and insmod the new version.
 
 If you hit an error, feel free to file an issue. Use your native language
 or whichever language you write best in — there's no need to translate
@@ -173,8 +176,9 @@ avoid loss of information. However, don't count on the maintainer to
 resolve the issue — tokens cost money, so please consider first forking
 this repo and vibe-coding a fix using your own tokens. Of course, after
 that, filing a pull request to submit your fix back would be very much
-appreciated. Under nearly all circumstances, a pull request that fixes a
-bug will be merged.
+appreciated. Under nearly all circumstances, a pull request that really 
+fixes a bug without bringing new bugs or that bring new features is to
+be merged.
 
 ## Disclaimer
 
