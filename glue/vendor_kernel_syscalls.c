@@ -247,6 +247,13 @@ static long vendor_kernel_hook_reboot(const struct pt_regs *regs)
 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
 		return -EPERM;
 
+	/*
+	 * Safe truncation: reboot(2)'s real prototype is
+	 * SYSCALL_DEFINE4(reboot, int magic1, int magic2, unsigned int cmd,
+	 * void __user *arg) -- the calling convention already delivers these
+	 * arguments as 32-bit values, matching what real_sys_reboot()/the
+	 * upstream syscall wrapper itself would extract from the same regs.
+	 */
 	magic1 = (int)vns_sys_arg0(regs);
 	magic2 = (int)vns_sys_arg1(regs);
 	cmd = (unsigned int)vns_sys_arg2(regs);
