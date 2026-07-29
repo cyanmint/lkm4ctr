@@ -123,3 +123,60 @@ particular, `vendor_kernel` provides the real vendored UTS/PID/USER/IPC/mqueue
 paths and documents the remaining NET/MNT/CGROUP caveats there; see that
 README plus the "Real vs. bookkeeping vs. stub" table above for the full
 picture across the current subsystem set.
+
+## Setting up Docker on a rooted Android phone
+
+This walks through running `dockerd`/`docker` inside Termux on a rooted
+Android phone, using `lkm4ctr.ko` in place of native kernel container
+support.
+
+0. Root your Android phone and make sure it is GKI-compatible with GKI
+   kernels — however, you do **not** need to actually flash a GKI kernel;
+   your stock kernel is fine as long as it is GKI-compatible.
+1. Get `fuse-overlayfs-aarch64` from the
+   [`fuse-overlayfs` releases page](https://github.com/containers/fuse-overlayfs/releases)
+   and move it into
+   `/data/data/com.termux/files/usr/bin/fuse-overlayfs`.
+2. In Termux, run `apt install root-repo sudo` and then
+   `apt install dockerd docker-cli docker-compose`.
+3. Run `uname -a` to see your KMI. For example:
+   ```
+   Linux localhost 6.1.138-android14-11-1145141919810-aaaa114514 #1 SMP PREEMPT Mon Aug 10 11:45:14 UTC 2026 aarch64 Android
+   ```
+   means your KMI is `android14-6.1`.
+4. Get the matching `lkm4ctr.ko` from the
+   [releases page](https://github.com/cyanmint/lkm4ctr/releases): download
+   `lkm4ctr-android1x-x.x-arm64.ko`. This **must** match your KMI.
+5. Load it, for example in Termux:
+   ```sh
+   sudo insmod /storage/emulated/0/lkm4ctr-android14-6.1-arm64.ko
+   ```
+6. Start `dockerd`:
+   ```sh
+   sudo dockerd --bridge=none --experimental
+   ```
+7. Run a container:
+   ```sh
+   sudo docker run --net=host --name=alpine -it docker.io/library/alpine:latest
+   ```
+   This should work now.
+8. Known limits: only `--net=host` is available; otherwise your container
+   gets no network.
+9. Tested **not** working:
+   [systemd](https://github.com/systemd/systemd),
+   [redroid](https://github.com/remote-android/redroid-doc).
+
+If you hit an error, feel free to file an issue. Use your native language
+or whichever language you write best in — there's no need to translate
+with translators; the reporter will translate with AI on their own to
+avoid loss of information. However, don't count on the maintainer to
+resolve the issue — tokens cost money, so please consider first forking
+this repo and vibe-coding a fix using your own tokens. Of course, after
+that, filing a pull request to submit your fix back would be very much
+appreciated. Under nearly all circumstances, a pull request that fixes a
+bug will be merged.
+
+## Disclaimer
+
+This project is 50% vendoring plus 50% vibe coding — no human effort. AI
+has hallucinations. There will be bugs.
