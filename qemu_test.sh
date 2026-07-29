@@ -70,7 +70,8 @@ lkm4ctr_run_checker_mode() {
 }
 
 lkm4ctr_init_1() {
-
+	# wait for usb /sda to insert
+	sleep 4
 	mkdir -p /sys /dev /newroot /proc
 	/busybox mount -t sysfs sysfs /sys
 	/busybox mount -t proc proc /proc
