@@ -670,21 +670,31 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 			goto out;
 	}
 
-#ifdef CONFIG_UTS_NS
+	/*
+	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_UTS_NS:
+	 * vendor_kernel always vendors its own UTS namespace support,
+	 * independent of whether the target kernel's own CONFIG_UTS_NS is y
+	 * or n (see vendor/kernel/utsname.c).
+	 */
 	if (flags & CLONE_NEWUTS) {
 		ret = validate_ns(nsset, &nsp->uts_ns->ns);
 		if (ret)
 			goto out;
 	}
-#endif
 
-#ifdef CONFIG_IPC_NS
+	/*
+	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_IPC_NS:
+	 * vendor_kernel always vendors its own IPC namespace support,
+	 * independent of whether the target kernel's own CONFIG_IPC_NS is y
+	 * or n (see vendor/ipc/namespace.c). Leaving this behind
+	 * `#ifdef CONFIG_IPC_NS` compiled the whole CLONE_NEWIPC install out
+	 * on the CONFIG_NAMESPACES=n target kernels this module exists for.
+	 */
 	if (flags & CLONE_NEWIPC) {
 		ret = validate_ns(nsset, &nsp->ipc_ns->ns);
 		if (ret)
 			goto out;
 	}
-#endif
 
 	/*
 	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_PID_NS:
@@ -764,10 +774,27 @@ static void commit_nsset(struct nsset *nsset)
 		set_fs_pwd(me->fs, &nsset->fs->pwd);
 	}
 
-#ifdef CONFIG_IPC_NS
+	/*
+	 * [BUILD-COMPAT] Unlike upstream, this is not gated on CONFIG_IPC_NS:
+	 * vendor_kernel always vendors its own IPC namespace support (see
+	 * vendor/ipc/namespace.c), independent of whether the target
+	 * kernel's own CONFIG_IPC_NS is y or n. `exit_sem` is always
+	 * redirected to `vns_exit_sem` (vendor_kernel.h) regardless of
+	 * config, but leaving the *call site* behind `#ifdef CONFIG_IPC_NS`
+	 * compiled it out entirely on the CONFIG_NAMESPACES=n target
+	 * kernels this module exists for. That silently skipped detaching
+	 * the task's SysV semaphore undo list from the *old* ipc_ns before
+	 * vns_switch_task_namespaces() below installs the new one, leaving
+	 * stale, namespace-relative `semid`-keyed sem_undo entries (from the
+	 * old ipc_ns's semaphore IDR) attached to the task. A later semop()
+	 * in the new ipc_ns can then find_alloc_undo() a stale entry whose
+	 * semadj[] array size doesn't match the new (unrelated) semaphore
+	 * array reusing that same numeric semid, corrupting adjacent heap
+	 * memory -- surfacing later as an unrelated-looking, delayed slab/
+	 * heap-corruption panic, e.g. during `docker exec` into a container.
+	 */
 	if (flags & CLONE_NEWIPC)
 		exit_sem(me);
-#endif
 
 #ifdef CONFIG_TIME_NS
 	if (flags & CLONE_NEWTIME)
