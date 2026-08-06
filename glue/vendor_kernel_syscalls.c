@@ -184,7 +184,28 @@ static void vendor_kernel_clone_track(long ret, unsigned long clone_flags,
 #if !defined(CONFIG_SYSVIPC)
 		copy_semundo(clone_flags, child);
 #endif
-		vns_switch_task_namespaces(child, new_nsp);
+		/*
+		 * new_nsp can legitimately still be NULL here: vns_flags ==
+		 * CLONE_NEWUSER alone builds nothing in nsproxy (matching
+		 * upstream unshare_nsproxy_namespaces()), so only switch when
+		 * a new nsproxy was actually produced.
+		 */
+		if (new_nsp)
+			vns_switch_task_namespaces(child, new_nsp);
+		new_nsp = NULL;
+	} else {
+		/*
+		 * vns_unshare_nsproxy_namespaces() failed: *new_nsp may have
+		 * been left untouched (still NULL) or, if
+		 * create_new_namespaces() itself failed after the ns_capable()
+		 * check passed, set to an ERR_PTR() encoding the failure --
+		 * never a real nsproxy. Passing that ERR_PTR to
+		 * vns_put_nsproxy() below would treat a bogus, near-top
+		 * address (e.g. -EPERM/-ENOMEM as a pointer) as a live
+		 * nsproxy and corrupt/crash on the resulting bad refcount
+		 * dereference, so make sure the pending release below never
+		 * fires for a failed call.
+		 */
 		new_nsp = NULL;
 	}
 	if (new_nsp)
