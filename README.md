@@ -164,7 +164,10 @@ support.
    gets no network.
 9. Tested **not** working:
    [systemd](https://github.com/systemd/systemd),
-   [redroid](https://github.com/remote-android/redroid-doc).
+   [redroid](https://github.com/remote-android/redroid-doc) (its
+   `init: Failed to initialize property area` crash is a userspace
+   tmpfs/SELinux issue, not a `vendor_kernel` bug -- see `vendor/README.md`'s
+   "Known remaining gaps").
 10. Upgrading lkm4ctr: currently `sudo rmmod lkm4ctr` will cause a kernel panic
     the only way to unload the currently module and insmod a new one is to
     reboot your phone with no lkm4ctr.ko loaded and insmod the new version.
