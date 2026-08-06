@@ -126,43 +126,91 @@ static void vendor_kernel_clone_track(long ret, unsigned long clone_flags,
 				      unsigned long vns_flags)
 {
 	struct nsproxy *new_nsp = NULL;
+	struct pid *child_pid;
+	struct task_struct *child;
 
 	if (ret <= 0)
 		return;
-	if (vns_flags) {
-		/*
-		 * clone(CLONE_NEWxxx, ...) requested new namespaces directly
-		 * (rather than unshare()+fork()). The real clone() syscall was
-		 * already invoked with the vns_* flags masked off, so the
-		 * child was created sharing the parent's nsproxy. Build the
-		 * new namespaces now and install them for real on the child
-		 * task (same effect create_new_namespaces()+switch would have
-		 * had, minus pid_ns_for_children applying to the child's own
-		 * struct pid, which is unavoidable without hooking
-		 * copy_process() itself since the child's pid was already
-		 * allocated from the parent's pid namespace by the time this
-		 * hook runs).
-		 */
-		if (!vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, NULL, NULL)) {
-			struct pid *child_pid = find_get_pid((pid_t)ret);
-
-			if (child_pid) {
-				struct task_struct *child = get_pid_task(child_pid, PIDTYPE_PID);
-
-				if (child) {
-#if !defined(CONFIG_SYSVIPC)
-					copy_semundo(clone_flags, child);
-#endif
-					vns_switch_task_namespaces(child, new_nsp);
-					new_nsp = NULL;
-					put_task_struct(child);
-				}
-				put_pid(child_pid);
-			}
-			if (new_nsp)
-				vns_put_nsproxy(new_nsp);
-		}
+	if (!vns_flags) {
+		vendor_kernel_registry.stat_clone++;
+		return;
 	}
+
+	/*
+	 * clone(CLONE_NEWxxx, ...) requested new namespaces directly
+	 * (rather than unshare()+fork()). The real clone() syscall was
+	 * already invoked with the vns_* flags masked off, so the
+	 * child was created sharing the parent's nsproxy. Build the
+	 * new namespaces now and install them for real on the child
+	 * task (same effect create_new_namespaces()+switch would have
+	 * had, minus pid_ns_for_children applying to the child's own
+	 * struct pid, which is unavoidable without hooking
+	 * copy_process() itself since the child's pid was already
+	 * allocated from the parent's pid namespace by the time this
+	 * hook runs).
+	 *
+	 * The child task must be looked up *before* calling
+	 * vns_unshare_nsproxy_namespaces() and its own fs_struct (child->fs)
+	 * must be passed as new_fs. This hook runs in the parent's context
+	 * (right after real_sys_clone()/real_sys_clone3() returns there), so
+	 * a NULL new_fs would make vns_unshare_nsproxy_namespaces() default
+	 * to current->fs -- the *parent's* fs_struct, not the child's own,
+	 * separately-copied one. For CLONE_NEWNS specifically that would
+	 * make the real, resolved copy_mnt_ns() retarget the parent's own
+	 * root/pwd onto the freshly copied mount tree while leaving the
+	 * child's fs_struct pointing at the old tree, completely
+	 * disconnected from the new mnt_namespace about to be installed on
+	 * it below. Every subsequent mount(2) the child performs on an
+	 * absolute path then resolves through that stale root/pwd, whose
+	 * vfsmount belongs to a different mnt_namespace than
+	 * current->nsproxy->mnt_ns, and the kernel's check_mnt() rejects it
+	 * with -EINVAL -- observed as e.g. systemd's generator sandbox
+	 * (clone(CLONE_NEWNS, ...) + a plain "mount tmpfs /tmp") failing
+	 * with "Failed to overmount /tmp/: Invalid argument".
+	 */
+	child_pid = find_get_pid((pid_t)ret);
+	if (!child_pid) {
+		vendor_kernel_registry.stat_clone++;
+		return;
+	}
+	child = get_pid_task(child_pid, PIDTYPE_PID);
+	put_pid(child_pid);
+	if (!child) {
+		vendor_kernel_registry.stat_clone++;
+		return;
+	}
+
+	if (!vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, NULL, child->fs)) {
+#if !defined(CONFIG_SYSVIPC)
+		copy_semundo(clone_flags, child);
+#endif
+		/*
+		 * new_nsp can legitimately still be NULL here: vns_flags ==
+		 * CLONE_NEWUSER alone builds nothing in nsproxy (matching
+		 * upstream unshare_nsproxy_namespaces()), so only switch when
+		 * a new nsproxy was actually produced.
+		 */
+		if (new_nsp)
+			vns_switch_task_namespaces(child, new_nsp);
+		new_nsp = NULL;
+	} else {
+		/*
+		 * vns_unshare_nsproxy_namespaces() failed: *new_nsp may have
+		 * been left untouched (still NULL) or, if
+		 * create_new_namespaces() itself failed after the ns_capable()
+		 * check passed, set to an ERR_PTR() encoding the failure --
+		 * never a real nsproxy. Passing that ERR_PTR to
+		 * vns_put_nsproxy() below would treat a bogus, near-top
+		 * address (e.g. -EPERM/-ENOMEM as a pointer) as a live
+		 * nsproxy and corrupt/crash on the resulting bad refcount
+		 * dereference, so make sure the pending release below never
+		 * fires for a failed call.
+		 */
+		new_nsp = NULL;
+	}
+	if (new_nsp)
+		vns_put_nsproxy(new_nsp);
+	put_task_struct(child);
 	vendor_kernel_registry.stat_clone++;
 }
 
