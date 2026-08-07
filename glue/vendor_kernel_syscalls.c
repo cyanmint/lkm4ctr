@@ -70,6 +70,7 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 	unsigned long native_flags = flags & ~VNS_CLONE_FLAGS;
 	struct cred *new_cred = NULL;
 	struct nsproxy *new_nsp = NULL;
+	struct fs_struct *new_fs = NULL;
 	long ret = 0;
 
 	if (!vns_flags)
@@ -88,10 +89,46 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 			return ret;
 	}
 
-	ret = vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, new_cred, NULL);
+	/*
+	 * Real unshare(CLONE_NEWNS) always implies CLONE_FS (ksys_unshare()
+	 * unconditionally ORs it in before calling unshare_fs()): the real,
+	 * resolved copy_mnt_ns() (vns_copy_mnt_ns_fn) repoints its fs_struct
+	 * argument's root/pwd in place onto the freshly copied mount tree, so
+	 * that argument must be a private fs_struct, not one still shared
+	 * with any other thread/task, or every other user of the shared
+	 * fs_struct (anything that did a plain clone() with CLONE_FS, e.g. a
+	 * pthread) has its root/pwd silently repointed into this task's
+	 * brand-new, otherwise-invisible mount namespace too. Passing
+	 * current->fs unconditionally here (as this hook used to) skipped
+	 * that split, so current->fs->users could still be >1 by the time a
+	 * later setns(fd, CLONE_NEWNS) ran -- the real kernel's own
+	 * mntns_install() (fs/namespace.c) hard-requires `fs->users == 1` and
+	 * fails the setns() with -EINVAL otherwise, observed as Android
+	 * init's "Cannot switch back to bootstrap mount namespace: Invalid
+	 * argument" / "SetupMountNamespaces failed" abort. Mirrors the
+	 * clone(CLONE_NEWNS, ...) path's identical fs_struct-isolation fix in
+	 * vendor_kernel_clone_track() above (matching upstream's
+	 * unshare_fs()).
+	 */
+	if (vns_flags & CLONE_NEWNS) {
+		struct fs_struct *fs = current->fs;
+
+		if (fs && fs->users > 1) {
+			new_fs = copy_fs_struct(fs);
+			if (!new_fs) {
+				if (new_cred)
+					put_cred(new_cred);
+				return -ENOMEM;
+			}
+		}
+	}
+
+	ret = vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, new_cred, new_fs);
 	if (ret) {
 		if (new_cred)
 			put_cred(new_cred);
+		if (new_fs)
+			free_fs_struct(new_fs);
 		return ret;
 	}
 
@@ -107,6 +144,28 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 	 */
 	if (new_nsp)
 		vns_switch_task_namespaces(current, new_nsp);
+
+	/*
+	 * Install the private fs_struct copy allocated above, mirroring
+	 * upstream ksys_unshare()'s post-switch fs_struct swap. The old,
+	 * still-shared fs_struct's own `users` refcount (protected by an
+	 * internal lock/seqlock whose exact field layout has changed across
+	 * kernel versions, e.g. the 6.17 `fs_struct->{lock,seq}` ->
+	 * `fs_struct->seq` seqlock fold-in) is intentionally left untouched
+	 * here rather than decremented through a version-fragile, unexported
+	 * field: this only leaves a harmless, bounded refcount overcount of 1
+	 * on that fs_struct (it is never freed a moment later than it
+	 * otherwise would have been), not a crash or correctness risk, since
+	 * current->fs itself is still correctly swapped to the new, private,
+	 * exclusively-owned copy that copy_mnt_ns() already repointed at the
+	 * new mount tree.
+	 */
+	if (new_fs) {
+		task_lock(current);
+		current->fs = new_fs;
+		task_unlock(current);
+	}
+
 	vendor_kernel_registry.stat_unshare++;
 	return 0;
 }
