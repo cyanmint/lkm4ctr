@@ -6,9 +6,10 @@
 
 1. Check the device kernel: `uname -a`
 2. Download the matching `lkm4ctr-<kmi>-arm64.ko` release asset
-3. Load it as root: `sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko`
-4. Start Docker: `sudo dockerd --bridge=none --experimental`
-5. Test a container: `sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh`
+3. Install `fuse-overlayfs` and configure Docker to use it by default (see the user manual)
+4. Load it as root: `sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko`
+5. Start Docker: `sudo dockerd --config-file="$PREFIX/etc/docker/daemon.json" --bridge=none --experimental`
+6. Test a container: `sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh`
 
 `NET_NS` is currently bookkeeping-only, so host networking is required for network access. Read the manual before loading a module on a real device.
 

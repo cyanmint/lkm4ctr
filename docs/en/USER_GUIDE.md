@@ -48,7 +48,7 @@ Package names and availability can vary between Termux repositories. Confirm the
 command -v sudo dockerd docker
 ```
 
-The module includes a vendored overlayfs implementation. `fuse-overlayfs` is not required merely to load the module. However, Docker's data root must be on a filesystem accepted by the overlay implementation. Android `/data` is often casefold-capable F2FS; that can make `overlay2` fail. Prefer a non-casefold ext4 loopback image or use Docker's `vfs` driver if you understand the storage and performance trade-off.
+The module includes a vendored overlayfs implementation, but `overlay2` can still fail when Docker's data root is on Android `/data` or another casefold-capable F2FS filesystem. Install and use `fuse-overlayfs` as Docker's default storage driver; this is the recommended storage path for affected devices.
 
 ## 3. Identify the KMI
 
@@ -111,12 +111,37 @@ sudo "$HOME/lkm4ctr/lkm4ctr_checker"
 
 If `insmod` fails, preserve the complete error and inspect the kernel log. Common causes are a KMI/ABI mismatch, an unknown symbol, module signature enforcement, missing root capability, or a kernel outside the supported range. Never work around an unknown-symbol or version error by forcing the load.
 
-## 7. Start Docker and run a container
+## 7. Configure `fuse-overlayfs` as Docker's default
+
+Download the arm64 `fuse-overlayfs` binary from the [official releases page](https://github.com/containers/fuse-overlayfs/releases). Copy it into Termux's executable path and make it executable:
+
+```sh
+termux-setup-storage
+mkdir -p "$PREFIX/bin"
+cp /sdcard/Download/fuse-overlayfs-aarch64 "$PREFIX/bin/fuse-overlayfs"
+chmod 755 "$PREFIX/bin/fuse-overlayfs"
+command -v fuse-overlayfs
+fuse-overlayfs --version
+```
+
+The downloaded filename may differ between releases; use the arm64/aarch64 asset and adjust the `cp` source path. Do not download an x86 or x86_64 binary.
+
+Configure Docker to select it by default:
+
+```sh
+mkdir -p "$PREFIX/etc/docker"
+printf '%s\n' '{"storage-driver":"fuse-overlayfs"}' > "$PREFIX/etc/docker/daemon.json"
+cat "$PREFIX/etc/docker/daemon.json"
+```
+
+If the Termux Docker package does not automatically use `$PREFIX/etc/docker/daemon.json`, pass the file explicitly when starting the daemon with `--config-file` as shown below.
+
+## 8. Start Docker and run a container
 
 Start the daemon in Termux:
 
 ```sh
-sudo dockerd --bridge=none --experimental
+sudo dockerd --config-file="$PREFIX/etc/docker/daemon.json" --bridge=none --experimental
 ```
 
 In another Termux session, wait for the socket and run a first container:
@@ -124,12 +149,14 @@ In another Termux session, wait for the socket and run a first container:
 ```sh
 until [ -S /data/data/com.termux/files/usr/var/run/docker.sock ] || [ -S /var/run/docker.sock ]; do sleep 1; done
 sudo docker info
+# Confirm that Docker selected fuse-overlayfs before creating containers.
+sudo docker info | grep -E 'Storage Driver|fuse-overlayfs'
 sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh
 ```
 
 The documented working network mode is host networking. Without a real network-namespace implementation, bridge networking and other isolated network modes are not supported by this project; a container may start but have no usable network.
 
-## 8. Optional diagnostics filesystem
+## 9. Optional diagnostics filesystem
 
 The module exposes a diagnostic filesystem. It is useful when a container runtime fails after `insmod`:
 
@@ -161,20 +188,20 @@ sudo cat /mnt/lkm4ctr/v/hotreload/status
 
 Use hot reload only after stopping container workloads. A reboot with no module loaded is the recovery path if the device is left in an uncertain state.
 
-## 9. Known limitations
+## 10. Known limitations
 
 - This is not a general-purpose replacement for all Android kernel container support.
 - `NET_NS` is bookkeeping-only in the current implementation. Use `--network=host`.
 - `CGROUP_NS` is bookkeeping-only; the project does not provide a cgroup filesystem or controllers. `systemd` as container PID 1 therefore requires a working host cgroup v2 mount and may still fail.
 - `MNT_NS` depends on the running kernel's mount-namespace support.
 - `redroid` failures such as `init: Failed to initialize property area` are generally userspace tmpfs/xattr/SELinux issues, not fixed by this module.
-- Overlay mounts can fail on casefold-capable backing filesystems. Move the Docker data root to a suitable non-casefold ext4 filesystem or use `vfs`.
+- `overlay2` mounts can fail on casefold-capable backing filesystems. Install `fuse-overlayfs` and make it the Docker storage driver as described above; a suitable non-casefold ext4 filesystem remains an alternative.
 - `SHM_HUGETLB` is not supported; ordinary SysV shared memory is the supported path.
 - A release asset is tied to the KMI it was built for. A successful download does not make it safe to use on another kernel.
 
 The authoritative implementation caveats are in [`docs/en/developer/VENDOR_KERNEL.md`](../../docs/en/developer/VENDOR_KERNEL.md).
 
-## 10. Building instead of downloading
+## 11. Building instead of downloading
 
 Building a device module is for developers who have the matching Android GKI DDK. A plain kernel source tree with `modules_prepare` is not sufficient: it lacks the real `vmlinux`/`Module.symvers` data needed for safe symbol resolution and can produce a module that fails or panics on `insmod`.
 
@@ -192,7 +219,7 @@ make -C lkm4ctr_checker CC=aarch64-linux-gnu-gcc
 
 Do not treat a host build against unrelated headers as a device-ready module.
 
-## 11. Reporting a problem
+## 12. Reporting a problem
 
 Include:
 

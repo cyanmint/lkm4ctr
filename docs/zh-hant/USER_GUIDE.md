@@ -41,7 +41,7 @@ Termux 軟體源的套件名稱和可用性可能變化，請確認命令存在�
 command -v sudo dockerd docker
 ```
 
-模組內建 vendored overlayfs，單純載入模組不要求 `fuse-overlayfs`。但 Docker 資料根目錄必須位於 overlay 實作接受的檔案系統上。Android `/data` 常見支援 casefold 的 F2FS，可能導致 `overlay2` 失敗。優先使用未啟用 casefold 的 ext4 loopback 映像；或在了解效能與儲存代價後使用 Docker `vfs` 驅動程式。
+模組內建 vendored overlayfs，但當 Docker 資料根目錄位於 Android `/data` 或其他支援 casefold 的 F2FS 檔案系統時，`overlay2` 仍可能失敗。請安裝並將 `fuse-overlayfs` 設為 Docker 的預設儲存驅動程式；這是受影響裝置的建議方案。
 
 ## 3. 確認 KMI
 
@@ -97,25 +97,53 @@ sudo "$HOME/lkm4ctr/lkm4ctr_checker"
 
 如果 `insmod` 失敗，請保留完整錯誤並檢查核心日誌。常見原因包括 KMI/ABI 不匹配、unknown symbol、模組簽章限制、root 能力不足或核心版本不在支援範圍。不要強行繞過 unknown-symbol 或版本錯誤。
 
-## 7. 啟動 Docker 並執行容器
+## 7. 將 `fuse-overlayfs` 設為 Docker 預設驅動程式
+
+從 [`fuse-overlayfs` 官方 Releases 頁面](https://github.com/containers/fuse-overlayfs/releases) 下載 arm64 的 `fuse-overlayfs` 二進位檔，複製到 Termux 的可執行路徑並賦予執行權限：
+
+```sh
+termux-setup-storage
+mkdir -p "$PREFIX/bin"
+cp /sdcard/Download/fuse-overlayfs-aarch64 "$PREFIX/bin/fuse-overlayfs"
+chmod 755 "$PREFIX/bin/fuse-overlayfs"
+command -v fuse-overlayfs
+fuse-overlayfs --version
+```
+
+不同版本的下載檔名可能不同；請使用 arm64/aarch64 產物並相應調整 `cp` 的來源路徑，不要下載 x86 或 x86_64 二進位檔。
+
+設定 Docker 預設使用它：
+
+```sh
+mkdir -p "$PREFIX/etc/docker"
+printf '%s\n' '{"storage-driver":"fuse-overlayfs"}' > "$PREFIX/etc/docker/daemon.json"
+cat "$PREFIX/etc/docker/daemon.json"
+```
+
+如果 Termux Docker 套件沒有自動讀取 `$PREFIX/etc/docker/daemon.json`，請按下方命令使用 `--config-file` 明確指定。
+
+## 8. 啟動 Docker 並執行容器
 
 在 Termux 中啟動 daemon：
 
 ```sh
-sudo dockerd --bridge=none --experimental
+sudo dockerd --config-file="$PREFIX/etc/docker/daemon.json" --bridge=none --experimental
 ```
+
 
 在另一個 Termux 會話等待 socket，然後執行第一個容器：
 
 ```sh
 until [ -S /data/data/com.termux/files/usr/var/run/docker.sock ] || [ -S /var/run/docker.sock ]; do sleep 1; done
 sudo docker info
+# 確認 Docker 已選用 fuse-overlayfs。
+sudo docker info | grep -E 'Storage Driver|fuse-overlayfs'
 sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh
 ```
 
 目前文件化可用的網路模式是 host networking。專案沒有提供真正的 network namespace 實作，因此 bridge 等隔離網路模式不受支援，容器可能啟動但無法聯網。
 
-## 8. 可選的診斷檔案系統
+## 9. 可選的診斷檔案系統
 
 模組提供診斷檔案系統，可用於定位 `insmod` 後的容器執行時錯誤：
 
@@ -145,20 +173,20 @@ sudo cat /mnt/lkm4ctr/v/hotreload/status
 
 只有在停止容器工作負載後才使用。裝置狀態不確定時，恢復方式是重新啟動，並確保不自動載入舊模組。
 
-## 9. 已知限制
+## 10. 已知限制
 
 - 這不是所有 Android 核心容器能力的通用替代品。
 - `NET_NS` 目前只有 bookkeeping，使用 `--network=host`。
 - `CGROUP_NS` 只有 bookkeeping；專案不提供 cgroup 檔案系統或控制器。因此 systemd 作為容器 PID 1 需要主機提供可用的 cgroup v2 掛載，仍可能失敗。
 - `MNT_NS` 依賴執行核心自己的 mount namespace 支援。
 - `redroid` 的 `init: Failed to initialize property area` 通常是使用者空間 tmpfs/xattr/SELinux 問題，不是本模組解決的問題。
-- casefold 檔案系統上的 overlay 掛載可能失敗。將 Docker 資料根目錄移到合適的非 casefold ext4 檔案系統，或使用 `vfs`。
+- casefold 檔案系統上的 `overlay2` 掛載可能失敗。請按上文安裝 `fuse-overlayfs` 並將其設為 Docker 儲存驅動程式；合適的非 casefold ext4 檔案系統仍是替代方案。
 - 不支援 `SHM_HUGETLB`；普通 SysV 共用記憶體受支援。
 - Release 產物綁定建置時的 KMI，下載成功不代表可以用於其他核心。
 
 權威實作限制見 [`docs/en/developer/VENDOR_KERNEL.md`](../../docs/en/developer/VENDOR_KERNEL.md)。
 
-## 10. 自行建置
+## 11. 自行建置
 
 自行建置裝置模組需要匹配的 Android GKI DDK。只有 `modules_prepare` 的普通核心原始碼樹不夠用：它沒有安全符號解析所需的真實 `vmlinux`/`Module.symvers` 資料，產生的模組可能在 `insmod` 時失敗甚至使核心崩潰。
 
@@ -176,6 +204,6 @@ make -C lkm4ctr_checker CC=aarch64-linux-gnu-gcc
 
 不要把使用無關主機標頭的建置結果當成裝置可用模組。
 
-## 11. 提交問題
+## 12. 提交問題
 
 請提供：`uname -a` 和裝置資訊、完整 `.ko` 檔名及 release/tag、載入前後 checker 結果、完整 `insmod` 錯誤和相關核心日誌、Docker 輸出及 diagfs 輸出（如有），以及最小重現命令。發布日誌前請移除不必要的裝置識別碼、序號和隱私資訊。
