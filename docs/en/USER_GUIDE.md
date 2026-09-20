@@ -172,7 +172,7 @@ Use hot reload only after stopping container workloads. A reboot with no module 
 - `SHM_HUGETLB` is not supported; ordinary SysV shared memory is the supported path.
 - A release asset is tied to the KMI it was built for. A successful download does not make it safe to use on another kernel.
 
-The authoritative implementation caveats are in [`vendor/README.md`](../../vendor/README.md).
+The authoritative implementation caveats are in [`docs/en/developer/VENDOR_KERNEL.md`](../../docs/en/developer/VENDOR_KERNEL.md).
 
 ## 10. Building instead of downloading
 

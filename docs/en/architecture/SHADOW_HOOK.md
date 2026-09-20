@@ -1,8 +1,10 @@
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
 # shadow_hook — shared syscall hijacking ABI
 
 `shadow_hook.h` is a small, purely declarative header that defines the ABI
 shared by `vendor_kernel`, the module's only runtime-loadable subsystem
-(see `../README.md` for the umbrella overview). It is what
+(see `../USER_GUIDE.md` for the umbrella overview). It is what
 turns those modules from an ioctl API that a *patched* container runtime must
 opt into, into a **transparent MITM layer**: a stock, unpatched
 `containerd`/`runc`/`dockerd` calls the real syscalls (`unshare(2)`,
@@ -22,7 +24,7 @@ That is no longer the case: the single source of truth for
 declarative: it defines the ABI (`struct shadow_hook`, the `SHADOW_HOOK()`
 initialiser macro, and the `extern` function prototypes) that the unified
 module's subsystems share. See
-[`shadow_hijack.README.md`](shadow_hijack.README.md)
+[`SHADOW_HIJACK.md`](SHADOW_HIJACK.md)
 for the full rationale, including the compile-time ftrace-vs-kprobe backend
 selection and the recursion guard.
 
@@ -48,7 +50,7 @@ and the owning module). `shadow_hook_install()`:
    the subsystem is natively present, or to chain into it after doing shadow
    bookkeeping). An owner-based recursion guard distinguishes that
    pass-through call from a fresh external call — see
-   [`shadow_hijack.README.md`](shadow_hijack.README.md) for details.
+   [`SHADOW_HIJACK.md`](SHADOW_HIJACK.md) for details.
 
 Both the pre- and post-`CONFIG_DYNAMIC_FTRACE_WITH_ARGS` ftrace callback
 signatures are supported so the exact same source builds unmodified across
@@ -96,3 +98,5 @@ static struct shadow_hook *all_hooks[] = { &unshare_hook, NULL };
 * Only one hook (ftrace `IPMODIFY` owner, or kprobe) may target a given
   symbol at a time; do not load two shadow modules that hook the same
   syscall.
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"

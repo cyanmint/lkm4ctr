@@ -1,3 +1,9 @@
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
 # shadow_hijack — shared function-hijacking implementation
 
 `shadow_hijack.c` is the internal hook-engine implementation linked into the
@@ -5,7 +11,7 @@ merged `lkm4ctr.ko`'s `glue/` directory. It hosts the
 `shadow_hook_resolve()/install()/remove()/install_all()/remove_all()`
 implementation used by `vendor_kernel`, the module's only runtime-loadable
 subsystem (the former `shadow_cgdevices` submodule that also hooked syscalls
-has been removed). See [`shadow_hook.h`](shadow_hook.h) for the full ABI
+has been removed). See [`SHADOW_HOOK.md`](SHADOW_HOOK.md) for the full ABI
 contract (struct layout, `SHADOW_HOOK()` initialiser macro, function
 prototypes) that this subsystem implements and every caller includes.
 
@@ -75,8 +81,8 @@ make -C /path/to/kernel/build M="$PWD/vendor_kernel" modules
 Out-of-tree modules for GKI **must** be built inside the matching
 `ghcr.io/ylarod/ddk-min:<kmi>-<release>` DDK image against its real
 `vmlinux`/`Module.symvers`, not a bare `gki_defconfig` tree — see
-[`../README.md`](../README.md) and
-[`../../.github/workflows/build-lkm4ctr.yml`](../../.github/workflows/build-lkm4ctr.yml).
+[`../USER_GUIDE.md`](../USER_GUIDE.md) and
+[`../../../.github/workflows/build-lkm4ctr.yml`](../../../.github/workflows/build-lkm4ctr.yml).
 
 Load `lkm4ctr.ko`; do not try to build or load `shadow_hijack` separately.
 
@@ -87,3 +93,9 @@ With `mount -t lkm4ctr diag <mnt>`, the shared hook engine is exposed at
 registry across all submodules. `control` is informational only here: the shared
 hook engine is always active while `lkm4ctr.ko` is loaded, so unload commands
 are intentionally unsupported on that path.
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"
+libc: Access denied finding property "persist.vendor.track.malloc.enable"
+libc: Access denied finding property "persist.vendor.fd.monitor.enable"

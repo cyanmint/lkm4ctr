@@ -156,7 +156,7 @@ sudo cat /mnt/lkm4ctr/v/hotreload/status
 - 不支援 `SHM_HUGETLB`；普通 SysV 共用記憶體受支援。
 - Release 產物綁定建置時的 KMI，下載成功不代表可以用於其他核心。
 
-權威實作限制見 [`vendor/README.md`](../../vendor/README.md)。
+權威實作限制見 [`docs/en/developer/VENDOR_KERNEL.md`](../../docs/en/developer/VENDOR_KERNEL.md)。
 
 ## 10. 自行建置
 

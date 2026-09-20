@@ -1,155 +1,23 @@
-# lkm4ctr — container-support kernel modules for GKI
+# lkm4ctr
 
-`lkm4ctr` builds a single out-of-tree kernel module,
-**`lkm4ctr.ko`**, that makes a stock, unpatched
-`containerd`/`runc`/`dockerd` run on Android GKI kernels that were built
-without the usual container prerequisites (`CONFIG_*_NS`, `CONFIG_SYSVIPC`,
-`CONFIG_POSIX_MQUEUE`, cgroup-v1 device control, …).
+`lkm4ctr` is an arm64 Android GKI kernel module that supplies selected container prerequisites without recompiling the Android kernel. It is intended for rooted devices and must match the device KMI exactly.
 
-## User manuals
+## Start here
 
-- [English user manual](docs/en/USER_GUIDE.md)
-- [简体中文用户手册](docs/zh-hans/USER_GUIDE.md)
-- [繁體中文使用手冊](docs/zh-hant/USER_GUIDE.md)
+1. Check the device kernel: `uname -a`
+2. Download the matching `lkm4ctr-<kmi>-arm64.ko` release asset
+3. Load it as root: `sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko`
+4. Start Docker: `sudo dockerd --bridge=none --experimental`
+5. Test a container: `sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh`
 
-The project is now a flat, unified tree: one Makefile, one module entry
-point, one `.ko`. `glue/` at the repository root holds all hand-written
-code, and `vendor/` holds every vendored source tree; only `glue/` and
-`lkm4ctr_checker/` are code this project writes, everything under
-`vendor/` is vendored.
+`NET_NS` is currently bookkeeping-only, so host networking is required for network access. Read the manual before loading a module on a real device.
 
-## Module map
+## Documentation
 
-| Component             | Directory                         | Summary |
-|-----------------------|-----------------------------------|---------|
-| `lkm4ctr.ko`          | `vendor/`                         | Unified module build directory (kbuild `Makefile`/`Kconfig`) containing the shared hook engine plus the vendored namespace/IPC/mqueue/overlayfs compatibility subsystem. |
-| `glue/`               | `glue/`                           | Hand-written code: the shared ftrace/kprobe hook engine (`shadow_hook.h`/`shadow_hijack.c`), module entry/exit, the `lkm4ctr` diagfs, hot reload, logging, and the vendor/overlayfs compat glue. |
-| `vendor_kernel`       | `vendor/{kernel,ipc,fs}/`         | Vendored namespace/IPC/mqueue/overlayfs implementation: namespace syscalls, `/proc` namespace visibility, SysV IPC, POSIX mqueue support, and an always-used vendored overlayfs (`get_fs_type("overlay")` hook). |
-| `lkm4ctr_checker`     | `lkm4ctr_checker/`                | **Userspace** diagnostic binary (not a kernel module): performs real syscalls and reports PASS/STUB/FAIL per feature. |
+- [English user manual](docs/en/USER_GUIDE.md) · [简体中文](docs/zh-hans/USER_GUIDE.md) · [繁體中文](docs/zh-hant/USER_GUIDE.md)
+- [English architecture and developer documentation](docs/en/architecture/GLUE.md)
+- [English checker documentation](docs/en/developer/CHECKER.md)
+- [English vendor-kernel documentation](docs/en/developer/VENDOR_KERNEL.md)
+- [简体中文文档索引](docs/zh-hans/README.md) · [繁體中文文件索引](docs/zh-hant/README.md)
 
-### Real vs. bookkeeping vs. stub — a quick reference
-
-Because this module hooks/simulates functionality that would
-normally be compiled into `vmlinux`, "supported" does not always mean the same
-thing. This table is the single place that spells out, per namespace type
-inside `vendor_kernel`, whether the simulation is **real**
-(behaves like the native kernel feature, verified by observable side effects),
-**bookkeeping-only** (state is tracked and syscalls succeed, but there is no
-functional isolation/enforcement behind it), or a **stub** (a hook exists but
-currently only preserves/passes through native behaviour, i.e. it does not yet
-change anything). See `vendor/README.md` for the full rationale.
-
-| Component                          | Classification | Why |
-|-------------------------------------|-----------------|-----|
-| `vendor_kernel` — UTS namespace      | **Real**        | `uname()`/`sethostname()` after `unshare(CLONE_NEWUTS)` observe a genuinely separate nodename/domainname per vendored namespace. |
-| `vendor_kernel` — PID namespace      | **Real**        | vpid remapping plus `/proc` integration mean `getpid()` and procfs inside a vendored PID namespace show namespace-local PIDs distinct from the host ones; `reboot(2)` (`glue/vendor_kernel_syscalls.c`) is also hooked to route non-init pid namespaces through `vns_reboot_pid_ns()` (killing the namespace's `child_reaper` via `SIGKILL`/`SIGHUP`/`SIGINT`) instead of rebooting the host. |
-| `vendor_kernel` — USER namespace     | **Real**        | A real per-task `user_namespace` is installed after `unshare(CLONE_NEWUSER)`, with genuinely wired `/proc/<pid>/{uid_map,gid_map,projid_map,setgroups}` (`glue/vendor_kernel_procfs_userns.c`) and `getuid`/`setuid`/etc. syscall hooks (`glue/vendor_kernel_syscalls_userns.c`) that remap through it, so credentials genuinely differ inside vs. outside the vendored namespace even on kernels lacking `CONFIG_USER_NS`. |
-| `vendor_kernel` — IPC namespace      | **Real**        | A vendored `ipc_namespace` is installed on `task_struct->nsproxy`, and the hooked SysV IPC and POSIX mqueue syscalls operate on that namespace-scoped state instead of the host default. |
-| `vendor_kernel` — NET namespace      | **Bookkeeping** | A separate namespace id/refcount is tracked, but no network-stack partitioning is provided. |
-| `vendor_kernel` — CGROUP namespace   | **Kernel-provided or bookkeeping-only** | Uses the real kernel cgroup namespace support when present; on kernels lacking it, only bookkeeping remains. `vendor_kernel` only vendors the cgroup *namespace* (`CLONE_NEWCGROUP` bookkeeping); it does not vendor the cgroup filesystem/controllers themselves, so the running kernel must actually mount a working `cgroup`/`cgroup2` filesystem at `/sys/fs/cgroup` for anything (including `systemd`-as-PID-1 containers) that depends on it — see "Known remaining gaps" in `vendor/README.md`. |
-| `vendor_kernel` — MNT namespace      | **Kernel-provided** | Relies on the running kernel's mount-namespace implementation; no separate vendored mount-namespace core is provided. |
-| `vendor_kernel` — overlayfs          | **Real**        | A vendored `fs/overlayfs` always answers `get_fs_type("overlay")` (hooked), so `mount -t overlay ...` genuinely mounts and operates through this module's own overlay implementation, regardless of the running kernel's own overlayfs support. |
-| `lkm4ctr_checker`                  | n/a (diagnostics) | **Userspace binary**, not a kernel module: actually attempts the relevant syscalls and reports PASS/STUB/FAIL based on the observed effect, rather than reporting compile-time config alone. |
-
-Shared, header-only helpers live in `glue/`:
-
-| File                          | Purpose |
-|-------------------------------|---------|
-| `glue/shadow_hook.h`        | ftrace/kprobe syscall-hijack ABI used by `vendor_kernel`. |
-| `glue/lkm4ctr_compat.h`  | `fd_file()`/`fd_empty()` compat shims for kernels < 6.8 (used by `vendor_kernel`). |
-| `glue/shadow_hook.README.md`| Documentation for the hook helper. |
-
-## Load order
-
-There is now exactly one kernel module to load:
-
-```sh
-insmod vendor/lkm4ctr.ko
-
-# diagnostics: a plain userspace binary, run any time, no insmod needed:
-./lkm4ctr_checker/lkm4ctr_checker
-```
-
-`lkm4ctr_checker` is a **userspace** diagnostic program, not a kernel
-module: it has no build-time or load-time dependency on `lkm4ctr.ko`, and
-instead of reporting
-compile-time `IS_ENABLED(CONFIG_*)` facts, it directly performs the relevant
-syscalls (`unshare`/`fork`/`setns`, `mq_*`, `msg*`, `mount`) and reports
-PASS/STUB/FAIL based on their actual observed effect. See
-`lkm4ctr_checker/README.md` for the full methodology and why this
-replaced the earlier kernel-module version.
-
-## Building
-
-The merged kernel module lives in `vendor/` as a dual-purpose
-kbuild module (works both out-of-tree via `make KDIR=...` and embedded in an
-in-tree `obj-$(CONFIG_...)` build). Out-of-tree, against a prepared kernel
-build tree:
-
-```sh
-make -C /path/to/kernel/build M="$PWD/vendor" modules
-```
-
-`lkm4ctr_checker` is a plain userspace program and builds with a normal C
-compiler — no `KDIR`/kernel build tree involved:
-
-```sh
-make -C lkm4ctr_checker                          # host toolchain
-make -C lkm4ctr_checker CC="clang --target=aarch64-linux-gnu"  # cross build
-```
-
-Out-of-tree modules for GKI **must** be built inside the matching
-`ghcr.io/ylarod/ddk-min:<kmi>-<release>` DDK image against its real
-`vmlinux`/`Module.symvers`, not a bare `gki_defconfig` tree, or `insmod` will
-panic on the real kernel. See
-[`.github/workflows/build-lkm4ctr.yml`](.github/workflows/build-lkm4ctr.yml)
-(merged-module build matrix, plus a QEMU boot/load test of the android14-6.1
-build).
-
-## Kernel compatibility
-
-`glue/shadow_hook.h` picks its hooking backend at compile time: ftrace-based
-when `CONFIG_FUNCTION_TRACER`/`CONFIG_DYNAMIC_FTRACE` are available, and a
-kprobe-`pre_handler` fallback otherwise — the latter is what runs on stock
-Android GKI kernels, which ship with `CONFIG_FUNCTION_TRACER` disabled.
-
-`vendor_kernel`'s overlayfs support now comes from a single vendored
-`vendor/fs/overlayfs/` tree (android16-6.12 baseline).
-`glue/vendor_kernel_ovl_vfs_compat.{h,c}` adapts that
-one source tree across the three supported VFS/API tiers: `OLD`
-`[5.10, 5.12)`, `MID` `[5.12, 6.3)`, and `NEW` `[6.3, 6.19)`.
-
-`vendor_kernel`'s procfs and mqueue glue uses `fd_file()`/`fd_empty()`, a
-kernel API that only
-exists from Linux v6.8 onward; `glue/lkm4ctr_compat.h` provides shims so
-the same source builds unmodified against older GKI branches (e.g. 6.1).
-
-See `vendor/README.md` for the honest scope/limitations. In
-particular, `vendor_kernel` provides the real vendored UTS/PID/USER/IPC/mqueue
-paths and documents the remaining NET/MNT/CGROUP caveats there; see that
-README plus the "Real vs. bookkeeping vs. stub" table above for the full
-picture across the current subsystem set.
-
-## Quick start: Docker on rooted Android
-
-For requirements, KMI selection, installation, diagnostics, limitations, and
-troubleshooting, use the [English user manual](docs/en/USER_GUIDE.md) or one
-of its Chinese translations. The short path is:
-
-```sh
-uname -a                         # identify the exact Android KMI
-sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko
-sudo dockerd --bridge=none --experimental
-sudo docker run --network=host --rm -it docker.io/library/alpine:latest
-```
-
-The module must match the device's KMI exactly. It does not add a network
-namespace implementation, so `--network=host` is currently required for
-network access. Do not use a bare `modules_prepare` kernel tree to produce a
-device module; use a release asset or a matching DDK build with real
-`vmlinux`/`Module.symvers` data.
-
-## Disclaimer
-
-This project is 50% vendoring plus 50% vibe coding — no human effort. AI
-has hallucinations. There will be bugs.
+`AGENTS.md` is the repository's contributor/agent contract and intentionally remains at the repository root.

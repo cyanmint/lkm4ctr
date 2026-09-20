@@ -193,4 +193,4 @@ make -C /path/to/kernel/build M="$PWD/vendor" modules
 ```
 
 For Android GKI, build against the matching DDK `vmlinux`/`Module.symvers`
-sysroot exactly as described in `../README.md`.
+sysroot exactly as described in `../USER_GUIDE.md`.
