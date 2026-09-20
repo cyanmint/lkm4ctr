@@ -6,6 +6,12 @@
 without the usual container prerequisites (`CONFIG_*_NS`, `CONFIG_SYSVIPC`,
 `CONFIG_POSIX_MQUEUE`, cgroup-v1 device control, …).
 
+## User manuals
+
+- [English user manual](docs/en/USER_GUIDE.md)
+- [简体中文用户手册](docs/zh-hans/USER_GUIDE.md)
+- [繁體中文使用手冊](docs/zh-hant/USER_GUIDE.md)
+
 The project is now a flat, unified tree: one Makefile, one module entry
 point, one `.ko`. `glue/` at the repository root holds all hand-written
 code, and `vendor/` holds every vendored source tree; only `glue/` and
@@ -124,64 +130,24 @@ paths and documents the remaining NET/MNT/CGROUP caveats there; see that
 README plus the "Real vs. bookkeeping vs. stub" table above for the full
 picture across the current subsystem set.
 
-## Setting up Docker on a rooted Android phone
+## Quick start: Docker on rooted Android
 
-This walks through running `dockerd`/`docker` inside Termux on a rooted
-Android phone, using `lkm4ctr.ko` in place of native kernel container
-support.
+For requirements, KMI selection, installation, diagnostics, limitations, and
+troubleshooting, use the [English user manual](docs/en/USER_GUIDE.md) or one
+of its Chinese translations. The short path is:
 
-0. Root your Android phone and make sure it is GKI-compatible with GKI
-   kernels — however, you do **not** need to actually flash a GKI kernel;
-   your stock kernel is fine as long as it is GKI-compatible.
-1. Get `fuse-overlayfs-aarch64` from the
-   [`fuse-overlayfs` releases page](https://github.com/containers/fuse-overlayfs/releases)
-   and move it into
-   `/data/data/com.termux/files/usr/bin/fuse-overlayfs`.
-2. In Termux, run `apt install root-repo sudo` and then
-   `apt install dockerd docker-cli docker-compose`.
-3. Run `uname -a` to see your KMI. For example:
-   ```
-   Linux localhost 6.1.138-android14-11-1145141919810-aaaa114514 #1 SMP PREEMPT Mon Aug 10 11:45:14 UTC 2026 aarch64 Android
-   ```
-   means your KMI is `android14-6.1`.
-4. Get the matching `lkm4ctr.ko` from the
-   [releases page](https://github.com/cyanmint/lkm4ctr/releases): download
-   `lkm4ctr-android1x-x.x-arm64.ko`. This **must** match your KMI.
-5. Load it, for example in Termux:
-   ```sh
-   sudo insmod /storage/emulated/0/lkm4ctr-android14-6.1-arm64.ko
-   ```
-6. Start `dockerd`:
-   ```sh
-   sudo dockerd --bridge=none --experimental
-   ```
-7. Run a container:
-   ```sh
-   sudo docker run --net=host --name=alpine -it docker.io/library/alpine:latest
-   ```
-   This should work now.
-8. Known limits: only `--net=host` is available; otherwise your container
-   gets no network.
-9. Tested **not** working:
-   [systemd](https://github.com/systemd/systemd),
-   [redroid](https://github.com/remote-android/redroid-doc) (its
-   `init: Failed to initialize property area` crash is a userspace
-   tmpfs/SELinux issue, not a `vendor_kernel` bug -- see `vendor/README.md`'s
-   "Known remaining gaps").
-10. Upgrading lkm4ctr: currently `sudo rmmod lkm4ctr` will cause a kernel panic
-    the only way to unload the currently module and insmod a new one is to
-    reboot your phone with no lkm4ctr.ko loaded and insmod the new version.
+```sh
+uname -a                         # identify the exact Android KMI
+sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko
+sudo dockerd --bridge=none --experimental
+sudo docker run --network=host --rm -it docker.io/library/alpine:latest
+```
 
-If you hit an error, feel free to file an issue. Use your native language
-or whichever language you write best in — there's no need to translate
-with translators; the reporter will translate with AI on their own to
-avoid loss of information. However, don't count on the maintainer to
-resolve the issue — tokens cost money, so please consider first forking
-this repo and vibe-coding a fix using your own tokens. Of course, after
-that, filing a pull request to submit your fix back would be very much
-appreciated. Under nearly all circumstances, a pull request that really 
-fixes a bug without bringing new bugs or that bring new features is to
-be merged.
+The module must match the device's KMI exactly. It does not add a network
+namespace implementation, so `--network=host` is currently required for
+network access. Do not use a bare `modules_prepare` kernel tree to produce a
+device module; use a release asset or a matching DDK build with real
+`vmlinux`/`Module.symvers` data.
 
 ## Disclaimer
 

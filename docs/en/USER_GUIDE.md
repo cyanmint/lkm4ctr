@@ -1,0 +1,206 @@
+# lkm4ctr user manual
+
+`lkm4ctr` is an out-of-tree Linux kernel module for rooted, arm64 Android GKI devices. It supplies selected container prerequisites at module load time so an unmodified `containerd`/`runc`/`dockerd` can run without recompiling or flashing the Android kernel.
+
+This is a user guide, not a promise of full Linux-container compatibility. Read the limitations before using it on a device that matters.
+
+## 1. What the project provides
+
+The project produces two separate artifacts:
+
+- `lkm4ctr-<kmi>-arm64.ko`: the kernel module. It is one merged module containing the vendored namespace, IPC/mqueue, and overlayfs paths plus the hook/glue code.
+- `lkm4ctr_checker-arm64`: an optional userspace diagnostic program. It is not a kernel module and does not need `insmod`; it performs real syscalls and reports `PASS`, `STUB`, or `FAIL`.
+
+The module is intended to make stock container runtimes work. They do not need a project-specific runtime patch.
+
+## 2. Requirements
+
+### Device
+
+- A rooted **arm64** Android device. `sudo` in the examples means a root-capable Termux setup; `su -c` can be used instead.
+- A stock Android GKI kernel in a supported KMI family. The current build matrix covers:
+  - `android12-5.10`
+  - `android13-5.10`
+  - `android13-5.15`
+  - `android14-5.15`
+  - `android14-6.1`
+  - `android15-6.6`
+  - `android16-6.12`
+- A module built for the **exact** KMI and kernel ABI. A module for `android14-5.15` is not interchangeable with one for `android14-6.1`.
+- A device kernel with the remaining prerequisites required by the project, notably `CONFIG_NAMESPACES=y`, `CONFIG_NET_NS=y`, and `CONFIG_TIME_NS=y`. The module cannot make every kernel subsystem exist safely from outside the kernel.
+- Sufficient free storage and memory for the container images and Docker data root.
+
+You do not need to recompile or flash the Android kernel. You do need a compatible, signed/allowed-to-load kernel-module environment. Android security policy, KernelSU/Magisk policy, module signature enforcement, or SELinux can still reject `insmod`.
+
+### Termux and userspace
+
+Install Termux from a trusted source, update packages, and install a root helper plus the container tools available for your architecture:
+
+```sh
+pkg update
+pkg install root-repo sudo
+apt install dockerd docker-cli docker-compose
+```
+
+Package names and availability can vary between Termux repositories. Confirm the commands exist:
+
+```sh
+command -v sudo dockerd docker
+```
+
+The module includes a vendored overlayfs implementation. `fuse-overlayfs` is not required merely to load the module. However, Docker's data root must be on a filesystem accepted by the overlay implementation. Android `/data` is often casefold-capable F2FS; that can make `overlay2` fail. Prefer a non-casefold ext4 loopback image or use Docker's `vfs` driver if you understand the storage and performance trade-off.
+
+## 3. Identify the KMI
+
+Run this on the target device:
+
+```sh
+uname -a
+getprop ro.build.version.release
+```
+
+For example, a kernel string containing `android14-6.1` belongs to the `android14-6.1` KMI. The Android release number alone is not enough. If `uname -a` is ambiguous, inspect the kernel release/vendor build information and choose the module whose filename exactly matches the KMI.
+
+## 4. Obtain the artifacts
+
+The easiest path is a GitHub release asset from the project's [releases page](https://github.com/cyanmint/lkm4ctr/releases):
+
+```text
+lkm4ctr-android14-6.1-arm64.ko
+lkm4ctr_checker-arm64
+```
+
+Download the `.ko` whose `<kmi>` matches the device. Do not rename a module to hide a mismatch, and do not load a module built for another KMI.
+
+Copy the files to a readable location, for example:
+
+```sh
+mkdir -p "$HOME/lkm4ctr"
+cp /sdcard/Download/lkm4ctr-android14-6.1-arm64.ko "$HOME/lkm4ctr/lkm4ctr.ko"
+cp /sdcard/Download/lkm4ctr_checker-arm64 "$HOME/lkm4ctr/"
+chmod 755 "$HOME/lkm4ctr/lkm4ctr_checker"
+```
+
+## 5. Run the checker before loading
+
+Run as root or with `CAP_SYS_ADMIN`:
+
+```sh
+sudo "$HOME/lkm4ctr/lkm4ctr_checker"
+printf 'exit status: %s\n' "$?"
+```
+
+`PASS` means the checker observed a real effect, `STUB` means the syscall was accepted without real isolation, and `FAIL` means the syscall failed. Before loading, failures are useful as a baseline. After loading, run it again and compare the namespace, IPC, and overlay results.
+
+A non-root run commonly reports `EPERM`; that is a privilege failure, not evidence that the module is broken.
+
+## 6. Load the module
+
+Stop any existing container workload before changing the loaded module. Then load the exact matching file:
+
+```sh
+sudo insmod "$HOME/lkm4ctr/lkm4ctr.ko"
+```
+
+Check the result immediately:
+
+```sh
+cat /proc/modules | grep '^lkm4ctr '
+sudo "$HOME/lkm4ctr/lkm4ctr_checker"
+```
+
+If `insmod` fails, preserve the complete error and inspect the kernel log. Common causes are a KMI/ABI mismatch, an unknown symbol, module signature enforcement, missing root capability, or a kernel outside the supported range. Never work around an unknown-symbol or version error by forcing the load.
+
+## 7. Start Docker and run a container
+
+Start the daemon in Termux:
+
+```sh
+sudo dockerd --bridge=none --experimental
+```
+
+In another Termux session, wait for the socket and run a first container:
+
+```sh
+until [ -S /data/data/com.termux/files/usr/var/run/docker.sock ] || [ -S /var/run/docker.sock ]; do sleep 1; done
+sudo docker info
+sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh
+```
+
+The documented working network mode is host networking. Without a real network-namespace implementation, bridge networking and other isolated network modes are not supported by this project; a container may start but have no usable network.
+
+## 8. Optional diagnostics filesystem
+
+The module exposes a diagnostic filesystem. It is useful when a container runtime fails after `insmod`:
+
+```sh
+sudo mkdir -p /mnt/lkm4ctr
+sudo mount -t lkm4ctr diag /mnt/lkm4ctr
+sudo cat /mnt/lkm4ctr/status
+sudo cat /mnt/lkm4ctr/log
+sudo cat /mnt/lkm4ctr/v/status
+sudo cat /mnt/lkm4ctr/v/resources
+sudo cat /mnt/lkm4ctr/v/namespaces
+```
+
+The mount is optional and is not required for Docker. `/log` is the combined log; `/v/` contains vendor-kernel state and live namespace/IPC information. Keep the output when reporting an issue, together with `uname -a`, the exact asset filename, and the `insmod`/Docker error.
+
+Do not attempt to unload while containers or other processes are using the module. After stopping Docker and unmounting the diagnostic filesystem, a normal unload may be requested:
+
+```sh
+sudo umount /mnt/lkm4ctr
+sudo rmmod lkm4ctr
+```
+
+The module tracks in-flight hooks and can refuse an unsafe unload. The diagfs also provides a controlled hot-reload path for advanced users:
+
+```sh
+sudo sh -c 'printf "%s\n" "/absolute/path/to/new/lkm4ctr.ko" > /mnt/lkm4ctr/v/hotreload/do-hot-reload'
+sudo cat /mnt/lkm4ctr/v/hotreload/status
+```
+
+Use hot reload only after stopping container workloads. A reboot with no module loaded is the recovery path if the device is left in an uncertain state.
+
+## 9. Known limitations
+
+- This is not a general-purpose replacement for all Android kernel container support.
+- `NET_NS` is bookkeeping-only in the current implementation. Use `--network=host`.
+- `CGROUP_NS` is bookkeeping-only; the project does not provide a cgroup filesystem or controllers. `systemd` as container PID 1 therefore requires a working host cgroup v2 mount and may still fail.
+- `MNT_NS` depends on the running kernel's mount-namespace support.
+- `redroid` failures such as `init: Failed to initialize property area` are generally userspace tmpfs/xattr/SELinux issues, not fixed by this module.
+- Overlay mounts can fail on casefold-capable backing filesystems. Move the Docker data root to a suitable non-casefold ext4 filesystem or use `vfs`.
+- `SHM_HUGETLB` is not supported; ordinary SysV shared memory is the supported path.
+- A release asset is tied to the KMI it was built for. A successful download does not make it safe to use on another kernel.
+
+The authoritative implementation caveats are in [`vendor/README.md`](../../vendor/README.md).
+
+## 10. Building instead of downloading
+
+Building a device module is for developers who have the matching Android GKI DDK. A plain kernel source tree with `modules_prepare` is not sufficient: it lacks the real `vmlinux`/`Module.symvers` data needed for safe symbol resolution and can produce a module that fails or panics on `insmod`.
+
+Inside a matching DDK image:
+
+```sh
+make -C /opt/ddk/kdir/<kmi> M="$PWD/vendor" modules
+```
+
+For example, the CI workflow uses `ghcr.io/ylarod/ddk-min:<kmi>-20260313` and copies `vendor/lkm4ctr.ko` as the KMI-specific release asset. The checker is independent:
+
+```sh
+make -C lkm4ctr_checker CC=aarch64-linux-gnu-gcc
+```
+
+Do not treat a host build against unrelated headers as a device-ready module.
+
+## 11. Reporting a problem
+
+Include:
+
+1. `uname -a` and Android/device details;
+2. the exact `.ko` filename and release/tag;
+3. whether the checker was run before and after `insmod`;
+4. the complete `insmod` error and relevant kernel log;
+5. Docker daemon output and the diagnostic filesystem output, if available;
+6. the smallest reproducible container command.
+
+Avoid posting private device identifiers, serial numbers, or full unredacted kernel logs when they are not needed.
