@@ -1,13 +1,7 @@
 name: Copilot Setup Steps
 
 on:
-  workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/copilot-setup-steps.yml
-  pull_request:
-    paths:
-      - .github/workflows/copilot-setup-steps.yml
+  workflow_call:
 
 jobs:
   copilot-setup-steps:
@@ -25,21 +19,3 @@ jobs:
             --depth=1 \
             "$RUNNER_TEMP/kernel-common"
 
-      - name: Apply containerd (ctr) patches
-        if: cancelled()
-        run: |
-          set -euo pipefail
-
-          KERNEL_SRC_DIR="$RUNNER_TEMP/kernel-common"
-          PATCH_DIR="$GITHUB_WORKSPACE/ctr_patches/a14-6.1"
-
-          test -d "$KERNEL_SRC_DIR"
-          test -d "$PATCH_DIR"
-
-          cd "$KERNEL_SRC_DIR"
-          mapfile -t patch_files < <(find "$PATCH_DIR" -type f -name "*.patch" | LC_ALL=C sort -V)
-
-          for patch_file in "${patch_files[@]}"; do
-            echo "Applying $patch_file"
-            patch -p1 --fuzz=3 < "$patch_file"
-          done
