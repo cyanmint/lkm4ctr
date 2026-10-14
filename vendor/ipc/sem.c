@@ -2409,7 +2409,12 @@ long ksys_semtimedop(int semid, struct sembuf __user *tsops,
 }
 
 #ifdef CONFIG_COMPAT_32BIT_TIME
-static long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
+			    unsigned int nsops,
+			    const struct old_timespec32 __user *timeout);
+#endif
+long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
 			    unsigned int nsops,
 			    const struct old_timespec32 __user *timeout)
 {
