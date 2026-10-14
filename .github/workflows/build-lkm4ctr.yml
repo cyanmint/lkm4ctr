@@ -50,12 +50,15 @@
 # /busybox binary, so this workflow no longer builds either at all -- both
 # are downloaded and used completely verbatim, for every KMI.
 #
-# The actual per-KMI *kernels* booted under QEMU come from a second archive,
+# The per-KMI *kernels* booted under QEMU normally come from
 # testsuitekernels.zip, which bundles a "stock" (unpatched Android GKI) and,
 # where available, a "patched" (SukiSU/SUSFS + ctr_patches) prebuilt kernel
-# Image for each KMI, named `Image.<short-kmi>.stock` /
-# `Image.<short-kmi>.patched` (e.g. `Image.a14-6.1.stock`; the "android"
-# prefix of the KMI name is shortened to "a").
+# Image named `Image.<short-kmi>.stock` / `Image.<short-kmi>.patched` (e.g.
+# `Image.a14-6.1.stock`; the "android" prefix is shortened to "a"). For the
+# four requested KMIs whose archive contains only stock Images, the
+# `build-test-kernel` job builds an Image remotely from the same DDK source
+# and output tree used for that KMI's `.ko`; it is uploaded as the module-test
+# Image and booted alongside the stock baseline.
 #
 # The "test" job runs as its own matrix, one job per KMI in
 # needs.prepare.outputs.test_matrix (the KMI build matrix plus
@@ -84,8 +87,7 @@
 # are boot baselines: they do not load the module or run container-runtime
 # tests. For a `.patched` image with a built module, stage 2 insmods
 # lkm4ctr.ko, runs the checker again, starts dockerd, and runs the alpine and
-# ubuntu images already present in image1.ext4. Test-only KMIs (see
-# $TEST_ONLY_KMIS below) likewise remain bare boot/checker tests.
+# ubuntu images already present in image1.ext4.
 #
 # Within one KMI's job, every kernel Image available for that KMI (stock,
 # and patched if bundled) is booted sequentially, so QEMU is installed and
@@ -94,14 +96,10 @@
 #   - "stock": a stock, unpatched Android GKI kernel (no SukiSU/SUSFS/
 #     lkm4ctr patches at all), a baseline sanity check of the QEMU boot
 #     environment itself.
-#   - "patched": SukiSU/SUSFS-patched *with* ctr_patches applied -- the
-#     actual configuration lkm4ctr.ko is built and meant to be insmod'd
-#     against.
-# $TEST_ONLY_KMIS lists KMIs (currently android17-6.18) that
-# testsuitekernels.zip already ships a "stock" kernel Image for, but which
-# ghcr.io/ylarod/ddk-min has no DDK image for yet, so no "build" job exists
-# for them in the matrix above; they are still boot-tested (bare, without
-# any lkm4ctr.ko) purely as a forward-looking QEMU/kernel sanity check.
+#   - "patched": a SukiSU/SUSFS + ctr_patches Image from the archive, or a
+#     DDK-built module-test Image for the four requested KMIs; these are the
+#     images against which the matching remote-built module and Docker path
+#     are exercised.
 #
 # Credit: SukiSU-Ultra (https://github.com/SukiSU-Ultra/SukiSU-Ultra).
 
@@ -137,13 +135,14 @@ env:
   # KMIs published by SukiSU-Ultra's ghcr.io/ylarod/ddk-min image at this
   # DDK_RELEASE (see .../build-lkm.yml's matrix).
   DEFAULT_KMIS: >-
-    android12-5.10,android13-5.10,android13-5.15,android14-5.15,android14-6.1,android15-6.6,android16-6.12
-  DDK_RELEASE: '20260313'
-  # KMIs boot-tested under QEMU below (see "Boot test (QEMU)" above) that
-  # have no ghcr.io/ylarod/ddk-min DDK image yet, so they are not part of
-  # the "build" matrix at all -- always appended to the "test" matrix
-  # regardless of the "kmis" workflow_dispatch input.
-  TEST_ONLY_KMIS: android17-6.18
+    android12-5.10,android13-5.10,android13-5.15,android14-5.15,android14-6.1,android15-6.6,android16-6.12,android17-6.18
+  DDK_RELEASE: '20260828'
+  # Stock-only archive KMIs that must additionally get a matching DDK-built
+  # kernel Image so the remote-built module can be exercised under QEMU.
+  KERNEL_IMAGE_KMIS: android13-5.10,android14-5.15,android16-6.12,android17-6.18
+  # Reserved for future KMIs without a DDK image; currently all target KMIs
+  # are included in DEFAULT_KMIS and get a remote module build.
+  TEST_ONLY_KMIS: ''
   # testsuite.zip bundles a ready-to-use image1.ext4 (a full Android
   # system-as-root userland with toybox, bionic libc, static
   # docker/dockerd/containerd/runc preinstalled under /system/bin, and the
@@ -161,6 +160,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       test_matrix: ${{ steps.set-matrix.outputs.test_matrix }}
+      kernel_image_matrix: ${{ steps.set-matrix.outputs.kernel_image_matrix }}
       ddk_release: ${{ steps.set-matrix.outputs.ddk_release }}
     steps:
       - name: Compute KMI matrix
@@ -190,6 +190,13 @@ jobs:
           print(json.dumps(seen))
           " "$kmis" "$TEST_ONLY_KMIS")
           echo "test_matrix=$test_json" >> "$GITHUB_OUTPUT"
+          kernel_image_json=$(python3 -c "
+          import json, sys
+          build_kmis = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
+          image_kmis = [k.strip() for k in sys.argv[2].split(',') if k.strip()]
+          print(json.dumps([k for k in image_kmis if k in build_kmis]))
+          " "$kmis" "$KERNEL_IMAGE_KMIS")
+          echo "kernel_image_matrix=$kernel_image_json" >> "$GITHUB_OUTPUT"
           # Expose DDK_RELEASE as a job output: the "env" context is not
           # available in job-level "if:" conditions or in
           # "jobs.<job_id>.container", so downstream jobs cannot reference
@@ -301,6 +308,46 @@ jobs:
           name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: modules-out/
 
+  # Build matching kernel Images remotely for the stock-only KMI test cases.
+  # Using the same DDK source/output as the module build keeps the Image's
+  # exported symbols, config, and kernel release aligned with the .ko.
+  build-test-kernel:
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.kernel_image_matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi: ${{ fromJson(needs.prepare.outputs.kernel_image_matrix) }}
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ needs.prepare.outputs.ddk_release }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Build DDK-matched kernel Image for ${{ matrix.kmi }}
+        run: |
+          set -euxo pipefail
+          KMI='${{ matrix.kmi }}'
+          KDIR="/opt/ddk/kdir/$KMI"
+          KERNEL_SRC="/opt/ddk/src/$KMI"
+          test -s "$KDIR/.config"
+          test -s "$KDIR/Module.symvers"
+          grep -qw register_kprobe "$KDIR/Module.symvers"
+          make -C "$KERNEL_SRC" O="$KDIR" ARCH=arm64 LLVM=1 Image -j"$(nproc)"
+          IMAGE="$KDIR/arch/arm64/boot/Image"
+          test -s "$IMAGE"
+          output="Image.a${KMI#android}.patched"
+          cp "$IMAGE" "$GITHUB_WORKSPACE/$output"
+          file "$GITHUB_WORKSPACE/$output"
+          ls -lh "$GITHUB_WORKSPACE/$output"
+
+      - name: Upload DDK-matched kernel Image for ${{ matrix.kmi }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ddk-kernel-image-${{ matrix.kmi }}
+          path: Image.a*.patched
+
   # Build a single injected (busybox) ramdisk carrying lkm4ctr.ko (if this
   # KMI was actually built), lkm4ctr_checker and the merged init script,
   # then boot-test every kernel Image available for this KMI in
@@ -314,12 +361,12 @@ jobs:
   # build matrix plus $TEST_ONLY_KMIS), independently of the full "build"
   # matrix's overall pass/fail -- an individual KMI's lkm4ctr.ko download
   # is allowed to fail (continue-on-error) so a KMI excluded from the build
-  # matrix (e.g. via a custom `kmis` workflow_dispatch input, or one of
-  # $TEST_ONLY_KMIS) still gets boot-tested bare (see "Boot test (QEMU)"
+  # matrix (e.g. via a custom `kmis` workflow_dispatch input) still gets
+  # boot-tested bare (see "Boot test (QEMU)"
   # above), it just skips the insmod.
   test:
-    needs: [prepare, build, build-checker]
-    if: ${{ !cancelled() && needs.build-checker.result == 'success' }}
+    needs: [prepare, build, build-checker, build-test-kernel]
+    if: ${{ !cancelled() && needs.build-checker.result == 'success' && (needs.build-test-kernel.result == 'success' || needs.build-test-kernel.result == 'skipped') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -351,6 +398,10 @@ jobs:
           name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: payload/
 
+      - name: Require module artifact for built KMI (${{ matrix.kmi }})
+        if: ${{ contains(fromJson(needs.prepare.outputs.matrix), matrix.kmi) }}
+        run: test -s payload/lkm4ctr.ko
+
       - name: Download lkm4ctr_checker (arm64)
         uses: actions/download-artifact@v8
         with:
@@ -378,6 +429,13 @@ jobs:
           mkdir -p testkernels
           unzip -o testsuitekernels.zip "Image.${SHORT_KMI}.*" -d testkernels
           ls -la testkernels
+
+      - name: Download DDK-built module-test kernel for ${{ matrix.kmi }}
+        if: ${{ contains(fromJson(needs.prepare.outputs.kernel_image_matrix), matrix.kmi) }}
+        uses: actions/download-artifact@v8
+        with:
+          name: ddk-kernel-image-${{ matrix.kmi }}
+          path: testkernels/
 
       # --- 3. injected ramdisk: lkm4ctr.ko (if built for this KMI) +
       #        lkm4ctr_checker, /busybox (prebuilt, from testsuite.zip) and
