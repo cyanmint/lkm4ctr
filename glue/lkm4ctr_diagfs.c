@@ -159,7 +159,8 @@
  * The fixed skeleton (./mnt/status, ./mnt/log, ./mnt/helper.sh, ./mnt/readme.txt, the
  * ./mnt/v control/status/listing files, and the always-present per-type
  * directories ./mnt/resources/, ./mnt/v/ns/<type>/, ./mnt/v/ipc/<class>/) is
- * still built once, up front, at mount time (mount_nodev() + fill_super()),
+ * still built once, up front, at mount time (legacy mount_nodev() or the
+ * fs_context get_tree_nodev() path, followed by fill_super()),
  * in the same in-memory ramfs/securityfs spirit as before; the contents of
  * every readable file are regenerated fresh on every open() via seq_file
  * single_open().
@@ -185,14 +186,14 @@
  *
  * Directory traversal reuses the kernel's own simple_lookup() (fs/libfs.c)
  * -- a plain function symbol, resolved lazily via lkm4ctr_diagfs_resolve()
- * like mount_nodev()/generic_delete_inode() below -- wired up into a
+ * like the remaining plain helpers below -- wired up into a
  * locally-owned struct inode_operations rather than referencing the
  * kernel's own simple_dir_inode_operations struct directly: that struct is
  * plain data, which register_kprobe()'s resolution trick fundamentally
  * cannot recover (kprobes require a probe-able instruction/text address),
- * and unlike mount_nodev()/generic_delete_inode() it is also a GKI
- * "Protected symbol" on some KMIs (EACCES at insmod even when present),
- * blocking direct reference regardless of export/trim state. Likewise,
+ * and it is also a GKI "Protected symbol" on some KMIs (EACCES at insmod
+ * even when present), blocking direct reference regardless of export/trim
+ * state. Likewise,
  * kill_litter_super() and d_alloc_name() -- both plain functions -- are
  * resolved lazily instead of called directly, for the same "Protected
  * symbol" reason.
@@ -244,9 +245,12 @@
  * dependency on it to worry about either way. A controller fs that could
  * only mount itself by calling into the hook engine's own exported resolver
  * would still make diagfs *functionally* depend on shadow_hijack, defeating
- * that independence. The handful of plain kernel symbols diagfs itself
- * needs (mount_nodev/generic_delete_inode/module_refcount/
- * call_usermodehelper) are therefore resolved right here instead.
+ * that independence. The plain kernel symbols diagfs cannot safely import
+ * on every supported KMI (legacy mount_nodev, kill_litter_super,
+ * d_alloc_name, simple_lookup, simple_unlink, generic_shutdown_super,
+ * module_refcount, and call_usermodehelper) are therefore resolved here.
+ * Linux 6.18 calls stable-ABI get_tree_nodev(). The local drop_inode callback
+ * preserves generic_delete_inode()'s historical return-1 behavior.
  */
 static unsigned long lkm4ctr_diagfs_resolve(const char *name)
 {
@@ -267,30 +271,26 @@ static unsigned long lkm4ctr_diagfs_resolve(const char *name)
 }
 
 /*
- * mount_nodev() and generic_delete_inode() are ordinary EXPORT_SYMBOL()
- * functions, plain code, so they can be recovered via
- * lkm4ctr_diagfs_resolve()'s register_kprobe() trick if
- * CONFIG_TRIM_UNUSED_KSYMS strips them (confirmed: "Unknown symbol
- * mount_nodev"/"Unknown symbol generic_delete_inode" on insmod against a
- * production GKI kernel), same class of issue as module_refcount()/
- * call_usermodehelper() below. Resolved lazily at lkm4ctr_diagfs_init()
- * time instead of calling them directly.
+ * mount_nodev() is resolved on pre-6.18 kernels because GKI may trim it from
+ * the module symbol table. Linux 6.18 removed it; that tier uses the stable
+ * fs_context get_tree_nodev() API instead. generic_delete_inode() only
+ * returns 1 on the supported older kernels, so the drop_inode callback below
+ * preserves that behavior locally without another resolver dependency.
  */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 typedef struct dentry *(*lkm4ctr_mount_nodev_t)(struct file_system_type *fs_type,
 						 int flags, void *data,
 						 int (*fill_super)(struct super_block *,
 								   void *, int));
-typedef int (*lkm4ctr_generic_delete_inode_t)(struct inode *inode);
-
 static lkm4ctr_mount_nodev_t lkm4ctr_mount_nodev_fn;
-static lkm4ctr_generic_delete_inode_t lkm4ctr_generic_delete_inode_fn;
+#endif
 
 /*
  * kill_litter_super()/d_alloc_name()/simple_lookup() are ordinary plain
  * function symbols (fs/super.c, fs/dcache.c, fs/libfs.c respectively), but
  * on some GKI KMIs they are enforced as "Protected symbols" (EACCES at
  * insmod, distinct from the ordinary ENOENT/CONFIG_TRIM_UNUSED_KSYMS case
- * mount_nodev()/generic_delete_inode() hit above) -- resolved lazily via
+ * described for legacy mount_nodev() above) -- resolved lazily via
  * lkm4ctr_diagfs_resolve() the same way, which sidesteps both enforcement
  * mechanisms uniformly since the reference becomes a runtime indirect call
  * rather than a direct ELF-level one.
@@ -301,8 +301,8 @@ static lkm4ctr_generic_delete_inode_t lkm4ctr_generic_delete_inode_fn;
  * EXPORT_SYMBOL'd on every KMI in our support matrix, CI observed a live
  * "Unknown symbol generic_shutdown_super" insmod failure on a production
  * GKI build that trimmed it from the module symbol table
- * (CONFIG_TRIM_UNUSED_KSYMS), the same reason mount_nodev()/
- * generic_delete_inode() above are resolved lazily instead of imported.
+ * (CONFIG_TRIM_UNUSED_KSYMS), the same reason the legacy mount_nodev() above
+ * is resolved lazily instead of imported.
  */
 typedef void (*lkm4ctr_kill_litter_super_t)(struct super_block *sb);
 typedef void (*lkm4ctr_generic_shutdown_super_t)(struct super_block *sb);
@@ -2371,8 +2371,7 @@ static void lkm4ctr_diagfs_evict_inode(struct inode *inode)
 
 static int __nocfi lkm4ctr_diagfs_drop_inode(struct inode *inode)
 {
-	if (lkm4ctr_generic_delete_inode_fn)
-		return lkm4ctr_generic_delete_inode_fn(inode);
+	(void)inode;
 	return 1;
 }
 
@@ -2650,6 +2649,29 @@ static int lkm4ctr_diagfs_fill_super(struct super_block *sb, void *data, int sil
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static int lkm4ctr_diagfs_fill_super_ctx(struct super_block *sb,
+						 struct fs_context *fc)
+{
+	(void)fc;
+	return lkm4ctr_diagfs_fill_super(sb, NULL, 0);
+}
+
+static int lkm4ctr_diagfs_get_tree(struct fs_context *fc)
+{
+	return get_tree_nodev(fc, lkm4ctr_diagfs_fill_super_ctx);
+}
+
+static const struct fs_context_operations lkm4ctr_diagfs_context_ops = {
+	.get_tree = lkm4ctr_diagfs_get_tree,
+};
+
+static int lkm4ctr_diagfs_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &lkm4ctr_diagfs_context_ops;
+	return 0;
+}
+#else
 static struct dentry *__nocfi lkm4ctr_diagfs_mount(struct file_system_type *fs_type,
 					    int flags, const char *dev_name,
 					    void *data)
@@ -2659,6 +2681,7 @@ static struct dentry *__nocfi lkm4ctr_diagfs_mount(struct file_system_type *fs_t
 		return ERR_PTR(-ENOSYS);
 	return lkm4ctr_mount_nodev_fn(fs_type, flags, data, lkm4ctr_diagfs_fill_super);
 }
+#endif
 
 static void __nocfi lkm4ctr_diagfs_kill_sb(struct super_block *sb)
 {
@@ -2676,7 +2699,11 @@ static void __nocfi lkm4ctr_diagfs_kill_sb(struct super_block *sb)
 static struct file_system_type lkm4ctr_diagfs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "lkm4ctr",
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	.init_fs_context = lkm4ctr_diagfs_init_fs_context,
+#else
 	.mount		= lkm4ctr_diagfs_mount,
+#endif
 	.kill_sb	= lkm4ctr_diagfs_kill_sb,
 };
 
@@ -2685,10 +2712,10 @@ int lkm4ctr_diagfs_init(void)
 	unsigned int i;
 	int ret;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 	lkm4ctr_mount_nodev_fn =
 		(lkm4ctr_mount_nodev_t)lkm4ctr_diagfs_resolve("mount_nodev");
-	lkm4ctr_generic_delete_inode_fn =
-		(lkm4ctr_generic_delete_inode_t)lkm4ctr_diagfs_resolve("generic_delete_inode");
+#endif
 	lkm4ctr_kill_litter_super_fn =
 		(lkm4ctr_kill_litter_super_t)lkm4ctr_diagfs_resolve("kill_litter_super");
 	lkm4ctr_generic_shutdown_super_fn =
@@ -2700,12 +2727,23 @@ int lkm4ctr_diagfs_init(void)
 	lkm4ctr_simple_unlink_fn =
 		(lkm4ctr_simple_unlink_t)lkm4ctr_diagfs_resolve("simple_unlink");
 
-	if (!lkm4ctr_mount_nodev_fn || !lkm4ctr_generic_delete_inode_fn ||
-	    !lkm4ctr_d_alloc_name_fn || !lkm4ctr_simple_lookup_fn) {
+	if (!lkm4ctr_d_alloc_name_fn) {
 		LKM4CTR_ERR(LKM4CTR_DIAGFS_TAG,
-			    "could not resolve mount_nodev/generic_delete_inode/d_alloc_name/simple_lookup; diagfs unavailable");
+			    "could not resolve d_alloc_name; diagfs unavailable");
 		return -ENOSYS;
 	}
+	if (!lkm4ctr_simple_lookup_fn) {
+		LKM4CTR_ERR(LKM4CTR_DIAGFS_TAG,
+			    "could not resolve simple_lookup; diagfs unavailable");
+		return -ENOSYS;
+	}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+	if (!lkm4ctr_mount_nodev_fn) {
+		LKM4CTR_ERR(LKM4CTR_DIAGFS_TAG,
+			    "could not resolve mount_nodev; diagfs unavailable");
+		return -ENOSYS;
+	}
+#endif
 	if (!lkm4ctr_simple_unlink_fn)
 		LKM4CTR_WARN(LKM4CTR_DIAGFS_TAG,
 			     "simple_unlink unresolved; dynamic resource delete falls back to drop_nlink() (resource is still torn down, only the dentry cleanup differs)");
