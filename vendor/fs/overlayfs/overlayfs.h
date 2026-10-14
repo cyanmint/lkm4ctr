@@ -59,6 +59,14 @@
 #include "../../../glue/vendor_kernel_ovl_vfs_compat.h"
 #include "ovl_entry.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+/* The 6.18 VFS renamed struct fileattr without changing its fields. */
+#define fileattr file_kattr
+#endif
+
+int vns_ovl_init(void);
+void vns_ovl_exit(void);
+
 #undef pr_fmt
 #define pr_fmt(fmt) "overlayfs: " fmt
 
@@ -299,14 +307,29 @@ __nocfi static inline int ovl_do_create(struct ovl_fs *ofs,
 	return err;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+__nocfi static inline struct dentry *ovl_do_mkdir(struct ovl_fs *ofs,
+					   struct inode *dir,
+					   struct dentry *dentry,
+					   umode_t mode)
+{
+	struct dentry *ret = vfs_mkdir(ovl_upper_mnt_idmap(ofs), dir,
+				       dentry, mode);
+
+	pr_debug("mkdir(%pd2, 0%o) = %i\n", dentry, mode, PTR_ERR_OR_ZERO(ret));
+	return ret;
+}
+#else
 __nocfi static inline int ovl_do_mkdir(struct ovl_fs *ofs,
 			       struct inode *dir, struct dentry *dentry,
 			       umode_t mode)
 {
 	int err = vfs_mkdir(ovl_upper_mnt_idmap(ofs), dir, dentry, mode);
+
 	pr_debug("mkdir(%pd2, 0%o) = %i\n", dentry, mode, err);
 	return err;
 }
+#endif
 
 __nocfi static inline int ovl_do_mknod(struct ovl_fs *ofs,
 			       struct inode *dir, struct dentry *dentry,
@@ -426,12 +449,20 @@ __nocfi static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir
 #else
 	{
 	struct renamedata rd = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+		.mnt_idmap	= ovl_upper_mnt_idmap(ofs),
+		.old_parent	= olddentry->d_parent,
+		.old_dentry	= olddentry,
+		.new_parent	= newdentry->d_parent,
+		.new_dentry	= newdentry,
+#else
 		.old_mnt_idmap	= ovl_upper_mnt_idmap(ofs),
 		.old_dir 	= olddir,
 		.old_dentry 	= olddentry,
 		.new_mnt_idmap	= ovl_upper_mnt_idmap(ofs),
 		.new_dir 	= newdir,
 		.new_dentry 	= newdentry,
+#endif
 		.flags 		= flags,
 	};
 	err = vfs_rename(&rd);
@@ -479,7 +510,11 @@ __nocfi static inline struct dentry *ovl_lookup_upper(struct ovl_fs *ofs,
 					      const char *name,
 					      struct dentry *base, int len)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	return lookup_one(ovl_upper_mnt_idmap(ofs), &QSTR_LEN(name, len), base);
+#else
 	return lookup_one(ovl_upper_mnt_idmap(ofs), name, base, len);
+#endif
 }
 
 static inline bool ovl_open_flags_need_copy_up(int flags)
@@ -493,8 +528,12 @@ static inline bool ovl_open_flags_need_copy_up(int flags)
 __nocfi static inline int ovl_do_getattr(const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int flags)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 	if (flags & AT_GETATTR_NOSEC)
 		return vfs_getattr_nosec(path, stat, request_mask, flags);
+#else
+	(void)flags;
+#endif
 	return vfs_getattr(path, stat, request_mask, flags);
 }
 

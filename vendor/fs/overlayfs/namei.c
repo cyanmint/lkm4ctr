@@ -259,8 +259,16 @@ __nocfi static struct dentry *ovl_lookup_positive_unlocked(struct ovl_lookup_dat
 						   struct dentry *base, int len,
 						   bool drop_negative)
 {
-	struct dentry *ret = lookup_one_unlocked(ovl_mnt_idmap(d->layer->mnt), name,
-						 base, len);
+	struct dentry *ret;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	struct qstr qname = QSTR_LEN(name, len);
+
+	ret = lookup_one_unlocked(ovl_mnt_idmap(d->layer->mnt), &qname, base);
+#else
+	ret = lookup_one_unlocked(ovl_mnt_idmap(d->layer->mnt), name, base,
+				  len);
+#endif
 
 	if (!IS_ERR(ret) && d_flags_negative(smp_load_acquire(&ret->d_flags))) {
 		if (drop_negative && ret->d_lockref.count == 1) {
@@ -811,7 +819,12 @@ __nocfi struct dentry *ovl_get_index_fh(struct ovl_fs *ofs, struct ovl_fh *fh)
 	if (err)
 		return ERR_PTR(err);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	index = lookup_one_positive_unlocked(ovl_upper_mnt_idmap(ofs), &name,
+					     ofs->workdir);
+#else
 	index = lookup_positive_unlocked(name.name, ofs->workdir, name.len);
+#endif
 	kfree(name.name);
 	if (IS_ERR(index)) {
 		if (PTR_ERR(index) == -ENOENT)
@@ -843,8 +856,13 @@ __nocfi struct dentry *ovl_lookup_index(struct ovl_fs *ofs, struct dentry *upper
 	if (err)
 		return ERR_PTR(err);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	index = lookup_one_positive_unlocked(ovl_upper_mnt_idmap(ofs), &name,
+					     ofs->workdir);
+#else
 	index = lookup_one_positive_unlocked(ovl_upper_mnt_idmap(ofs), name.name,
 					     ofs->workdir, name.len);
+#endif
 	if (IS_ERR(index)) {
 		err = PTR_ERR(index);
 		if (err == -ENOENT) {
@@ -1448,9 +1466,19 @@ __nocfi bool ovl_lower_positive(struct dentry *dentry)
 		struct dentry *this;
 		struct ovl_path *parentpath = &ovl_lowerstack(poe)[i];
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+		{
+			struct qstr qname = *name;
+
+			this = lookup_one_positive_unlocked(
+				ovl_mnt_idmap(parentpath->layer->mnt),
+				&qname, parentpath->dentry);
+		}
+#else
 		this = lookup_one_positive_unlocked(
 				ovl_mnt_idmap(parentpath->layer->mnt),
 				name->name, parentpath->dentry, name->len);
+#endif
 		if (IS_ERR(this)) {
 			switch (PTR_ERR(this)) {
 			case -ENOENT:

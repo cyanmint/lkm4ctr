@@ -80,7 +80,11 @@ atomic_t vns_ovl_mount_count = ATOMIC_INIT(0);
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Overlay filesystem");
 MODULE_LICENSE("GPL");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("ANDROID_GKI_VFS_EXPORT_ONLY");
+#else
 MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
+#endif
 /*
  * [BUILD-COMPAT] many of the plain inode/dentry helpers overlayfs calls
  * (set_nlink(), clear_inode(), ihold(), notify_change(), d_splice_alias(),
@@ -89,7 +93,11 @@ MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
  * VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver, but does not
  * import it" / "Unknown symbol ... (err -22)" at insmod without this.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+#else
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
 
 
 struct ovl_dir_cache;
@@ -205,7 +213,28 @@ __nocfi static int ovl_revalidate_real(struct dentry *d, unsigned int flags, boo
 		if (d->d_flags & DCACHE_OP_WEAK_REVALIDATE)
 			ret =  d->d_op->d_weak_revalidate(d, flags);
 	} else if (d->d_flags & DCACHE_OP_REVALIDATE) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+		struct dentry *parent;
+		struct inode *dir;
+		struct name_snapshot n;
+
+		if (flags & LOOKUP_RCU) {
+			parent = READ_ONCE(d->d_parent);
+			dir = d_inode_rcu(parent);
+			if (!dir)
+				return -ECHILD;
+		} else {
+			parent = dget_parent(d);
+			dir = d_inode(parent);
+		}
+		take_dentry_name_snapshot(&n, d);
+		ret = d->d_op->d_revalidate(dir, &n.name, d, flags);
+		release_dentry_name_snapshot(&n);
+		if (!(flags & LOOKUP_RCU))
+			dput(parent);
+#else
 		ret = d->d_op->d_revalidate(d, flags);
+#endif
 		if (!ret) {
 			if (!(flags & LOOKUP_RCU))
 				d_invalidate(d);
@@ -241,7 +270,12 @@ static int ovl_dentry_revalidate_common(struct dentry *dentry,
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static int ovl_dentry_revalidate(struct inode *dir, const struct qstr *name,
+				 struct dentry *dentry, unsigned int flags)
+#else
 static int ovl_dentry_revalidate(struct dentry *dentry, unsigned int flags)
+#endif
 {
 	return ovl_dentry_revalidate_common(dentry, flags, false);
 }
@@ -1432,7 +1466,11 @@ __nocfi int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (WARN_ON(fc->user_ns != vns_current_user_ns())) /* [BUILD-COMPAT] */
 		goto out_err;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	set_default_d_op(sb, &ovl_dentry_operations);
+#else
 	sb->s_d_op = &ovl_dentry_operations;
+#endif
 
 	err = -ENOMEM;
 	ofs->creator_cred = cred = prepare_creds();

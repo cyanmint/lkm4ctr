@@ -24,13 +24,15 @@
  * Three compatibility tiers
  * -------------------------
  *   tier NEW [6.3, 6.19)  Kernel threads inode-op / VFS helpers with
- *                         `struct mnt_idmap *` already; the 6.12 source is
- *                         essentially native. Bridging = (a) resolving helpers
- *                         trimmed by CONFIG_TRIM_UNUSED_KSYMS / protected-KMI,
- *                         (b) a manual backing_file rw fallback on [6.3, 6.9)
- *                         where backing_file_read_iter()/... do not exist yet
- *                         (android15-6.6 falls here for read/write/splice, but
- *                         already has backing_file_open()).
+ *                         `struct mnt_idmap *` already. The 6.12 source is
+ *                         essentially native through 6.16; 6.17 changes lookup
+ *                         helpers to take `struct qstr *`, and 6.18 changes
+ *                         fileattr, mkdir, rename, d_revalidate, and default
+ *                         dentry-op APIs. Bridging also resolves helpers
+ *                         trimmed by CONFIG_TRIM_UNUSED_KSYMS / protected-KMI
+ *                         and uses a manual backing_file rw fallback on
+ *                         [6.3, 6.9) (android15-6.6 falls here for
+ *                         read/write/splice, but already has backing_file_open()).
  *
  *   tier MID [5.12, 6.3)  Idmapped mounts exist but helpers take
  *                         `struct user_namespace *`. We alias the type

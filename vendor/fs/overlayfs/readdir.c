@@ -327,7 +327,13 @@ __nocfi static int ovl_check_whiteouts(const struct path *path, struct ovl_readd
 		while (rdd->first_maybe_whiteout) {
 			p = rdd->first_maybe_whiteout;
 			rdd->first_maybe_whiteout = p->next_maybe_whiteout;
-			dentry = lookup_one(ovl_mnt_idmap(path->mnt), p->name, dir, p->len);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+			dentry = lookup_one(ovl_mnt_idmap(path->mnt),
+					    &QSTR_LEN(p->name, p->len), dir);
+#else
+			dentry = lookup_one(ovl_mnt_idmap(path->mnt), p->name, dir,
+					    p->len);
+#endif
 			if (!IS_ERR(dentry)) {
 				p->is_whiteout = ovl_is_whiteout(dentry);
 				dput(dentry);
@@ -537,7 +543,12 @@ __nocfi static int ovl_cache_update(const struct path *path, struct ovl_cache_en
 		}
 	}
 	/* This checks also for xwhiteouts */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	this = lookup_one(ovl_mnt_idmap(path->mnt), &QSTR_LEN(p->name, p->len),
+			  dir);
+#else
 	this = lookup_one(ovl_mnt_idmap(path->mnt), p->name, dir, p->len);
+#endif
 	if (IS_ERR_OR_NULL(this) || !this->d_inode) {
 		/* Mark a stale entry */
 		p->is_whiteout = true;

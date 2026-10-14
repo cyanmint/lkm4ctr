@@ -194,9 +194,17 @@ __nocfi int ovl_mkdir_real(struct ovl_fs *ofs, struct inode *dir,
 	int err;
 	struct dentry *d, *dentry = *newdentry;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	dentry = ovl_do_mkdir(ofs, dir, dentry, mode);
+	err = PTR_ERR_OR_ZERO(dentry);
+	if (err)
+		return err;
+	*newdentry = dentry;
+#else
 	err = ovl_do_mkdir(ofs, dir, dentry, mode);
 	if (err)
 		return err;
+#endif
 
 	if (likely(!d_unhashed(dentry)))
 		return 0;
