@@ -56,6 +56,7 @@
 #include <linux/cgroup.h>
 #include <linux/perf_event.h>
 #include <linux/hashtable.h>
+#include <linux/atomic.h>
 #include <linux/spinlock.h>
 #include <linux/llist.h>
 #include <linux/workqueue.h>
@@ -82,6 +83,7 @@ extern struct time_namespace vns_init_time_ns;
  */
 static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
 static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
+static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
 
 struct vns_nsproxy_set_entry {
 	struct nsproxy *ns;
@@ -1003,6 +1005,38 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 }
 
 /*
+ * As a final ownership boundary, route native free_nsproxy() calls for
+ * tracked vendored objects through the vendored destructor. The earlier
+ * exit_task_namespaces() hook normally swaps these objects out first, but
+ * stock GKI exit paths can still reach native free_nsproxy() with a
+ * module-owned nsproxy; the native destructor would free its child objects
+ * through the wrong slab caches.
+ */
+static const char * const vns_free_nsproxy_names[] = {
+	"free_nsproxy", NULL,
+};
+
+static void vns_free_nsproxy_hook(struct nsproxy *ns)
+{
+	if (vns_nsproxy_set_contains(ns)) {
+		if (atomic_inc_return(&vns_free_nsproxy_intercepts) == 1)
+			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+				     "intercepted native free_nsproxy for vendored object %p",
+				     ns);
+		vns_free_nsproxy(ns);
+		return;
+	}
+
+	if (vns_real_free_nsproxy_fn)
+		vns_real_free_nsproxy_fn(ns);
+}
+
+static struct shadow_hook vns_free_nsproxy_shadow_hook =
+	SHADOW_HOOK(vns_free_nsproxy_names,
+		    vns_free_nsproxy_hook,
+		    &vns_real_free_nsproxy_fn);
+
+/*
  * [BUILD-COMPAT] Interpose on exit_task_namespaces(), not do_exit(). The
  * latter is __noreturn and was being probed directly with a pre_handler that
  * ran cleanup inside kprobe context; on an Android 6.1.138 stock image this
@@ -1042,10 +1076,21 @@ static struct shadow_hook vns_exit_task_namespaces_shadow_hook =
 
 int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 {
-	return shadow_hook_install(&vns_exit_task_namespaces_shadow_hook);
+	int ret;
+
+	ret = shadow_hook_install(&vns_free_nsproxy_shadow_hook);
+	if (ret)
+		return ret;
+
+	ret = shadow_hook_install(&vns_exit_task_namespaces_shadow_hook);
+	if (ret)
+		shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
+
+	return ret;
 }
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
 	shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
+	shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
 }
