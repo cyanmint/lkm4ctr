@@ -38,6 +38,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
 #include <linux/idr.h>
+#include <linux/stddef.h>
 #include "../vendor_kernel.h"
 
 static DEFINE_MUTEX(pid_caches_mutex);
@@ -55,14 +56,20 @@ static struct kmem_cache *create_pid_cachep(unsigned int level)
 	struct kmem_cache **pkc = &pid_cache[level - 1];
 	struct kmem_cache *kc;
 	char name[4 + 10 + 1];
-	unsigned int len;
+	size_t len;
 
 	kc = READ_ONCE(*pkc);
 	if (kc)
 		return kc;
 
 	snprintf(name, sizeof(name), "pid_%u", level + 1);
-	len = sizeof(struct pid) + level * sizeof(struct upid);
+	/*
+	 * Older kernels declare numbers[1], while 6.12+ use numbers[].
+	 * Allocate all level + 1 entries from the member offset so both
+	 * layouts reserve the complete flexible tail.
+	 */
+	len = offsetof(struct pid, numbers) +
+	      (level + 1) * sizeof(struct upid);
 	mutex_lock(&pid_caches_mutex);
 	/* Name collision forces to do allocation under mutex. */
 	if (!*pkc)

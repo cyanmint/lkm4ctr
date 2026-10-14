@@ -29,7 +29,7 @@ To close this, `kernel/nsproxy.c` adds:
 
 **Known accepted remaining gap:** `cred->user_ns` can be freed independently of nsproxy teardown, via a deferred RCU callback (`put_cred_rcu()`) at an arbitrary later time and context, decoupled from task exit. A similarly rigorous fix would require intercepting `__put_user_ns()` or the cred RCU-free path itself, which is materially harder to make safe and is out of scope here. This is a plain no-op leak (not a crash risk) whenever the target's `CONFIG_USER_NS=n` (vendor_kernel's primary use case); it is only a real hazard in the unusual combination where the target ships `CONFIG_USER_NS=y` while still lacking other namespace types vendor_kernel exists for.
 
-`ipc_namespace`, `cgroup_namespace`, and `time_namespace` are unaffected — upstream itself allocates those with plain `kzalloc()`/`kmalloc()` + `kfree()`, so there is no cache mismatch to fix. The per-level `struct pid` slab cache (`ns->pid_cachep`, created via `create_pid_cachep()`) was already a real, self-consistent `kmem_cache_create()`-based cache and needed no change.
+`ipc_namespace`, `cgroup_namespace`, and `time_namespace` are unaffected — upstream itself allocates those with plain `kzalloc()`/`kmalloc()` + `kfree()`, so there is no cache mismatch to fix. The per-level `struct pid` slab cache (`ns->pid_cachep`, created via `create_pid_cachep()`) is module-owned and sized from `offsetof(struct pid, numbers)` plus `level + 1` `struct upid` entries. This handles both older `numbers[1]` declarations and the flexible `numbers[]` member used by Linux 6.12+, avoiding an undersized cache on newer kernels.
 
 ## Namespace refcounting is fully self-contained (UTS_NS / PID_NS / USER_NS)
 
