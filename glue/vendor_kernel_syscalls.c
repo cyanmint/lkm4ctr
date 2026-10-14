@@ -18,6 +18,22 @@
 #include "../vendor/vendor_kernel.h"
 #include "shadow_hook.h"
 
+/*
+ * [BUILD-COMPAT] fs_struct's own internal spinlock member (guarding
+ * fs->users/root/pwd) moved across kernel versions: pre-6.17 kernels
+ * expose it directly as `fs_struct->lock`; the 6.17 "fold fs_struct->
+ * {lock,seq} into a seqlock" change replaced both with a single
+ * `fs_struct->seq` seqlock_t whose own embedded spinlock is
+ * `fs_struct->seq.lock`. Used by vendor_kernel_hook_unshare() below to
+ * safely decrement an old, shared fs_struct's `users` count without
+ * assuming one fixed member name.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+#define VNS_FS_STRUCT_LOCK(fs) (&(fs)->lock)
+#else
+#define VNS_FS_STRUCT_LOCK(fs) (&(fs)->seq.lock)
+#endif
+
 static long (*real_sys_unshare)(const struct pt_regs *regs);
 static long (*real_sys_setns)(const struct pt_regs *regs);
 static long (*real_sys_clone)(const struct pt_regs *regs);
@@ -70,6 +86,7 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 	unsigned long native_flags = flags & ~VNS_CLONE_FLAGS;
 	struct cred *new_cred = NULL;
 	struct nsproxy *new_nsp = NULL;
+	struct fs_struct *new_fs = NULL;
 	long ret = 0;
 
 	if (!vns_flags)
@@ -88,10 +105,46 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 			return ret;
 	}
 
-	ret = vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, new_cred, NULL);
+	/*
+	 * Real unshare(CLONE_NEWNS) always implies CLONE_FS (ksys_unshare()
+	 * unconditionally ORs it in before calling unshare_fs()): the real,
+	 * resolved copy_mnt_ns() (vns_copy_mnt_ns_fn) repoints its fs_struct
+	 * argument's root/pwd in place onto the freshly copied mount tree, so
+	 * that argument must be a private fs_struct, not one still shared
+	 * with any other thread/task, or every other user of the shared
+	 * fs_struct (anything that did a plain clone() with CLONE_FS, e.g. a
+	 * pthread) has its root/pwd silently repointed into this task's
+	 * brand-new, otherwise-invisible mount namespace too. Passing
+	 * current->fs unconditionally here (as this hook used to) skipped
+	 * that split, so current->fs->users could still be >1 by the time a
+	 * later setns(fd, CLONE_NEWNS) ran -- the real kernel's own
+	 * mntns_install() (fs/namespace.c) hard-requires `fs->users == 1` and
+	 * fails the setns() with -EINVAL otherwise, observed as Android
+	 * init's "Cannot switch back to bootstrap mount namespace: Invalid
+	 * argument" / "SetupMountNamespaces failed" abort. Mirrors the
+	 * clone(CLONE_NEWNS, ...) path's identical fs_struct-isolation fix in
+	 * vendor_kernel_clone_track() above (matching upstream's
+	 * unshare_fs()).
+	 */
+	if (vns_flags & CLONE_NEWNS) {
+		struct fs_struct *fs = current->fs;
+
+		if (fs && fs->users > 1) {
+			new_fs = copy_fs_struct(fs);
+			if (!new_fs) {
+				if (new_cred)
+					put_cred(new_cred);
+				return -ENOMEM;
+			}
+		}
+	}
+
+	ret = vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, new_cred, new_fs);
 	if (ret) {
 		if (new_cred)
 			put_cred(new_cred);
+		if (new_fs)
+			free_fs_struct(new_fs);
 		return ret;
 	}
 
@@ -107,6 +160,31 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 	 */
 	if (new_nsp)
 		vns_switch_task_namespaces(current, new_nsp);
+
+	/*
+	 * Install the private fs_struct copy allocated above and drop this
+	 * task's reference on the old, still-shared one, mirroring upstream
+	 * ksys_unshare()'s post-switch fs_struct swap. `fs_struct->users` is
+	 * only ever modified under its own internal spinlock, whose exact
+	 * field layout has changed across kernel versions -- pre-6.17
+	 * kernels expose it directly as `fs_struct->lock`; 6.17 folded
+	 * `fs_struct->{lock,seq}` into a single `fs_struct->seq` seqlock_t,
+	 * whose own embedded spinlock is `fs_struct->seq.lock` -- hence the
+	 * version gate below (see VNS_FS_STRUCT_LOCK()) instead of assuming
+	 * one fixed member name.
+	 */
+	if (new_fs) {
+		struct fs_struct *old_fs;
+
+		task_lock(current);
+		old_fs = current->fs;
+		spin_lock(VNS_FS_STRUCT_LOCK(old_fs));
+		current->fs = new_fs;
+		old_fs->users--;
+		spin_unlock(VNS_FS_STRUCT_LOCK(old_fs));
+		task_unlock(current);
+	}
+
 	vendor_kernel_registry.stat_unshare++;
 	return 0;
 }

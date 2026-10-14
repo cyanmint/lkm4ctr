@@ -93,22 +93,24 @@ over.
 - **Kernel module** (`lkm4ctr.ko`): must be built against a real GKI
   `vmlinux`/`Module.symvers`/matching clang toolchain for the target KMI —
   a bare `gki_defconfig` + `modules_prepare` tree only has stub/empty
-  symbol CRC data and produces modules that panic on `insmod`. CI builds
-  inside `ghcr.io/ylarod/ddk-min:<kmi>-<release>` DDK container images
-  (see SukiSU-Ultra's `build-lkm.yml`) for exactly this reason:
+  symbol CRC data and produces modules that panic on `insmod`, and a
+  sandbox host's own kernel headers are a different major version from any
+  real GKI KMI and produce spurious VFS API-mismatch errors unrelated to
+  real bugs. Always compile-test the same way CI does in
+  `.github/workflows/build-lkm4ctr.yml`'s `build` job: inside the matching
+  `ghcr.io/ylarod/ddk-min:<kmi>-<release>` DDK container image (see
+  SukiSU-Ultra's `build-lkm.yml` for the image/KMI list), which ships a
+  genuine `vmlinux`/`Module.symvers`/clang toolchain for that KMI. Pick any
+  KMI from `DEFAULT_KMIS`/`DDK_RELEASE` in the workflow's `env:` block (e.g.
+  `android14-6.1`/`20260313`) and run, from the repository root:
   ```sh
-  make -C /opt/ddk/kdir/<kmi> M="$PWD/vendor" modules
+  docker run --rm -v "$PWD:/workspace" -w /workspace \
+    ghcr.io/ylarod/ddk-min:android14-6.1-20260313 \
+    make -C /opt/ddk/kdir/android14-6.1 M=/workspace/vendor modules
   ```
-  To compile-test locally against a plain kernel source tree instead
-  (only useful as a rough syntax/API check, **not** equivalent to a real
-  GKI DDK build — a sandbox host's own kernel headers are usually a
-  different major version and will produce spurious VFS API-mismatch
-  errors unrelated to real bugs):
-  ```sh
-  make ARCH=x86_64 x86_64_defconfig && ./scripts/config --enable MODULES ... \
-    && make ARCH=x86_64 modules_prepare   # inside a checked-out kernel-common tree
-  make -C <kernel-common> M=<module-dir> modules
-  ```
+  This mirrors the workflow's own `make -C "$KDIR" M="$ROOT" modules
+  -j"$(nproc)"` step exactly (same image, same `KDIR`/`M` layout), so a
+  clean build here is a reliable signal, unlike a local-toolchain build.
 - **`lkm4ctr_checker`** (userspace, cross-compiled statically for arm64,
   no kernel headers/KDIR involved):
   ```sh
