@@ -457,6 +457,11 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
  */
 
 #if VNS_OVL_TIER_NEW
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define VNS_OVL_VFSC_REVERT_CREDS_ENTRY(X)
+#else
+#define VNS_OVL_VFSC_REVERT_CREDS_ENTRY(X) X(revert_creds)
+#endif
 #define VNS_OVL_VFS_COMPAT_LIST(X) \
 	X(prepare_creds) \
 	X(errseq_sample) \
@@ -523,7 +528,7 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(vfs_fadvise) \
 	X(down_write_killable) \
 	X(d_invalidate) \
-	X(revert_creds) \
+	VNS_OVL_VFSC_REVERT_CREDS_ENTRY(X) \
 	X(override_creds) \
 	X(security_file_ioctl) \
 	X(iterate_dir) \
@@ -833,11 +838,15 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
  * KMI) because these seven were previously left un-redirected here (only
  * VNS_OVL_TIER_OLD resolved them), on the incorrect assumption that direct
  * linkage against these always succeeds on MID/NEW-tier kernels. Resolved
- * via shadow_hook_resolve() like the rest of this list instead.
+ * via shadow_hook_resolve() like the rest of this list instead. On Linux
+ * 6.18+, revert_creds() is a static inline in <linux/cred.h>, so the NEW tier
+ * uses that inline rather than trying to resolve a nonexistent symbol.
  */
 #define down_write_killable (*vns_ovl_vfsc_down_write_killable)
 #define d_invalidate (*vns_ovl_vfsc_d_invalidate)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 #define revert_creds (*vns_ovl_vfsc_revert_creds)
+#endif
 #define override_creds (*vns_ovl_vfsc_override_creds)
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define iterate_dir (*vns_ovl_vfsc_iterate_dir)
