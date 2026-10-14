@@ -127,11 +127,12 @@ over.
   independent of the KMI matrix.
 - `test` job: a matrix over every KMI (the build matrix plus
   `TEST_ONLY_KMIS`, i.e. KMIs with no DDK image/build yet, tested boot-only
-  without a module). Boots every kernel Image bundled for that KMI in
-  `testsuitekernels.zip` (`Image.<short-kmi>.stock` /
-  `Image.<short-kmi>.patched`) under QEMU via `qemu_test.sh`, against the
-  shared `image1.ext4`/busybox from `testsuite.zip`, with the KMI's
-  `lkm4ctr.ko` (if built) injected and `insmod`'d.
+  without a module). Downloads the pinned, official Google arm64 GKI `Image`
+  for each KMI from `ci.android.com` (never builds a test kernel), then boots
+  it under QEMU via `qemu_test.sh` against the shared
+  `image1.ext4`/busybox from `testsuite.zip`. For KMIs with a built module, the
+  test injects and loads `lkm4ctr.ko`, runs the checker, and exercises Docker
+  containers.
 - `vendor-ns-diff` job: diffs `vendor_kernel` against a shallow clone of
   upstream `kernel/common` (android14-6.1) and posts the diff to the job
   summary — informational, not a pass/fail gate.

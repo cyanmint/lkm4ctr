@@ -50,54 +50,25 @@
 # /busybox binary, so this workflow no longer builds either at all -- both
 # are downloaded and used completely verbatim, for every KMI.
 #
-# The per-KMI *kernels* booted under QEMU normally come from
-# testsuitekernels.zip, which bundles a "stock" (unpatched Android GKI) and,
-# where available, a "patched" (SukiSU/SUSFS + ctr_patches) prebuilt kernel
-# Image named `Image.<short-kmi>.stock` / `Image.<short-kmi>.patched` (e.g.
-# `Image.a14-6.1.stock`; the "android" prefix is shortened to "a"). For the
-# four requested KMIs whose archive contains only stock Images, the
-# `build-test-kernel` job builds an Image remotely from the same DDK source
-# and output tree used for that KMI's `.ko`; it is uploaded as the module-test
-# Image and booted alongside the stock baseline.
+# Every KMI is booted using Google's official, unmodified GKI `Image` artifact
+# downloaded from its pinned release build on ci.android.com. No third-party
+# kernel archive or locally/CI-built test kernel is used.
 #
 # The "test" job runs as its own matrix, one job per KMI in
-# needs.prepare.outputs.test_matrix (the KMI build matrix plus
-# $TEST_ONLY_KMIS -- see below). For a KMI actually built above, it
-# downloads that KMI's lkm4ctr.ko plus the (KMI-independent) checker
-# binary, fetches testsuite.zip and testsuitekernels.zip, and builds a
-# single injected (busybox) ramdisk before booting every kernel Image
-# available for that KMI in sequence:
-#   - the injected ramdisk's /init is qemu_test.sh (a single "#!/busybox sh"
-#     script that also doubles as the host-side QEMU launcher used below --
-#     see its own header comment), dispatching on PID/argv[0]. As stage 1
-#     (PID 1, argv[0] == "init"), it populates /dev via mdev (the test
-#     kernels have no devtmpfs support), mounts image1.ext4 (/dev/nvme0n1,
-#     the prebuilt testsuite root filesystem -- the test kernels have no
-#     virtio support either, hence NVMe) at /newroot, copies
-#     /lkm4ctr_checker (always) and /lkm4ctr.ko (only if this KMI was
-#     actually built) and /busybox onto it, writes its own script onto the
-#     new root as /second_init, then busybox switch_root's into /newroot
-#     and execs /second_init -- the standard, kernel-supported way to hand
-#     off from a cpio-based initramfs to a real block-device root. Since
-#     /second_init's argv[0] is no longer "init", the very same script now
-#     runs its stage-2 body instead of stage-1.
-# The stage-2 body (running as PID 1 of the real root, image1.ext4) populates
-# /dev again (switch_root does not preserve the initramfs's un-mounted /dev
-# contents, so mdev must repopulate it) and runs lkm4ctr_checker. For a
-# `.patched` image with a built module, stage 2 insmods lkm4ctr.ko, runs the
-# checker again, starts dockerd, and runs the alpine and ubuntu images already
-# present in image1.ext4. Stock images remain module-free boot baselines.
+# needs.prepare.outputs.test_matrix. Each job downloads that KMI's remotely
+# built lkm4ctr.ko plus the KMI-independent checker, testsuite.zip, and one
+# official Google stock GKI Image. It builds one injected busybox ramdisk:
+#   - /init is qemu_test.sh (#!/busybox sh), which dispatches on PID/argv[0].
+#     Stage 1 (PID 1, argv[0] == "init") populates /dev via mdev, mounts
+#     image1.ext4 (/dev/nvme0n1) at /newroot, copies the checker, module, and
+#     busybox onto it, then switch_root's into the testsuite rootfs.
+#   - Stage 2 repopulates /dev, runs the checker, insmods the matching module,
+#     runs the checker again, starts dockerd, and executes the bundled Alpine
+#     and Ubuntu container tests.
 #
-# Within one KMI's job, every kernel Image available for that KMI (stock,
-# patched if bundled, and DDK-built for the four stock-only KMI cases) is
-# booted sequentially, so QEMU is installed and
-# the (sizeable) prebuilt image1.ext4 is downloaded only once per KMI
-# instead of once per kernel:
-#   - "stock": a stock, unpatched Android GKI kernel (no SukiSU/SUSFS/
-#     lkm4ctr patches at all), used as a boot baseline only.
-#   - "patched": a SukiSU/SUSFS + ctr_patches Image from the archive, or a
-#     DDK-built module-test Image for the four requested KMIs; these images
-#     exercise the matching remote-built module and Docker path.
+# Every KMI uses only its official, unmodified Google GKI Image; this workflow
+# does not download kernel images from testsuitekernels.zip or build test
+# kernels locally or in CI.
 #
 # Credit: SukiSU-Ultra (https://github.com/SukiSU-Ultra/SukiSU-Ultra).
 
@@ -135,9 +106,6 @@ env:
   DEFAULT_KMIS: >-
     android12-5.10,android13-5.10,android13-5.15,android14-5.15,android14-6.1,android15-6.6,android16-6.12,android17-6.18
   DDK_RELEASE: '20260828'
-  # Stock-only archive KMIs that must additionally get a matching DDK-built
-  # kernel Image so the remote-built module can be exercised under QEMU.
-  KERNEL_IMAGE_KMIS: android13-5.10,android14-5.15,android16-6.12,android17-6.18
   # Reserved for future KMIs without a DDK image; currently all target KMIs
   # are included in DEFAULT_KMIS and get a remote module build.
   TEST_ONLY_KMIS: ''
@@ -148,9 +116,6 @@ env:
   # static arm64 busybox binary for the injected QEMU test ramdisk's
   # /busybox, in one archive.
   TESTSUITE_URL: https://github.com/cyanmint/GKI_KernelSU_SUSFS/releases/download/v2.2.0/testsuite.zip
-  # testsuitekernels.zip bundles the per-KMI QEMU test kernels themselves
-  # (Image.<short-kmi>.stock / Image.<short-kmi>.patched).
-  TESTSUITE_KERNELS_URL: https://github.com/cyanmint/GKI_KernelSU_SUSFS/releases/download/v2.2.0/testsuitekernels.zip
 
 jobs:
   prepare:
@@ -158,7 +123,6 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       test_matrix: ${{ steps.set-matrix.outputs.test_matrix }}
-      kernel_image_matrix: ${{ steps.set-matrix.outputs.kernel_image_matrix }}
       ddk_release: ${{ steps.set-matrix.outputs.ddk_release }}
     steps:
       - name: Compute KMI matrix
@@ -188,13 +152,7 @@ jobs:
           print(json.dumps(seen))
           " "$kmis" "$TEST_ONLY_KMIS")
           echo "test_matrix=$test_json" >> "$GITHUB_OUTPUT"
-          kernel_image_json=$(python3 -c "
-          import json, sys
-          build_kmis = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
-          image_kmis = [k.strip() for k in sys.argv[2].split(',') if k.strip()]
-          print(json.dumps([k for k in image_kmis if k in build_kmis]))
-          " "$kmis" "$KERNEL_IMAGE_KMIS")
-          echo "kernel_image_matrix=$kernel_image_json" >> "$GITHUB_OUTPUT"
+
           # Expose DDK_RELEASE as a job output: the "env" context is not
           # available in job-level "if:" conditions or in
           # "jobs.<job_id>.container", so downstream jobs cannot reference
@@ -306,74 +264,18 @@ jobs:
           name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: modules-out/
 
-  # Build matching kernel Images remotely for the stock-only KMI test cases.
-  # Using the same DDK source/output as the module build keeps the Image's
-  # exported symbols, config, and kernel release aligned with the .ko.
-  build-test-kernel:
-    needs: [prepare]
-    if: ${{ needs.prepare.outputs.kernel_image_matrix != '[]' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        kmi: ${{ fromJson(needs.prepare.outputs.kernel_image_matrix) }}
-    container:
-      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ needs.prepare.outputs.ddk_release }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
 
-      - name: Build DDK-matched kernel Image for ${{ matrix.kmi }}
-        run: |
-          set -euxo pipefail
-          KMI='${{ matrix.kmi }}'
-          KDIR="/opt/ddk/kdir/$KMI"
-          KERNEL_SRC="/opt/ddk/src/$KMI"
-          test -s "$KDIR/.config"
-          test -s "$KDIR/Module.symvers"
-          grep -qw register_kprobe "$KDIR/Module.symvers"
-          echo "=== available memory ==="
-          free -h || true
-          for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events; do
-            if [ -r "$f" ]; then printf '%s: ' "$f"; tr '\n' ' ' < "$f"; echo; fi
-          done
-          LD_PATH="$(command -v ld.lld)"
-          printf '#!/bin/sh\nexec "%s" --threads=1 "$@"\n' "$LD_PATH" > "$RUNNER_TEMP/ld-serial"
-          chmod 755 "$RUNNER_TEMP/ld-serial"
-          "$RUNNER_TEMP/ld-serial" --version
-          make -C "$KERNEL_SRC" O="$KDIR" ARCH=arm64 LLVM=1 LD="$RUNNER_TEMP/ld-serial" Image -j2
-          IMAGE="$KDIR/arch/arm64/boot/Image"
-          test -s "$IMAGE"
-          output="Image.a${KMI#android}.patched"
-          cp "$IMAGE" "$GITHUB_WORKSPACE/$output"
-          file "$GITHUB_WORKSPACE/$output"
-          ls -lh "$GITHUB_WORKSPACE/$output"
-
-      - name: Upload DDK-matched kernel Image for ${{ matrix.kmi }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ddk-kernel-image-${{ matrix.kmi }}
-          path: Image.a*.patched
-
-
-  # Build a single injected (busybox) ramdisk carrying lkm4ctr.ko (if this
-  # KMI was actually built), lkm4ctr_checker and the merged init script,
-  # then boot-test every kernel Image available for this KMI in
-  # testsuitekernels.zip under QEMU against it plus the prebuilt
-  # image1.ext4 from testsuite.zip -- all in one job per KMI, since
-  # assembling this ramdisk no longer needs its own separate session (no
-  # more building image1.ext4, exporting an alpine tarball, or assembling a
-  # second ext4 image).
+  # Build one injected (busybox) ramdisk with the KMI's remotely built module
+  # when available, the checker, and the merged init script; boot the official
+  # Google GKI Image against the prebuilt image1.ext4 from testsuite.zip.
   #
   # Runs as its own matrix over needs.prepare.outputs.test_matrix (the KMI
-  # build matrix plus $TEST_ONLY_KMIS), independently of the full "build"
-  # matrix's overall pass/fail -- an individual KMI's lkm4ctr.ko download
-  # is allowed to fail (continue-on-error) so a KMI excluded from the build
-  # matrix still gets boot-tested bare, but the four stock-only module tests
-  # require their matching DDK-built kernel Images.
+  # build matrix plus $TEST_ONLY_KMIS). Every default KMI has a remote module
+  # build; reserved test-only KMIs still boot the same official image without
+  # a module.
   test:
-    needs: [prepare, build, build-checker, build-test-kernel]
-    if: ${{ !cancelled() && needs.build-checker.result == 'success' && (needs.build-test-kernel.result == 'success' || needs.build-test-kernel.result == 'skipped') }}
+    needs: [prepare, build, build-checker]
+    if: ${{ !cancelled() && needs.build-checker.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -390,7 +292,7 @@ jobs:
 
       - name: Compute short KMI name
         run: |
-          # testsuitekernels.zip shortens the "android" KMI prefix to "a"
+          # Use a short prefix for the downloaded Google GKI Image filename
           # (e.g. android14-6.1 -> a14-6.1).
           echo "SHORT_KMI=a${KMI#android}" >> "$GITHUB_ENV"
         env:
@@ -427,29 +329,50 @@ jobs:
           chmod +x testsuite/busybox
           ls -la testsuite
 
-      # --- 2. Fetch testsuitekernels.zip: extract only this KMI's kernel
-      #        Image(s) ("stock", and "patched" where bundled) ---
-      - name: Download and extract test kernels for ${{ matrix.kmi }}
+      - name: Download official Google GKI Image for ${{ matrix.kmi }}
+        env:
+          KMI: ${{ matrix.kmi }}
         run: |
-          set -e
-          curl -fL -o testsuitekernels.zip "$TESTSUITE_KERNELS_URL"
+          set -euo pipefail
+          case "$KMI" in
+            android12-5.10) BID=16466982; EXPECTED_BRANCH=aosp_kernel-common-android12-5.10-2025-09 ;; # android12-5.10-2025-09_r7
+            android13-5.10) BID=16466983; EXPECTED_BRANCH=aosp_kernel-common-android13-5.10-2026-07 ;; # android13-5.10-2026-07_r3
+            android13-5.15) BID=16466997; EXPECTED_BRANCH=aosp_kernel-common-android13-5.15-2025-07 ;; # android13-5.15-2025-07_r9
+            android14-5.15) BID=16498032; EXPECTED_BRANCH=aosp_kernel-common-android14-5.15-2026-10 ;; # android14-5.15-2026-10_r1
+            android14-6.1) BID=16466993; EXPECTED_BRANCH=aosp_kernel-common-android14-6.1-2025-09 ;; # android14-6.1-2025-09_r35
+            android15-6.6) BID=16467007; EXPECTED_BRANCH=aosp_kernel-common-android15-6.6-2025-09 ;; # android15-6.6-2025-09_r22
+            android16-6.12) BID=16541025; EXPECTED_BRANCH=aosp_kernel-common-android16-6.12-2026-09 ;; # android16-6.12-2026-09_r4
+            android17-6.18) BID=16554389; EXPECTED_BRANCH=aosp_kernel-common-android17-6.18-2026-09 ;; # android17-6.18-2026-09_r7
+            *) echo "No official GKI build ID configured for $KMI" >&2; exit 2 ;;
+          esac
+          BASE="https://ci.android.com/builds/submitted/$BID/kernel_aarch64/latest/raw"
           mkdir -p testkernels
-          unzip -o testsuitekernels.zip "Image.${SHORT_KMI}.*" -d testkernels
-          ls -la testkernels
+          curl -fsSL --retry 3 --retry-delay 2 "$BASE/BUILD_INFO" -o "$RUNNER_TEMP/gki-build-info.json"
+          python3 - "$RUNNER_TEMP/gki-build-info.json" "$EXPECTED_BRANCH" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as f:
+              info = json.load(f)
+          expected_branch = sys.argv[2]
+          target = info.get("target", {})
+          if info.get("branch") != expected_branch:
+              raise SystemExit(f"wrong GKI branch: {info.get('branch')!r}, expected {expected_branch!r}")
+          if target.get("name") != "kernel_aarch64" or target.get("target_status") != 1:
+              raise SystemExit(f"official kernel target is not successful: {target.get('name')!r}, status={target.get('target_status')!r}")
+          if "Image" not in target.get("dir_list", []):
+              raise SystemExit("official GKI build has no raw Image artifact")
+          PY
+          IMAGE="testkernels/Image.${SHORT_KMI}.official"
+          curl -fL --retry 3 --retry-delay 2 "$BASE/Image" -o "$IMAGE.part"
+          test -s "$IMAGE.part"
+          file "$IMAGE.part"
+          mv "$IMAGE.part" "$IMAGE"
+          ls -lh "$IMAGE"
 
-      - name: Download DDK-built module-test kernel for ${{ matrix.kmi }}
-        if: ${{ contains(fromJson(needs.prepare.outputs.kernel_image_matrix), matrix.kmi) }}
-        uses: actions/download-artifact@v8
-        with:
-          name: ddk-kernel-image-${{ matrix.kmi }}
-          path: testkernels/
-
-      # --- 3. injected ramdisk: lkm4ctr.ko (if built for this KMI) +
+      # --- 2. injected ramdisk: lkm4ctr.ko (built remotely for this KMI) +
       #        lkm4ctr_checker, /busybox (prebuilt, from testsuite.zip) and
       #        the merged qemu_test.sh (init mode), which mounts
       #        image1.ext4 (/dev/nvme0n1) and switch_root's into it. The host
-      #        launcher enables module testing only for *.patched images;
-      #        stock images remain module-free boot baselines. ---
+      #        launcher enables module testing for this official stock image. ---
       - name: Build injected (busybox) ramdisk
         run: |
           set -e
@@ -482,8 +405,8 @@ jobs:
           (cd injected-ramdisk && find . | cpio -o -H newc > "$GITHUB_WORKSPACE/injected-ramdisk.cpio")
           ls -la injected-ramdisk.cpio
 
-      # Patched images exercise the module and Docker/containerd path. Stock
-      # images are boot baselines and deliberately do not load this module.
+      # The official Google GKI Image exercises the module and
+      # Docker/containerd path for every KMI.
       - name: Boot ${{ matrix.kmi }} kernels under QEMU
         run: |
           set +e
@@ -497,11 +420,13 @@ jobs:
             echo "--- $name ---"
             # qemu_test.sh's shebang is #!/busybox sh (needed for its
             # ramdisk-init roles), so invoke the host-launcher mode via bash.
+            module_test=0
             if [ -f payload/lkm4ctr.ko ]; then
-              LKM4CTR_TEST_MODULE=auto bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+              module_test=1
             else
-              LKM4CTR_TEST_MODULE=0 bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+              echo "No matching module artifact for $name; running checker-only boot test"
             fi
+            LKM4CTR_TEST_MODULE="$module_test" bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
             rc=$?
             echo "launcher_rc=$rc"
             grep -E 'summary:|checker mode DONE|LKM4CTR_QEMU_TEST: DONE|QEMU exited with status|Kernel panic|Oops:|BUG:|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log" || true

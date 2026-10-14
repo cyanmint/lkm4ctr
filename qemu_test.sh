@@ -12,7 +12,7 @@ lkm4ctr_run_qemu_mode() {
 		0) MODULE_ARG=" lkm4ctr_test_module=0" ;;
 		*)
 			case "${KERNEL##*/}" in
-				*.patched) MODULE_ARG=" lkm4ctr_test_module=1" ;;
+				*.patched|*.official) MODULE_ARG=" lkm4ctr_test_module=1" ;;
 				*) MODULE_ARG=" lkm4ctr_test_module=0" ;;
 			esac
 			;;
@@ -245,14 +245,27 @@ lkm4ctr_init_2() {
 		echo "dockerd did not create /var/run/docker.sock"
 		exit 1
 	fi
+	if ! docker info; then
+		echo "dockerd is not responding to Docker API requests"
+		exit 1
+	fi
 
 	echo "=== LKM4CTR_QEMU_TEST: docker run (test container sanity) ==="
-	docker run --privileged --rm --network host --name alpine -i docker.io/arm64v8/alpine:latest init &
-	sleep 15
+	docker run --privileged --rm --network host --name alpine -d docker.io/arm64v8/alpine:latest init || exit 1
+	container_running=false
+	for i in $(seq 1 30); do
+		container_running="$(docker inspect -f '{{.State.Running}}' alpine 2>/dev/null || true)"
+		[ "$container_running" = true ] && break
+		sleep 1
+	done
+	if [ "$container_running" != true ]; then
+		echo "alpine test container did not reach running state"
+		exit 1
+	fi
 	docker exec -iu 0 alpine ps -e || exit 1
 	docker stop alpine || exit 1
 	docker run --privileged --rm --network host --name ubuntu -i docker.io/arm64v8/ubuntu:latest ps -e || exit 1
-	pkill -2 dockerd
+	pkill -2 dockerd || exit 1
 	sleep 15
 
 	echo "=== LKM4CTR_QEMU_TEST: DONE ==="
