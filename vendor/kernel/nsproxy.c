@@ -88,7 +88,7 @@ static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 static atomic_t vns_free_nsproxy_exit_hits = ATOMIC_INIT(0);
 #endif
-static atomic_t vns_exit_task_namespaces_intercepts = ATOMIC_INIT(0);
+static atomic_t vns_switch_task_namespaces_exit_hits = ATOMIC_INIT(0);
 
 struct vns_nsproxy_set_entry {
 	struct nsproxy *ns;
@@ -887,7 +887,7 @@ void vns_nsproxy_cache_init(void) /* [BUILD-COMPAT] */
 
 /*
  * [BUILD-COMPAT] vns_task_exit_cleanup() runs from the
- * exit_task_namespaces() replacement below, in the exiting task's normal
+ * switch_task_namespaces() replacement below, in the exiting task's normal
  * process context. vns_put_nsproxy()/vns_free_nsproxy() can reach
  * put_mnt_ns() -> namespace_unlock() -> synchronize_rcu_expedited(); keep
  * that potentially long mount/RCU teardown off the task-exit path by
@@ -943,9 +943,9 @@ static void vns_nsproxy_put_deferred(struct nsproxy *ns)
 /*
  * Hand off a vendored PID namespace's child reaper before native
  * exit_notify()->find_child_reaper() reaches the target kernel's CONFIG_PID_NS=n
- * zap_pid_ns_processes() BUG stub. free_nsproxy() is a fallback entry point:
- * the exit_task_namespaces() call can be inlined in some stock GKI builds,
- * while the native free_nsproxy() call remains hookable.
+ * zap_pid_ns_processes() BUG stub. The switch_task_namespaces() hook is the
+ * per-task entry point even when exit_task_namespaces() is inlined; the
+ * free_nsproxy() hook remains a fallback for paths that do not reach it.
  */
 static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
 {
@@ -979,9 +979,9 @@ static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
 
 /*
  * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
- * Runs from the exit_task_namespaces() shadow hook for each exiting task.
- * The free_nsproxy() hook invokes only the PID-reaper cleanup above as a
- * fallback when the exit_task_namespaces() call site is not intercepted.
+ * Runs from the switch_task_namespaces() shadow hook when an exiting task
+ * switches to NULL. The free_nsproxy() hook invokes only the PID-reaper
+ * cleanup above as a last fallback if the per-task switch hook is not hit.
  */
 void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 {
@@ -1005,10 +1005,11 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 	task_unlock(tsk);
 
 	/*
-	 * From here on, the real kernel's own exit_task_namespaces() will
-	 * only ever see &vns_init_nsproxy (pinned, never slab-allocated) on
-	 * this task, and will never call kmem_cache_free() against a
-	 * module-owned object. Tear the vendored object down through
+	 * From here on, the native switch_task_namespaces() call will only
+	 * see &vns_init_nsproxy (pinned, never slab-allocated) on this task,
+	 * so native free_nsproxy() will not receive a module-owned object and
+	 * call kmem_cache_free() against the wrong cache. Tear the vendored
+	 * object down through
 	 * vendor_kernel's own self-contained free path, deferred to process
 	 * context (see the atomic-context comment above this function).
 	 */
@@ -1017,8 +1018,8 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 
 /*
  * As a final ownership boundary, route native free_nsproxy() calls for
- * tracked vendored objects through the vendored destructor. The earlier
- * exit_task_namespaces() hook normally swaps these objects out first, but
+ * tracked vendored objects through the vendored destructor. The
+ * switch_task_namespaces() hook normally swaps these objects out first, but
  * stock GKI exit paths can still reach native free_nsproxy() with a
  * module-owned nsproxy; the native destructor would free its child objects
  * through the wrong slab caches.
@@ -1067,71 +1068,50 @@ static struct shadow_hook vns_free_nsproxy_shadow_hook =
 		    &vns_real_free_nsproxy_fn);
 
 /*
- * [BUILD-COMPAT] Interpose on exit_task_namespaces(), not do_exit(). The
- * latter is __noreturn and was being probed directly with a pre_handler that
- * ran cleanup inside kprobe context; on an Android 6.1.138 stock image this
- * path panicked with an arm64 BRK #0x6 at do_exit+4 during task exit. The
- * namespace hook is a returning function, so the normal shadow-hook
- * kretprobe can release its rmmod-safety module reference after the wrapper
- * calls the original function. This also keeps cleanup immediately before
- * the kernel's native nsproxy teardown and child-reaper processing.
+ * The kernel's exit_task_namespaces() delegates to switch_task_namespaces(p,
+ * NULL). Unlike free_nsproxy(), this path runs even when p's nsproxy is still
+ * shared and its refcount therefore does not reach zero. Hooking this native
+ * boundary runs the complete task-exit cleanup once, before exit_notify().
  */
-static void (*vns_real_exit_task_namespaces)(struct task_struct *);
+static void (*vns_real_switch_task_namespaces)(struct task_struct *,
+						      struct nsproxy *);
 
-static const char * const vns_exit_task_namespaces_names[] = {
-	"exit_task_namespaces", NULL,
+static const char * const vns_switch_task_namespaces_names[] = {
+	"switch_task_namespaces", NULL,
 };
 
-/*
- * KMI kernels can assign a different CFI type hash to the same private
- * exit_task_namespaces() prototype. The resolved target is therefore called
- * through this narrow __nocfi wrapper; keep the replacement hook itself
- * CFI-instrumented so it remains a valid kernel callback target.
- */
-static void __nocfi vns_call_real_exit_task_namespaces(struct task_struct *tsk)
+static void __nocfi vns_call_real_switch_task_namespaces(
+	struct task_struct *p, struct nsproxy *new)
 {
-	vns_real_exit_task_namespaces(tsk);
+	vns_real_switch_task_namespaces(p, new);
 }
 
-static void vns_exit_task_namespaces_hook(struct task_struct *tsk)
+static void vns_switch_task_namespaces_hook(struct task_struct *p,
+					    struct nsproxy *new)
 {
-	int hit = atomic_inc_return(&vns_exit_task_namespaces_intercepts);
+	if (!new && (READ_ONCE(p->flags) & PF_EXITING)) {
+		struct pid_namespace *pid_ns = task_active_pid_ns(p);
+		bool is_child_reaper = pid_ns &&
+			READ_ONCE(pid_ns->child_reaper) == p;
+		int hit = atomic_inc_return(&vns_switch_task_namespaces_exit_hits);
 
-	if (hit <= 8) {
-		struct nsproxy *ns = READ_ONCE(tsk->nsproxy);
-		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
+		if (hit <= 8 || is_child_reaper)
+			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+				     "[DEBUG-KMI-EXIT] switch_task_namespaces exit #%d pid=%d comm=%s tracked_nsproxy=%d pid_ns=%p child_reaper=%d",
+				     hit, task_pid_nr(p), p->comm,
+				     vns_nsproxy_set_contains(READ_ONCE(p->nsproxy)),
+				     pid_ns, is_child_reaper);
 
-		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-			     "[DEBUG-KMI-EXIT] exit hook pre #%d pid=%d comm=%s tracked_nsproxy=%d pid_ns=%s child_reaper=%d",
-			     hit, task_pid_nr(tsk), tsk->comm,
-			     vns_nsproxy_set_contains(ns),
-			     !pid_ns ? "NULL" :
-			     pid_ns == &init_pid_ns ? "init" : "non-init",
-			     pid_ns && pid_ns->child_reaper == tsk);
+		vns_task_exit_cleanup(p);
 	}
 
-	vns_task_exit_cleanup(tsk);
-
-	if (hit <= 8) {
-		struct nsproxy *ns = READ_ONCE(tsk->nsproxy);
-		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
-
-		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-			     "[DEBUG-KMI-EXIT] exit hook post #%d pid=%d comm=%s tracked_nsproxy=%d pid_ns=%s child_reaper=%d",
-			     hit, task_pid_nr(tsk), tsk->comm,
-			     vns_nsproxy_set_contains(ns),
-			     !pid_ns ? "NULL" :
-			     pid_ns == &init_pid_ns ? "init" : "non-init",
-			     pid_ns && pid_ns->child_reaper == tsk);
-	}
-
-	vns_call_real_exit_task_namespaces(tsk);
+	vns_call_real_switch_task_namespaces(p, new);
 }
 
-static struct shadow_hook vns_exit_task_namespaces_shadow_hook =
-	SHADOW_HOOK(vns_exit_task_namespaces_names,
-		    vns_exit_task_namespaces_hook,
-		    &vns_real_exit_task_namespaces);
+static struct shadow_hook vns_switch_task_namespaces_shadow_hook =
+	SHADOW_HOOK(vns_switch_task_namespaces_names,
+		    vns_switch_task_namespaces_hook,
+		    &vns_real_switch_task_namespaces);
 
 int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 {
@@ -1145,22 +1125,23 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 		return ret;
 	}
 
-	ret = shadow_hook_install(&vns_exit_task_namespaces_shadow_hook);
+	ret = shadow_hook_install(&vns_switch_task_namespaces_shadow_hook);
 	if (ret) {
 		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
-			    "[DEBUG-KMI-EXIT] exit_task_namespaces hook install failed: %d",
+			    "[DEBUG-KMI-EXIT] switch_task_namespaces hook install failed: %d",
 			    ret);
 		shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
-	} else {
-		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-			     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
+		return ret;
 	}
 
-	return ret;
+	LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+		     "[DEBUG-KMI-EXIT] free_nsproxy and switch_task_namespaces hooks installed");
+
+	return 0;
 }
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
-	shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
+	shadow_hook_remove(&vns_switch_task_namespaces_shadow_hook);
 	shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
 }

@@ -339,11 +339,11 @@ void vns_zap_pid_ns_processes(struct pid_namespace *pid_ns) /* [RENAME] */
 	/*
 	 * [BUILD-COMPAT] The real zap_pid_ns_processes() (kernel/pid_namespace.c)
 	 * also blocks in a kernel_wait4() loop to reap every zombie left
-	 * behind, which requires sleeping and therefore cannot run from
-	 * vns_task_exit_cleanup()'s do_exit() kprobe pre_handler (atomic
-	 * context; see the comment there). Only the safe, non-blocking half
-	 * of the real cascade is reproduced here -- SIGKILL every other task
-	 * this namespace's idr still tracks, then stop admitting new members.
+	 * behind. This helper runs before native exit_notify()/reparenting,
+	 * so waiting for children here would disrupt the host's own exit path.
+	 * Only the safe, non-blocking half of the real cascade is reproduced:
+	 * SIGKILL every other task this namespace's idr still tracks, then stop
+	 * admitting new members.
 	 * Orphan reparenting/reaping is deliberately left to the host's own
 	 * genuine parent chain.
 	 */

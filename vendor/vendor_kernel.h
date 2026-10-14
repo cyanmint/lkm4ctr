@@ -349,17 +349,14 @@ void vns_exit_task_namespaces(struct task_struct *p);
 long vns_sys_setns(int fd, int flags);
 void vns_nsproxy_cache_init(void);
 /*
- * vns_task_exit_cleanup() - called from the do_exit() shadow_hook
- * (glue/vendor_kernel_syscalls.c) for every exiting task, before the real
- * do_exit() body runs. If @tsk->nsproxy is currently one of vendor_kernel's
- * own module-owned objects (tracked in vns_nsproxy_set, kernel/nsproxy.c),
- * swaps it back onto the pinned vns_init_nsproxy singleton and tears the
- * real vendored object down entirely through vendor_kernel's own
- * self-contained free path (vns_put_nsproxy()/vns_free_nsproxy()), so the
- * real kernel's own exit_task_namespaces()/free_nsproxy() never sees a
- * module-owned object and can never attempt to kmem_cache_free() it
- * against a real, mismatched kmem_cache. A no-op for any task that never
- * had a vendor_kernel namespace installed.
+ * vns_task_exit_cleanup() - called from the switch_task_namespaces() shadow
+ * hook (kernel/nsproxy.c) for each exiting task switching to NULL, before
+ * the native task namespace switch and exit_notify(). It performs applicable
+ * PID/IPC cleanup. If @tsk->nsproxy is one of vendor_kernel's tracked,
+ * module-owned objects (vns_nsproxy_set in kernel/nsproxy.c), it swaps the
+ * task to the pinned vns_init_nsproxy singleton and tears the vendored object
+ * down through vns_put_nsproxy()/vns_free_nsproxy(), preventing native
+ * free_nsproxy() from freeing that object through the wrong slab cache.
  */
 void vns_task_exit_cleanup(struct task_struct *tsk);
 int vns_exit_hook_init(void);
@@ -368,7 +365,8 @@ void vns_exit_hook_exit(void);
  * vns_nsproxy_deferred_flush() - waits for every nsproxy teardown deferred
  * by vns_task_exit_cleanup() (kernel/nsproxy.c) to finish. Must be called
  * from vendor_kernel_exit() strictly after vns_exit_hook_exit() has
- * unregistered the do_exit() kprobe (so no further work can be queued),
+ * unregistered the switch_task_namespaces()/free_nsproxy() hooks (so no
+ * further work can be queued),
  * and before the module image can be unloaded, or a still-pending
  * workqueue callback would execute code that has already been unmapped.
  */
