@@ -2377,7 +2377,7 @@ static int __nocfi lkm4ctr_diagfs_drop_inode(struct inode *inode)
 }
 
 static const struct super_operations lkm4ctr_diagfs_super_ops = {
-	.statfs		= simple_statfs,
+	.statfs		= lkm4ctr_simple_statfs,
 	.drop_inode	= lkm4ctr_diagfs_drop_inode,
 	.evict_inode	= lkm4ctr_diagfs_evict_inode,
 };

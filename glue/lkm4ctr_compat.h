@@ -21,9 +21,12 @@
 
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/kdev_t.h>
+#include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/namei.h>
+#include <linux/statfs.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 #include <linux/mnt_idmapping.h>
@@ -72,7 +75,13 @@ static inline void __noreturn lkm4ctr_module_put_and_exit(long code)
  * fields directly). Used by lkm4ctr_diagfs.c's inode allocation helper.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-#define lkm4ctr_inode_init_ts(inode) simple_inode_init_ts(inode)
+#define lkm4ctr_inode_init_ts(inode) \
+	do { \
+		struct timespec64 _ts = current_time(inode); \
+		inode_set_atime_to_ts((inode), _ts); \
+		inode_set_mtime_to_ts((inode), _ts); \
+		inode_set_ctime_to_ts((inode), _ts); \
+	} while (0)
 #define lkm4ctr_inode_update_ts(inode)					\
 	do {								\
 		struct timespec64 _ts = current_time(inode);		\
@@ -85,6 +94,24 @@ static inline void __noreturn lkm4ctr_module_put_and_exit(long code)
 	((inode)->i_atime = (inode)->i_mtime = (inode)->i_ctime = current_time(inode))
 #define lkm4ctr_inode_update_ts(inode) lkm4ctr_inode_init_ts(inode)
 #endif
+
+/*
+ * Keep the simple filesystem statfs behavior local: recent GKI builds may
+ * restrict or trim the kernel's simple_statfs export from external modules.
+ */
+static inline int lkm4ctr_simple_statfs(struct dentry *dentry,
+					struct kstatfs *buf)
+{
+	struct super_block *sb = dentry->d_sb;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	buf->f_fsid = u64_to_fsid(huge_encode_dev(sb->s_dev));
+#endif
+	buf->f_type = sb->s_magic;
+	buf->f_bsize = PAGE_SIZE;
+	buf->f_namelen = NAME_MAX;
+	return 0;
+}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static inline int lkm4ctr_inode_permission(struct inode *inode, int mask)

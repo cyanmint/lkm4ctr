@@ -175,7 +175,14 @@ __nocfi static struct file *ovl_open_realfile(const struct file *file,
 		if (!inode_owner_or_capable(real_idmap, realinode))
 			flags &= ~O_NOATIME;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+		const struct path *user_path = &file->f_path;
+
+		if (unlikely(file->f_mode & FMODE_BACKING))
+			user_path = backing_file_user_path((struct file *)file);
+		realfile = backing_file_open(user_path, flags, realpath,
+					     current_cred());
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 		realfile = backing_file_open(file_user_path((struct file *) file),
 					     flags, realpath, current_cred());
 #else

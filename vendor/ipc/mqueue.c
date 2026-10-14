@@ -1717,7 +1717,7 @@ static const struct super_operations mqueue_super_ops = {
 	.alloc_inode = mqueue_alloc_inode,
 	.free_inode = mqueue_free_inode,
 	.evict_inode = mqueue_evict_inode,
-	.statfs = simple_statfs,
+	.statfs = lkm4ctr_simple_statfs,
 };
 
 static const struct fs_context_operations mqueue_fs_context_ops = {

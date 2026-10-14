@@ -142,6 +142,7 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_HAVE_BACKING_FILE_OPEN (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
+#define VNS_OVL_HAVE_BACKING_FILE_USER_PATH (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0))
 
 /* Linux 6.18 changed backing_file_ctx (dropping user_file and changing
  * end_write to take a kiocb) and changed backing_file_splice_{read,write}
@@ -172,6 +173,11 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_VFSC_BFOPEN_ENTRY(X) X(backing_file_open)
 #else
 #define VNS_OVL_VFSC_BFOPEN_ENTRY(X)
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_USER_PATH
+#define VNS_OVL_VFSC_BFUSERPATH_ENTRY(X) X(backing_file_user_path)
+#else
+#define VNS_OVL_VFSC_BFUSERPATH_ENTRY(X)
 #endif
 #if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
 #define VNS_OVL_VFSC_VPMSEP_ENTRY(X) X(vfs_parse_monolithic_sep)
@@ -534,7 +540,8 @@ static inline void generic_fill_statx_attr(struct inode *inode, struct kstat *st
 	X(backing_file_write_iter) \
 	X(backing_file_splice_read) \
 	X(backing_file_splice_write) \
-	X(backing_file_mmap)
+	X(backing_file_mmap) \
+	VNS_OVL_VFSC_BFUSERPATH_ENTRY(X)
 #else
 #define VNS_OVL_VFS_COMPAT_LIST_BF(X) \
 	X(vfs_iter_read) \
@@ -840,6 +847,9 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
 #endif
 #if VNS_OVL_HAVE_BACKING_FILE_OPEN
 #define backing_file_open (*vns_ovl_vfsc_backing_file_open)
+#endif
+#if VNS_OVL_HAVE_BACKING_FILE_USER_PATH
+#define backing_file_user_path (*vns_ovl_vfsc_backing_file_user_path)
 #endif
 #if VNS_OVL_HAVE_VFS_PARSE_MONOLITHIC_SEP
 #define vfs_parse_monolithic_sep (*vns_ovl_vfsc_vfs_parse_monolithic_sep)
