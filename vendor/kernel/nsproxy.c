@@ -85,6 +85,10 @@ extern struct time_namespace vns_init_time_ns;
 static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
 static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
 static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+static atomic_t vns_free_nsproxy_exit_hits = ATOMIC_INIT(0);
+#endif
 static atomic_t vns_exit_task_namespaces_intercepts = ATOMIC_INIT(0);
 
 struct vns_nsproxy_set_entry {
@@ -1020,6 +1024,23 @@ static const char * const vns_free_nsproxy_names[] = {
 
 static void vns_free_nsproxy_hook(struct nsproxy *ns)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+	if (current->flags & PF_EXITING) {
+		struct pid_namespace *pid_ns = task_active_pid_ns(current);
+		bool is_child_reaper = pid_ns &&
+			READ_ONCE(pid_ns->child_reaper) == current;
+		int hit = atomic_inc_return(&vns_free_nsproxy_exit_hits);
+
+		if (hit <= 8 || is_child_reaper)
+			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+				     "[DEBUG-KMI-EXIT] free_nsproxy exit #%d pid=%d comm=%s nsproxy=%p tracked=%d pid_ns=%p child_reaper=%d",
+				     hit, task_pid_nr(current), current->comm, ns,
+				     vns_nsproxy_set_contains(ns), pid_ns,
+				     is_child_reaper);
+	}
+#endif
+
 	if (vns_nsproxy_set_contains(ns)) {
 		if (atomic_inc_return(&vns_free_nsproxy_intercepts) == 1)
 			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
@@ -1105,55 +1126,9 @@ static struct shadow_hook vns_exit_task_namespaces_shadow_hook =
 		    vns_exit_task_namespaces_hook,
 		    &vns_real_exit_task_namespaces);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
-/* Diagnostic-only: verify a returning pre-reaper hook on affected 5.15 KMIs. */
-static void (*vns_real_exit_notify)(struct task_struct *, int);
-static bool vns_exit_notify_diagnostic_installed;
-static atomic_t vns_exit_notify_diagnostic_hits = ATOMIC_INIT(0);
-
-static const char * const vns_exit_notify_names[] = {
-	"exit_notify", NULL,
-};
-
-static void __nocfi vns_call_real_exit_notify(struct task_struct *tsk,
-					      int group_dead)
-{
-	vns_real_exit_notify(tsk, group_dead);
-}
-
-static void vns_exit_notify_diagnostic_hook(struct task_struct *tsk,
-					    int group_dead)
-{
-	struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
-	bool is_child_reaper = pid_ns && READ_ONCE(pid_ns->child_reaper) == tsk;
-	int hit;
-
-	if (!pid_ns || pid_ns != &init_pid_ns || is_child_reaper) {
-		hit = atomic_inc_return(&vns_exit_notify_diagnostic_hits);
-		if (hit <= 8 || is_child_reaper)
-			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-				     "[DEBUG-KMI-EXIT] exit_notify pre #%d pid=%d comm=%s pid_ns=%p child_reaper=%d group_dead=%d",
-				     hit, task_pid_nr(tsk), tsk->comm, pid_ns,
-				     is_child_reaper, group_dead);
-	}
-
-	vns_call_real_exit_notify(tsk, group_dead);
-}
-
-static struct shadow_hook vns_exit_notify_diagnostic_shadow_hook =
-	SHADOW_HOOK(vns_exit_notify_names,
-		    vns_exit_notify_diagnostic_hook,
-		    &vns_real_exit_notify);
-#endif
-
 int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 {
 	int ret;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
-	int diagnostic_ret;
-#endif
 
 	ret = shadow_hook_install(&vns_free_nsproxy_shadow_hook);
 	if (ret) {
@@ -1174,35 +1149,11 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 			     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
-	if (!ret) {
-		diagnostic_ret = shadow_hook_install(
-			&vns_exit_notify_diagnostic_shadow_hook);
-		if (diagnostic_ret) {
-			LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-				     "[DEBUG-KMI-EXIT] exit_notify diagnostic hook install failed: %d",
-				     diagnostic_ret);
-		} else {
-			vns_exit_notify_diagnostic_installed = true;
-			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-				     "[DEBUG-KMI-EXIT] exit_notify diagnostic hook installed");
-		}
-	}
-#endif
-
 	return ret;
 }
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
-	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
-	if (vns_exit_notify_diagnostic_installed) {
-		shadow_hook_remove(&vns_exit_notify_diagnostic_shadow_hook);
-		vns_exit_notify_diagnostic_installed = false;
-	}
-#endif
 	shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
 	shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
 }
