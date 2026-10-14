@@ -177,7 +177,10 @@ typedef struct file *(*shmem_kernel_file_setup_fn_t)(const char *, loff_t,
 	unsigned long);
 typedef int (*mnt_want_write_fn_t)(struct vfsmount *);
 typedef struct dentry *(*lookup_one_len_fn_t)(const char *, struct dentry *, int);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+typedef struct dentry *(*lookup_one_fn_t)(struct mnt_idmap *, struct qstr *,
+	struct dentry *);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 typedef struct dentry *(*lookup_one_fn_t)(struct mnt_idmap *, const char *,
 	struct dentry *, int);
 #endif
@@ -625,6 +628,11 @@ int mnt_want_write(struct vfsmount *mnt)
 	return -ENOSYS;
 }
 
+/* lookup_one_len is also supplied by this object on kernels where the
+ * in-tree declaration is absent; keep its real-name wrapper prototyped for
+ * toolchains enabling -Wmissing-prototypes. */
+struct dentry *lookup_one_len(const char *name, struct dentry *base, int len);
+
 struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
 {
 	if (r_lookup_one_len)
@@ -644,11 +652,21 @@ struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
  * real name, forwarding to the kallsyms-resolved pointer, exactly like
  * inode_permission()/vfs_unlink() below.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+struct dentry *lookup_one(struct mnt_idmap *idmap, struct qstr *name,
+			  struct dentry *base)
+#else
 struct dentry *lookup_one(struct mnt_idmap *idmap, const char *name,
 			  struct dentry *base, int len)
+#endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	if (r_lookup_one)
+		return r_lookup_one(idmap, name, base);
+#else
 	if (r_lookup_one)
 		return r_lookup_one(idmap, name, base, len);
+#endif
 	return ERR_PTR(-ENOSYS);
 }
 #endif

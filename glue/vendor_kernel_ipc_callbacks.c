@@ -69,6 +69,11 @@ static sec_msg_queue_associate_fn_t r_sec_msg_queue_associate;
 static sec_sem_associate_fn_t r_sec_sem_associate;
 static sec_shm_associate_fn_t r_sec_shm_associate;
 
+void vns_ipc_lookup_resolve(void);
+int __nocfi security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg);
+int __nocfi security_sem_associate(struct kern_ipc_perm *sma, int semflg);
+int __nocfi security_shm_associate(struct kern_ipc_perm *shp, int shmflg);
+
 /*
  * Resolve these symbols at init time. Called from vendor_kernel_init()
  * alongside vns_ipc_compat_resolve() (glue/vendor_kernel_ipc_compat.c),
