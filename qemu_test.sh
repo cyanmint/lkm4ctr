@@ -7,6 +7,11 @@ lkm4ctr_run_qemu_mode() {
 	KERNEL="$2"
 	INIT="$3"
 	RAMDISK="${4:-}"
+	MODULE_ARG=""
+	case "${KERNEL##*/}" in
+		*.patched) MODULE_ARG=" lkm4ctr_test_module=1" ;;
+		*) MODULE_ARG=" lkm4ctr_test_module=0" ;;
+	esac
 
 	mkdir -p qemu-logs
 
@@ -20,7 +25,7 @@ lkm4ctr_run_qemu_mode() {
 			-M virt -cpu max -m 2G -smp 2 -nographic -no-reboot \
 			-kernel "$KERNEL" \
 			-initrd "$RAMDISK" \
-			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1"
+			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG"
 	elif [ -n "$RAMDISK" ]; then
 		echo "=== booting kernel: $KERNEL (ramdisk=$RAMDISK, rdinit=$INIT) ==="
 		set -- \
@@ -30,7 +35,7 @@ lkm4ctr_run_qemu_mode() {
 			-device qemu-xhci,id=usb0 \
 			-drive file="$IMAGE1",if=none,format=raw,id=usb1 \
 			-device usb-storage,bus=usb0.0,drive=usb1,id=disk1 \
-			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1"
+			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG"
 	else
 		echo "=== booting kernel: $KERNEL (no ramdisk, init=$INIT) ==="
 		set -- \
@@ -38,12 +43,21 @@ lkm4ctr_run_qemu_mode() {
 			-kernel "$KERNEL" \
 			-drive file="$IMAGE1",if=none,id=image1,format=raw \
 			-device nvme,serial=11451401,drive=image1 \
-			-append "console=ttyAMA0 root=/dev/nvme0n1 init=$INIT earlycon panic=-1"
+			-append "console=ttyAMA0 root=/dev/nvme0n1 init=$INIT earlycon panic=-1$MODULE_ARG"
 	fi
 
 	timeout --signal=KILL 120 qemu-system-aarch64 "$@" 2>&1
 	status=$?
 	echo "QEMU exited with status $status"
+}
+
+lkm4ctr_module_test_enabled() {
+	module_cmdline="$(cat /proc/cmdline 2>/dev/null)" || return 2
+	case " $module_cmdline " in
+		*" lkm4ctr_test_module=1 "*) return 0 ;;
+		*" lkm4ctr_test_module=0 "*) return 1 ;;
+	esac
+	return 2
 }
 
 lkm4ctr_run_checker_mode() {
@@ -55,17 +69,35 @@ lkm4ctr_run_checker_mode() {
 	# loaded QEMU VM, without hanging the whole boot test indefinitely if
 	# it never does.
 	SAFE_UNLOAD_TIMEOUT_SEC=30
+	if [ "$MODULE" = "-" ]; then
+		echo "=== LKM4CTR_QEMU_TEST: checker (stock baseline; module intentionally omitted) ==="
+		"$CHECKER" || true
+		echo "=== LKM4CTR_QEMU_TEST: checker mode DONE (no module) ==="
+		return 0
+	fi
+
 	echo "=== LKM4CTR_QEMU_TEST: lkm4ctr_checker (pre-insmod) ==="
-	"$CHECKER"
+	"$CHECKER" || true
 	echo "=== LKM4CTR_QEMU_TEST: inserting merged module ==="
-	insmod "$MODULE"
+	if ! insmod "$MODULE"; then
+		echo "lkm4ctr.ko failed to load"
+		return 1
+	fi
 	echo "=== LKM4CTR_QEMU_TEST: mounting lkm4ctr diagfs ==="
 	mkdir -p "$MNT"
-	mount -t lkm4ctr diag "$MNT"
-	cat "$MNT/v/resources"
-	cat "$MNT/log"
+	if ! mount -t lkm4ctr diag "$MNT"; then
+		echo "failed to mount lkm4ctr diagfs"
+		return 1
+	fi
+	cat "$MNT/v/resources" || return 1
+	cat "$MNT/log" || return 1
 	echo "=== LKM4CTR_QEMU_TEST: lkm4ctr_checker (post-insmod) ==="
 	"$CHECKER"
+	checker_status=$?
+	if [ "$checker_status" -ne 0 ]; then
+		echo "post-insmod checker reported failures"
+		return "$checker_status"
+	fi
 	echo "=== LKM4CTR_QEMU_TEST: checker mode DONE ==="
 }
 
@@ -75,6 +107,12 @@ lkm4ctr_init_1() {
 	mkdir -p /sys /dev /newroot /proc
 	/busybox mount -t sysfs sysfs /sys
 	/busybox mount -t proc proc /proc
+	lkm4ctr_module_test_enabled
+	module_test_status=$?
+	if [ "$module_test_status" -gt 1 ]; then
+		echo "missing or unreadable lkm4ctr_test_module boot argument"
+		return 1
+	fi
 	/busybox mdev -s
 	echo "=== LKM4CTR_QEMU_TEST: stage1 (initramfs) ==="
 
@@ -82,7 +120,13 @@ lkm4ctr_init_1() {
 		echo "=== LKM4CTR_QEMU_TEST: nvme available, proceeding to stage 2 ==="
 
 		cp /lkm4ctr_checker /newroot/
-		cp /lkm4ctr.ko /newroot/
+		if [ "$module_test_status" -eq 0 ]; then
+			if [ ! -f /lkm4ctr.ko ]; then
+				echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+				return 1
+			fi
+			cp /lkm4ctr.ko /newroot/ || return 1
+		fi
 		cat /init > /newroot/second_init
 		chmod 755 /newroot/second_init
 
@@ -98,7 +142,13 @@ lkm4ctr_init_1() {
 		echo "=== LKM4CTR_QEMU_TEST: sda available, proceeding to stage 2 ==="
 
 		cp /lkm4ctr_checker /newroot/
-		cp /lkm4ctr.ko /newroot/
+		if [ "$module_test_status" -eq 0 ]; then
+			if [ ! -f /lkm4ctr.ko ]; then
+				echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+				return 1
+			fi
+			cp /lkm4ctr.ko /newroot/ || return 1
+		fi
 		cat /init > /newroot/second_init
 		chmod 755 /newroot/second_init
 
@@ -113,7 +163,11 @@ lkm4ctr_init_1() {
 	fi
 
 	echo "=== LKM4CTR_QEMU_TEST: no nvme device, running LIGHT MODE checker directly ==="
-	/busybox sh /init -t /lkm4ctr_checker /lkm4ctr.ko
+	if [ "$module_test_status" -eq 0 ]; then
+		/busybox sh /init -t /lkm4ctr_checker /lkm4ctr.ko
+	else
+		/busybox sh /init -t /lkm4ctr_checker -
+	fi
 }
 
 lkm4ctr_init_2() {
@@ -138,6 +192,12 @@ lkm4ctr_init_2() {
 	# image1.ext4's userland (dockerd/containerd/runc) expects at runtime.
 	source /do-mounts.sh
 	PATH=/:$PATH
+	lkm4ctr_module_test_enabled
+	module_test_status=$?
+	if [ "$module_test_status" -gt 1 ]; then
+		echo "missing or unreadable lkm4ctr_test_module boot argument"
+		exit 1
+	fi
 
 	busybox mdev -s
 	ifconfig lo up
@@ -146,7 +206,19 @@ lkm4ctr_init_2() {
 	chmod 755 /lkm4ctr_checker
 
 	echo "=== LKM4CTR_QEMU_TEST: running shared checker mode ==="
-	/system/bin/sh /second_init -t /lkm4ctr_checker /lkm4ctr.ko
+	if [ "$module_test_status" -eq 0 ]; then
+		if [ ! -f /lkm4ctr.ko ]; then
+			echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+			exit 1
+		fi
+		/system/bin/sh /second_init -t /lkm4ctr_checker /lkm4ctr.ko || exit 1
+	else
+		/system/bin/sh /second_init -t /lkm4ctr_checker - || exit 1
+		echo "=== LKM4CTR_QEMU_TEST: stock baseline; skipping module and container-runtime tests ==="
+		echo "=== LKM4CTR_QEMU_TEST: DONE ==="
+		source /do-umounts.sh
+		return 0
+	fi
 
 	# vendor_kernel's ipc/mqueue.c now registers its POSIX mqueue filesystem
 	# type under the real name "mqueue" (see mqueue_fs_type in
@@ -164,13 +236,17 @@ lkm4ctr_init_2() {
 		[ -S /var/run/docker.sock ] && break
 		sleep 1
 	done
+	if [ ! -S /var/run/docker.sock ]; then
+		echo "dockerd did not create /var/run/docker.sock"
+		exit 1
+	fi
 
 	echo "=== LKM4CTR_QEMU_TEST: docker run (test container sanity) ==="
 	docker run --privileged --rm --network host --name alpine -i docker.io/arm64v8/alpine:latest init &
 	sleep 15
-	docker exec -iu 0 alpine ps -e
-	docker stop alpine
-	docker run --privileged --rm --network host --name ubuntu -i docker.io/arm64v8/ubuntu:latest ps -e
+	docker exec -iu 0 alpine ps -e || exit 1
+	docker stop alpine || exit 1
+	docker run --privileged --rm --network host --name ubuntu -i docker.io/arm64v8/ubuntu:latest ps -e || exit 1
 	pkill -2 dockerd
 	sleep 15
 
@@ -195,7 +271,7 @@ if [ "$$" != "1" ]; then
 			exit 2
 		else
 			lkm4ctr_run_checker_mode "$2" "$3"
-			exit 0
+			exit $?
 		fi
 	else
 		if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then

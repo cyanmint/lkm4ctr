@@ -78,17 +78,14 @@
 #     off from a cpio-based initramfs to a real block-device root. Since
 #     /second_init's argv[0] is no longer "init", the very same script now
 #     runs its stage-2 body instead of stage-1.
-# The stage-2 body (running as PID 1 of the real root, image1.ext4) then:
-# populates /dev again (switch_root does not preserve the initramfs's
-# un-mounted /dev contents, so mdev must repopulate it), runs
-# lkm4ctr_checker, insmods lkm4ctr.ko (if present -- a KMI with no build,
-# see $TEST_ONLY_KMIS below, simply skips this and continues as a pure
-# boot/dockerd sanity check), runs lkm4ctr_checker again, starts a real
-# dockerd in the background, `docker run --privileged --rm --network host
-# -it`s the alpine/ubuntu images already sitting at the root of
-# image1.ext4, and finally returns to a shell -- i.e. an actual dockerd
-# running under the lkm4ctr-patched kernel, not just a checker binary
-# observing raw syscalls.
+# The stage-2 body (running as PID 1 of the real root, image1.ext4) populates
+# /dev again (switch_root does not preserve the initramfs's un-mounted /dev
+# contents, so mdev must repopulate it) and runs lkm4ctr_checker. Stock images
+# are boot baselines: they do not load the module or run container-runtime
+# tests. For a `.patched` image with a built module, stage 2 insmods
+# lkm4ctr.ko, runs the checker again, starts dockerd, and runs the alpine and
+# ubuntu images already present in image1.ext4. Test-only KMIs (see
+# $TEST_ONLY_KMIS below) likewise remain bare boot/checker tests.
 #
 # Within one KMI's job, every kernel Image available for that KMI (stock,
 # and patched if bundled) is booted sequentially, so QEMU is installed and
@@ -385,7 +382,9 @@ jobs:
       # --- 3. injected ramdisk: lkm4ctr.ko (if built for this KMI) +
       #        lkm4ctr_checker, /busybox (prebuilt, from testsuite.zip) and
       #        the merged qemu_test.sh (init mode), which mounts
-      #        image1.ext4 (/dev/nvme0n1) and switch_root's into it ---
+      #        image1.ext4 (/dev/nvme0n1) and switch_root's into it. The
+      #        host launcher enables module loading only for *.patched images;
+      #        stock images remain module-free boot baselines. ---
       - name: Build injected (busybox) ramdisk
         run: |
           set -e
@@ -418,25 +417,43 @@ jobs:
           (cd injected-ramdisk && find . | cpio -o -H newc > "$GITHUB_WORKSPACE/injected-ramdisk.cpio")
           ls -la injected-ramdisk.cpio
 
-      # A generous per-kernel timeout: starting dockerd + docker import + a
-      # real `docker run` takes noticeably longer than a plain
-      # insmod+checker smoke test.
+      # Patched images exercise the module and Docker/containerd path. Stock
+      # images are boot baselines and deliberately do not load this module.
       - name: Boot ${{ matrix.kmi }} kernels under QEMU
         run: |
-          # GitHub Actions runs step "run:" blocks with `bash -e`, so a
-          # nonzero exit from qemu_test.sh (e.g. a kernel panic/timeout)
-          # would otherwise abort this loop before the remaining kernels
-          # are booted; "set +e" keeps every available kernel running
-          # regardless of any individual failure.
           set +e
-          # qemu_test.sh's shebang is #!/busybox sh (needed for its
-          # ramdisk-init roles above), so it must be invoked explicitly as
-          # "bash qemu_test.sh ..." here rather than "./qemu_test.sh ...",
-          # which would honor that shebang instead.
+          failures=0
+          kernel_count=0
           for kernel in testkernels/Image."$SHORT_KMI".*; do
             [ -e "$kernel" ] || continue
-            bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio
+            kernel_count=$((kernel_count + 1))
+            name="${kernel##*/}"
+            log="qemu-${name}.log"
+            echo "--- $name ---"
+            # qemu_test.sh's shebang is #!/busybox sh (needed for its
+            # ramdisk-init roles), so invoke the host-launcher mode via bash.
+            bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+            rc=$?
+            echo "launcher_rc=$rc"
+            grep -E 'summary:|checker mode DONE|LKM4CTR_QEMU_TEST: DONE|QEMU exited with status|Kernel panic|Oops:|BUG:|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log" || true
+            if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
+              echo "KERNEL_ERROR: $name (see $log)"
+              failures=$((failures + 1))
+            elif ! grep -q '=== LKM4CTR_QEMU_TEST: DONE ===' "$log"; then
+              echo "INCOMPLETE: $name did not reach the full-test completion marker (see $log)"
+              failures=$((failures + 1))
+            else
+              echo "COMPLETED: $name (full log: $log)"
+            fi
           done
+          if [ "$kernel_count" -eq 0 ]; then
+            echo "No kernel images found for ${{ matrix.kmi }}"
+            exit 1
+          fi
+          if [ "$failures" -ne 0 ]; then
+            echo "$failures QEMU kernel test(s) failed"
+            exit 1
+          fi
 
       - name: Upload injected-ramdisk.cpio (${{ matrix.kmi }})
         if: always()
@@ -444,6 +461,13 @@ jobs:
         with:
           name: injected-ramdisk-${{ matrix.kmi }}
           path: injected-ramdisk.cpio
+
+      - name: Upload QEMU logs (${{ matrix.kmi }})
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-logs-${{ matrix.kmi }}
+          path: qemu-Image.*.log
 
   # Only runs for a manual workflow_dispatch run with the "create_release"
   # input checked on. Collects lkm4ctr.ko for every KMI built in the "build"
