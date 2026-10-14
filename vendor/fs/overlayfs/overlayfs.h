@@ -248,14 +248,20 @@ static inline const char *ovl_xattr(struct ovl_fs *ofs, enum ovl_xattr ox)
  * care to map 1000 to 1001.
  * The mnt idmapping helpers are nops if the upper layer isn't idmapped.
  */
-static inline int ovl_do_notify_change(struct ovl_fs *ofs,
+/*
+ * [BUILD-COMPAT] These forwarding helpers call VFS entrypoints redirected to
+ * runtime-resolved target-kernel symbols by vendor_kernel_ovl_vfs_compat.h.
+ * Keep the __nocfi exception at these narrow call boundaries: CFI checks on
+ * those cross-KMI function pointers fail at runtime during overlay mounts.
+ */
+__nocfi static inline int ovl_do_notify_change(struct ovl_fs *ofs,
 				       struct dentry *upperdentry,
 				       struct iattr *attr)
 {
 	return notify_change(ovl_upper_mnt_idmap(ofs), upperdentry, attr, NULL);
 }
 
-static inline int ovl_do_rmdir(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_rmdir(struct ovl_fs *ofs,
 			       struct inode *dir, struct dentry *dentry)
 {
 	int err = vfs_rmdir(ovl_upper_mnt_idmap(ofs), dir, dentry);
@@ -264,7 +270,7 @@ static inline int ovl_do_rmdir(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline int ovl_do_unlink(struct ovl_fs *ofs, struct inode *dir,
+__nocfi static inline int ovl_do_unlink(struct ovl_fs *ofs, struct inode *dir,
 				struct dentry *dentry)
 {
 	int err = vfs_unlink(ovl_upper_mnt_idmap(ofs), dir, dentry, NULL);
@@ -273,7 +279,7 @@ static inline int ovl_do_unlink(struct ovl_fs *ofs, struct inode *dir,
 	return err;
 }
 
-static inline int ovl_do_link(struct ovl_fs *ofs, struct dentry *old_dentry,
+__nocfi static inline int ovl_do_link(struct ovl_fs *ofs, struct dentry *old_dentry,
 			      struct inode *dir, struct dentry *new_dentry)
 {
 	int err = vfs_link(old_dentry, ovl_upper_mnt_idmap(ofs), dir,
@@ -283,7 +289,7 @@ static inline int ovl_do_link(struct ovl_fs *ofs, struct dentry *old_dentry,
 	return err;
 }
 
-static inline int ovl_do_create(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_create(struct ovl_fs *ofs,
 				struct inode *dir, struct dentry *dentry,
 				umode_t mode)
 {
@@ -293,7 +299,7 @@ static inline int ovl_do_create(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline int ovl_do_mkdir(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_mkdir(struct ovl_fs *ofs,
 			       struct inode *dir, struct dentry *dentry,
 			       umode_t mode)
 {
@@ -302,7 +308,7 @@ static inline int ovl_do_mkdir(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline int ovl_do_mknod(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_mknod(struct ovl_fs *ofs,
 			       struct inode *dir, struct dentry *dentry,
 			       umode_t mode, dev_t dev)
 {
@@ -312,7 +318,7 @@ static inline int ovl_do_mknod(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline int ovl_do_symlink(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_symlink(struct ovl_fs *ofs,
 				 struct inode *dir, struct dentry *dentry,
 				 const char *oldname)
 {
@@ -322,7 +328,7 @@ static inline int ovl_do_symlink(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline ssize_t ovl_do_getxattr(const struct path *path, const char *name,
+__nocfi static inline ssize_t ovl_do_getxattr(const struct path *path, const char *name,
 				      void *value, size_t size)
 {
 	int err, len;
@@ -359,7 +365,7 @@ static inline ssize_t ovl_path_getxattr(struct ovl_fs *ofs,
 	return ovl_do_getxattr(path, ovl_xattr(ofs, ox), value, size);
 }
 
-static inline int ovl_do_setxattr(struct ovl_fs *ofs, struct dentry *dentry,
+__nocfi static inline int ovl_do_setxattr(struct ovl_fs *ofs, struct dentry *dentry,
 				  const char *name, const void *value,
 				  size_t size, int flags)
 {
@@ -378,7 +384,7 @@ static inline int ovl_setxattr(struct ovl_fs *ofs, struct dentry *dentry,
 	return ovl_do_setxattr(ofs, dentry, ovl_xattr(ofs, ox), value, size, 0);
 }
 
-static inline int ovl_do_removexattr(struct ovl_fs *ofs, struct dentry *dentry,
+__nocfi static inline int ovl_do_removexattr(struct ovl_fs *ofs, struct dentry *dentry,
 				     const char *name)
 {
 	int err = vfs_removexattr(ovl_upper_mnt_idmap(ofs), dentry, name);
@@ -392,19 +398,19 @@ static inline int ovl_removexattr(struct ovl_fs *ofs, struct dentry *dentry,
 	return ovl_do_removexattr(ofs, dentry, ovl_xattr(ofs, ox));
 }
 
-static inline int ovl_do_set_acl(struct ovl_fs *ofs, struct dentry *dentry,
+__nocfi static inline int ovl_do_set_acl(struct ovl_fs *ofs, struct dentry *dentry,
 				 const char *acl_name, struct posix_acl *acl)
 {
 	return vfs_set_acl(ovl_upper_mnt_idmap(ofs), dentry, acl_name, acl);
 }
 
-static inline int ovl_do_remove_acl(struct ovl_fs *ofs, struct dentry *dentry,
+__nocfi static inline int ovl_do_remove_acl(struct ovl_fs *ofs, struct dentry *dentry,
 				    const char *acl_name)
 {
 	return vfs_remove_acl(ovl_upper_mnt_idmap(ofs), dentry, acl_name);
 }
 
-static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
+__nocfi static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 				struct dentry *olddentry, struct inode *newdir,
 				struct dentry *newdentry, unsigned int flags)
 {
@@ -438,7 +444,7 @@ static inline int ovl_do_rename(struct ovl_fs *ofs, struct inode *olddir,
 	return err;
 }
 
-static inline int ovl_do_whiteout(struct ovl_fs *ofs,
+__nocfi static inline int ovl_do_whiteout(struct ovl_fs *ofs,
 				  struct inode *dir, struct dentry *dentry)
 {
 	/*
@@ -456,7 +462,7 @@ static inline int ovl_do_whiteout(struct ovl_fs *ofs,
 	return err;
 }
 
-static inline struct file *ovl_do_tmpfile(struct ovl_fs *ofs,
+__nocfi static inline struct file *ovl_do_tmpfile(struct ovl_fs *ofs,
 					  struct dentry *dentry, umode_t mode)
 {
 	struct path path = { .mnt = ovl_upper_mnt(ofs), .dentry = dentry };
@@ -469,7 +475,7 @@ static inline struct file *ovl_do_tmpfile(struct ovl_fs *ofs,
 	return file;
 }
 
-static inline struct dentry *ovl_lookup_upper(struct ovl_fs *ofs,
+__nocfi static inline struct dentry *ovl_lookup_upper(struct ovl_fs *ofs,
 					      const char *name,
 					      struct dentry *base, int len)
 {
@@ -484,7 +490,7 @@ static inline bool ovl_open_flags_need_copy_up(int flags)
 	return ((OPEN_FMODE(flags) & FMODE_WRITE) || (flags & O_TRUNC));
 }
 
-static inline int ovl_do_getattr(const struct path *path, struct kstat *stat,
+__nocfi static inline int ovl_do_getattr(const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int flags)
 {
 	if (flags & AT_GETATTR_NOSEC)

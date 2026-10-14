@@ -164,6 +164,7 @@ static void shadow_checker_report(const char *label,
 struct shadow_checker_msg {
 	bool ok;
 	int err;
+	char stage[32];
 	char payload[128];
 };
 
@@ -190,8 +191,18 @@ static bool shadow_checker_read_msg(int fd, struct shadow_checker_msg *out)
 		snprintf(out->payload, sizeof(out->payload), "%.*s",
 			 (int)sizeof(out->payload) - 1, buf + 3);
 	} else if (!strncmp(buf, "ERR ", 4)) {
+		char *stage = strchr(buf + 4, ' ');
+
 		out->ok = false;
 		out->err = atoi(buf + 4);
+		if (stage) {
+			size_t len = strcspn(stage + 1, "\r\n");
+
+			if (len >= sizeof(out->stage))
+				len = sizeof(out->stage) - 1;
+			memcpy(out->stage, stage + 1, len);
+			out->stage[len] = '\0';
+		}
 	} else {
 		return false;
 	}
@@ -220,6 +231,16 @@ static void shadow_checker_send_err(int fd, int err)
 	int n = snprintf(buf, sizeof(buf), "ERR %d\n", err);
 
 	if (write(fd, buf, n) < 0) {
+		/* best effort; nothing to recover here */
+	}
+}
+
+static void shadow_checker_send_err_stage(int fd, int err, const char *stage)
+{
+	char buf[96];
+	int n = snprintf(buf, sizeof(buf), "ERR %d %s\n", err, stage);
+
+	if (n > 0 && (size_t)n < sizeof(buf) && write(fd, buf, n) < 0) {
 		/* best effort; nothing to recover here */
 	}
 }
@@ -990,6 +1011,41 @@ static void shadow_checker_overlay(void)
 				      "mount(): %s", strerror(msg.err));
 }
 
+static bool shadow_checker_write_userns_map(pid_t pid, const char *name,
+					    const char *value, char *stage,
+					    size_t stage_len, int *error)
+{
+	char path[64];
+	ssize_t written;
+	size_t value_len = strlen(value);
+	int fd, n;
+
+	n = snprintf(path, sizeof(path), "/proc/%d/%s", (int)pid, name);
+	if (n < 0 || (size_t)n >= sizeof(path)) {
+		snprintf(stage, stage_len, "path_%s", name);
+		*error = ENAMETOOLONG;
+		return false;
+	}
+
+	fd = open(path, O_WRONLY);
+	if (fd < 0) {
+		snprintf(stage, stage_len, "open_%s", name);
+		*error = errno;
+		return false;
+	}
+
+	written = write(fd, value, value_len);
+	if (written != (ssize_t)value_len) {
+		snprintf(stage, stage_len, "write_%s", name);
+		*error = written < 0 ? errno : EIO;
+		close(fd);
+		return false;
+	}
+
+	close(fd);
+	return true;
+}
+
 /*
  * ---------------------------------------------------------------------
  * USER namespace id mapping: getuid/geteuid/getgid/getegid/getresuid/
@@ -998,28 +1054,37 @@ static void shadow_checker_overlay(void)
  * runtime (runc, crun, ...) does before entering the mapped identity, and
  * a strictly stronger check than shadow_checker_user()'s "did the id
  * merely change" test above: this confirms the *entire* getresuid/
- * getresgid family, not just geteuid(), observes the mapped value. Like
- * shadow_checker_user(), re-runs as uid 1 (shadow_checker_run_as_uid1())
- * instead of SKIPping when the checker itself is running as uid 0.
+ * getresgid family, not just geteuid(), observes the mapped value. When
+ * invoked as root, the child drops to uid 1 before unshare while the
+ * privileged parent installs the maps through /proc/<pid>/... .
  * ---------------------------------------------------------------------
  */
 static void shadow_checker_user_idmap(void)
 {
 	uid_t before = getuid();
+	uid_t map_uid = before ? before : 1;
 	gid_t gbefore = getgid();
-	int pipefd[2];
+	int pipefd[2], syncfd[2];
 	pid_t pid;
 	struct shadow_checker_msg msg;
-
-	if (before == 0) {
-		shadow_checker_run_as_uid1("ns_user (id mapping)",
-					    shadow_checker_user_idmap);
-		return;
-	}
+	char stage[32];
+	char line[64];
+	char release = 1;
+	ssize_t release_written;
+	int map_err;
 
 	if (pipe(pipefd)) {
 		shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_SKIP,
 				       "pipe() failed: %s", strerror(errno));
+		return;
+	}
+	if (pipe(syncfd)) {
+		int err = errno;
+
+		close(pipefd[0]);
+		close(pipefd[1]);
+		shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_SKIP,
+				       "sync pipe() failed: %s", strerror(err));
 		return;
 	}
 
@@ -1029,62 +1094,50 @@ static void shadow_checker_user_idmap(void)
 				       "fork() failed: %s", strerror(errno));
 		close(pipefd[0]);
 		close(pipefd[1]);
+		close(syncfd[0]);
+		close(syncfd[1]);
 		return;
 	}
 
 	if (pid == 0) {
-		char buf[64];
-		int fd;
+		char start;
+		ssize_t n;
 		uid_t ruid, euid, suid;
 		gid_t rgid, egid, sgid;
 
 		close(pipefd[0]);
+		close(syncfd[1]);
+		if (before == 0 && setuid(map_uid)) {
+			shadow_checker_send_err_stage(pipefd[1], errno,
+						     "setuid_child");
+			_exit(0);
+		}
 		if (unshare(CLONE_NEWUSER)) {
-			shadow_checker_send_err(pipefd[1], errno);
+			shadow_checker_send_err_stage(pipefd[1], errno, "unshare");
 			_exit(0);
 		}
 
-		/* Deny setgroups(2) before writing gid_map, as every
-		 * runtime does since CVE-2014-8989; harmless no-op if the
-		 * fallback ignores it.
+		/* The parent must install the maps through /proc/<pid>/..., as
+		 * an unmapped child cannot open its own uid_map for writing.
 		 */
-		fd = open("/proc/self/setgroups", O_WRONLY);
-		if (fd >= 0) {
-			ssize_t ignored = write(fd, "deny", 4);
-
-			(void)ignored;
-			close(fd);
-		}
-
-		fd = open("/proc/self/uid_map", O_WRONLY);
-		if (fd < 0) {
-			shadow_checker_send_err(pipefd[1], errno);
+		shadow_checker_send_ok(pipefd[1], "ready");
+		do {
+			n = read(syncfd[0], &start, sizeof(start));
+		} while (n < 0 && errno == EINTR);
+		close(syncfd[0]);
+		if (n != (ssize_t)sizeof(start)) {
+			shadow_checker_send_err_stage(pipefd[1],
+						     n < 0 ? errno : EPIPE,
+						     "wait_for_parent_maps");
 			_exit(0);
 		}
-		snprintf(buf, sizeof(buf), "0 %d 1\n", (int)before);
-		if (write(fd, buf, strlen(buf)) < 0) {
-			shadow_checker_send_err(pipefd[1], errno);
-			close(fd);
-			_exit(0);
-		}
-		close(fd);
 
-		fd = open("/proc/self/gid_map", O_WRONLY);
-		if (fd < 0) {
-			shadow_checker_send_err(pipefd[1], errno);
+		if (getresuid(&ruid, &euid, &suid)) {
+			shadow_checker_send_err_stage(pipefd[1], errno, "getresuid");
 			_exit(0);
 		}
-		snprintf(buf, sizeof(buf), "0 %d 1\n", (int)gbefore);
-		if (write(fd, buf, strlen(buf)) < 0) {
-			shadow_checker_send_err(pipefd[1], errno);
-			close(fd);
-			_exit(0);
-		}
-		close(fd);
-
-		if (getresuid(&ruid, &euid, &suid) ||
-		    getresgid(&rgid, &egid, &sgid)) {
-			shadow_checker_send_err(pipefd[1], errno);
+		if (getresgid(&rgid, &egid, &sgid)) {
+			shadow_checker_send_err_stage(pipefd[1], errno, "getresgid");
 			_exit(0);
 		}
 		shadow_checker_send_ok(pipefd[1], "%d;%d;%d;%d;%d;%d;%d;%d",
@@ -1095,9 +1148,65 @@ static void shadow_checker_user_idmap(void)
 	}
 
 	close(pipefd[1]);
+	close(syncfd[0]);
 	if (!shadow_checker_read_msg(pipefd[0], &msg)) {
 		shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_SKIP,
-				       "child produced no result");
+				       "child produced no namespace-ready result");
+		close(syncfd[1]);
+		close(pipefd[0]);
+		waitpid(pid, NULL, 0);
+		return;
+	}
+	if (!msg.ok) {
+		if (msg.err == ENOENT && !strcmp(msg.stage, "unshare"))
+			shadow_checker_report("ns_user (id mapping)",
+					      SHADOW_CHECKER_STUB,
+					      "no real user namespace object was created");
+		else
+			shadow_checker_report("ns_user (id mapping)",
+					      SHADOW_CHECKER_FAIL,
+					      "%s: %s",
+					      msg.stage[0] ? msg.stage :
+					      "uid_map/gid_map setup",
+					      strerror(msg.err));
+		close(syncfd[1]);
+		close(pipefd[0]);
+		waitpid(pid, NULL, 0);
+		return;
+	}
+	if (strcmp(msg.payload, "ready")) {
+		shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_SKIP,
+				       "unexpected child readiness message");
+		close(syncfd[1]);
+		close(pipefd[0]);
+		waitpid(pid, NULL, 0);
+		return;
+	}
+
+	/* Match the standard runtime flow: the parent denies setgroups before
+	 * writing the child's uid_map and gid_map.
+	 */
+	if (!shadow_checker_write_userns_map(pid, "setgroups", "deny",
+					     stage, sizeof(stage), &map_err))
+		goto mapping_error;
+	snprintf(line, sizeof(line), "0 %d 1\n", (int)map_uid);
+	if (!shadow_checker_write_userns_map(pid, "uid_map", line,
+					     stage, sizeof(stage), &map_err))
+		goto mapping_error;
+	snprintf(line, sizeof(line), "0 %d 1\n", (int)gbefore);
+	if (!shadow_checker_write_userns_map(pid, "gid_map", line,
+					     stage, sizeof(stage), &map_err))
+		goto mapping_error;
+	release_written = write(syncfd[1], &release, sizeof(release));
+	if (release_written != (ssize_t)sizeof(release)) {
+		map_err = release_written < 0 ? errno : EPIPE;
+		snprintf(stage, sizeof(stage), "release_child");
+		goto mapping_error;
+	}
+	close(syncfd[1]);
+	if (!shadow_checker_read_msg(pipefd[0], &msg)) {
+		shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_SKIP,
+				       "child produced no mapped-ID result");
 		close(pipefd[0]);
 		waitpid(pid, NULL, 0);
 		return;
@@ -1106,15 +1215,10 @@ static void shadow_checker_user_idmap(void)
 	waitpid(pid, NULL, 0);
 
 	if (!msg.ok) {
-		if (msg.err == ENOENT)
-			shadow_checker_report("ns_user (id mapping)",
-					      SHADOW_CHECKER_STUB,
-					      "no /proc/self/uid_map or gid_map (no real user namespace object was created)");
-		else
-			shadow_checker_report("ns_user (id mapping)",
-					      SHADOW_CHECKER_FAIL,
-					      "uid_map/gid_map setup: %s",
-					      strerror(msg.err));
+		shadow_checker_report("ns_user (id mapping)",
+				      SHADOW_CHECKER_FAIL, "%s: %s",
+				      msg.stage[0] ? msg.stage : "mapped-ID check",
+				      strerror(msg.err));
 		return;
 	}
 
@@ -1135,7 +1239,7 @@ static void shadow_checker_user_idmap(void)
 			shadow_checker_report("ns_user (id mapping)",
 					      SHADOW_CHECKER_PASS,
 					      "getuid/getgid/getresuid/getresgid all report mapped id 0 (real %u/%u)",
-					      before, gbefore);
+					      map_uid, gbefore);
 		else
 			shadow_checker_report("ns_user (id mapping)",
 					      SHADOW_CHECKER_STUB,
@@ -1143,6 +1247,14 @@ static void shadow_checker_user_idmap(void)
 					      uid, ruid, euid, suid, gid, rgid,
 					      egid, sgid);
 	}
+	return;
+
+mapping_error:
+	close(syncfd[1]);
+	waitpid(pid, NULL, 0);
+	close(pipefd[0]);
+	shadow_checker_report("ns_user (id mapping)", SHADOW_CHECKER_FAIL,
+			      "%s: %s", stage, strerror(map_err));
 }
 
 static volatile sig_atomic_t g_checker_got_signal;

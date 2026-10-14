@@ -383,6 +383,19 @@ void vns_compat_resolve(void)
 #undef RESOLVE_EXPECTED
 }
 
+/*
+ * create_user_ns() is compiled into the running kernel only when its native
+ * CONFIG_USER_NS core is enabled. Resolve it at runtime rather than relying
+ * on this module's build-time config: a no-USER_NS DDK-built module can also
+ * be tested or deployed on a kernel with native USER_NS enabled. There, the
+ * kernel's uid/gid syscalls already translate credentials, so installing
+ * the module's fallback translation hooks would map the results twice.
+ */
+bool vns_native_userns_core_available(void)
+{
+	return shadow_hook_resolve("create_user_ns") != 0;
+}
+
 bool vns_compat_ready(void)
 {
 	bool ready = true;

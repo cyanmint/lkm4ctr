@@ -78,6 +78,7 @@
 #include <asm/unistd.h>
 
 #include "util.h"
+#include "../vendor_kernel.h"
 
 struct ipc_proc_iface {
 	const char *path;
@@ -911,7 +912,7 @@ static int sysvipc_proc_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
 
 	iter->iface = vns_proc_entry_data(inode);
-	iter->ns    = get_ipc_ns(current->nsproxy->ipc_ns);
+	iter->ns    = vns_get_ipc_ns(current->nsproxy->ipc_ns);
 	iter->pid_ns = get_pid_ns(task_active_pid_ns(current));
 
 	return 0;
@@ -921,7 +922,7 @@ static int sysvipc_proc_release(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq = file->private_data;
 	struct ipc_proc_iter *iter = seq->private;
-	put_ipc_ns(iter->ns);
+	vns_put_ipc_ns(iter->ns);
 	put_pid_ns(iter->pid_ns);
 	return seq_release_private(inode, file);
 }

@@ -240,7 +240,7 @@ static inline struct mqueue_inode_info *MQUEUE_I(struct inode *inode)
  */
 static inline struct ipc_namespace *__get_ns_from_inode(struct inode *inode)
 {
-	return get_ipc_ns(inode->i_sb->s_fs_info);
+	return vns_get_ipc_ns(inode->i_sb->s_fs_info);
 }
 
 static struct ipc_namespace *get_ns_from_inode(struct inode *inode)
@@ -537,7 +537,7 @@ static void mqueue_fs_context_free(struct fs_context *fc)
 {
 	struct mqueue_fs_context *ctx = fc->fs_private;
 
-	put_ipc_ns(ctx->ipc_ns);
+	vns_put_ipc_ns(ctx->ipc_ns);
 	kfree(ctx);
 }
 
@@ -549,7 +549,7 @@ static int mqueue_init_fs_context(struct fs_context *fc)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->ipc_ns = get_ipc_ns(vns_current_ipc_ns());
+	ctx->ipc_ns = vns_get_ipc_ns(vns_current_ipc_ns());
 	vns_put_user_ns(fc->user_ns); /* [BUILD-COMPAT] */
 	fc->user_ns = vns_get_user_ns(ctx->ipc_ns->user_ns); /* [BUILD-COMPAT] */
 	fc->fs_private = ctx;
@@ -573,8 +573,8 @@ static struct vfsmount *mq_create_mount(struct ipc_namespace *ns)
 
 	ctx = fc->fs_private;
 	ctx->newns = true;
-	put_ipc_ns(ctx->ipc_ns);
-	ctx->ipc_ns = get_ipc_ns(ns);
+	vns_put_ipc_ns(ctx->ipc_ns);
+	ctx->ipc_ns = vns_get_ipc_ns(ns);
 	vns_put_user_ns(fc->user_ns); /* [BUILD-COMPAT] */
 	fc->user_ns = vns_get_user_ns(ctx->ipc_ns->user_ns); /* [BUILD-COMPAT] */
 
@@ -672,7 +672,7 @@ static void mqueue_evict_inode(struct inode *inode)
 		info->ucounts = NULL;
 	}
 	if (ipc_ns)
-		put_ipc_ns(ipc_ns);
+		vns_put_ipc_ns(ipc_ns);
 }
 
 static int mqueue_create_attr(struct dentry *dentry, umode_t mode, void *arg)
@@ -706,7 +706,7 @@ static int mqueue_create_attr(struct dentry *dentry, umode_t mode, void *arg)
 		goto out_unlock;
 	}
 
-	put_ipc_ns(ipc_ns);
+	vns_put_ipc_ns(ipc_ns);
 	dir->i_size += DIRENT_SIZE;
 	lkm4ctr_inode_update_ts(dir);
 
@@ -716,7 +716,7 @@ static int mqueue_create_attr(struct dentry *dentry, umode_t mode, void *arg)
 out_unlock:
 	spin_unlock(&mq_lock);
 	if (ipc_ns)
-		put_ipc_ns(ipc_ns);
+		vns_put_ipc_ns(ipc_ns);
 	return error;
 }
 

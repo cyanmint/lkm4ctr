@@ -1198,7 +1198,11 @@ static inline bool exportfs_can_decode_fh(const struct export_operations *nop)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 #define kernel_file_open(path, flags, cred) dentry_open((path), (flags), (cred))
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
+/* [BUILD-COMPAT] These small adapters call VFS functions resolved at runtime.
+ * Keep __nocfi at the adapter boundary; Android CFI has rejected these
+ * cross-KMI function-pointer targets at the inlined module call site.
+ */
+static inline struct file *__nocfi vns_ovl_kernel_file_open(const struct path *path,
 						     int flags,
 						     const struct cred *cred)
 {
@@ -1217,7 +1221,7 @@ static inline struct file *vns_ovl_kernel_file_open(const struct path *path,
  * itself dropped its idmap/mnt_userns parameter below 5.12 (VNS_OVL_TIER_OLD,
  * no idmapped mounts yet). */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-static inline struct file *vfs_tmpfile_open(struct mnt_idmap *idmap,
+static inline struct file *__nocfi vfs_tmpfile_open(struct mnt_idmap *idmap,
 					    const struct path *parentpath,
 					    umode_t mode, int open_flag,
 					    const struct cred *cred)
@@ -1249,7 +1253,7 @@ static inline struct file *vfs_tmpfile_open(struct mnt_idmap *idmap,
  * static-inline function, not a macro -- unlike macros, its definition must
  * precede any call site. */
 #if VNS_OVL_TIER_MID || VNS_OVL_TIER_OLD
-static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
+static inline struct file *__nocfi kernel_tmpfile_open(struct user_namespace *idmap,
 					       const struct path *parentpath,
 					       umode_t mode, int open_flag,
 					       const struct cred *cred)
@@ -1270,7 +1274,7 @@ static inline struct file *kernel_tmpfile_open(struct user_namespace *idmap,
  * instead of the overlay's; the resulting file->f_path points at the
  * upper/real dentry rather than the overlay dentry on these kernels. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
-static inline struct file *backing_file_open(const struct path *user_path, int flags,
+static inline struct file *__nocfi backing_file_open(const struct path *user_path, int flags,
 					     const struct path *real_path,
 					     const struct cred *cred)
 {
@@ -1282,7 +1286,7 @@ static inline struct file *backing_file_open(const struct path *user_path, int f
  * 6.6, but backing_tmpfile_open() only in 6.10. Kernels in [6.6, 6.10) have
  * backing_file_open() natively but still need this fallback. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-static inline struct file *backing_tmpfile_open(const struct path *user_path, int flags,
+static inline struct file *__nocfi backing_tmpfile_open(const struct path *user_path, int flags,
 						const struct path *real_parentpath,
 						umode_t mode, const struct cred *cred)
 {
@@ -1303,7 +1307,7 @@ static inline struct file *backing_tmpfile_open(const struct path *user_path, in
  * the tmpfile's struct dentry * directly -- wrap it to accept the same
  * struct file * the call site passes. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-static inline void d_mark_tmpfile(struct file *file, struct inode *inode)
+static inline void __nocfi d_mark_tmpfile(struct file *file, struct inode *inode)
 {
 	d_tmpfile(file->f_path.dentry, inode);
 }
@@ -1369,7 +1373,13 @@ static inline const char *str_on_off(bool v)
  * so reproduce the later helper's effect locally by iterating the separator
  * callback and feeding each parsed token through the existing string parser. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
-static inline int vfs_parse_monolithic_sep(struct fs_context *fc, void *data,
+/*
+ * This helper calls the runtime-resolved vfs_parse_fs_string() pointer. Mark
+ * the helper itself __nocfi: annotating ovl_parse_monolithic() is not enough
+ * when this inline body is separately instrumented before inlining.
+ */
+static inline int __nocfi vfs_parse_monolithic_sep(struct fs_context *fc,
+						   void *data,
 					   char *(*sep)(char **))
 {
 	char *options, *cursor, *param;
@@ -1473,7 +1483,8 @@ static inline int vns_ovl_fsverity_get_digest(struct inode *inode, u8 *digest,
  * that 6.2+ vfs_set_acl() runs -- acceptable for overlay-internal ACL copy-up,
  * mirroring how overlay xattr copy-up already bypasses LSM set hooks for its
  * own book-keeping xattrs. On MID set_posix_acl() takes the (aliased) idmap;
- * on OLD (5.10) it predates idmapped mounts and takes none. */
+ * on OLD (5.10) it predates idmapped mounts and takes none. The call wrappers
+ * are __nocfi because set_posix_acl() is runtime-resolved on these KMIs. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
@@ -1486,7 +1497,7 @@ static inline int vns_ovl_acl_type_by_name(const char *acl_name)
 		return ACL_TYPE_DEFAULT;
 	return -1;
 }
-static inline int vfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+static inline int __nocfi vfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			      const char *acl_name, struct posix_acl *acl)
 {
 	int type = vns_ovl_acl_type_by_name(acl_name);
@@ -1499,7 +1510,7 @@ static inline int vfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	return set_posix_acl(idmap, d_inode(dentry), type, acl);
 #endif
 }
-static inline int vfs_remove_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+static inline int __nocfi vfs_remove_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 				 const char *acl_name)
 {
 	int type = vns_ovl_acl_type_by_name(acl_name);
@@ -1530,11 +1541,11 @@ static inline const char *posix_acl_xattr_name(int type)
 	return (type == ACL_TYPE_DEFAULT) ? XATTR_NAME_POSIX_ACL_DEFAULT
 					   : XATTR_NAME_POSIX_ACL_ACCESS;
 }
-static inline struct posix_acl *get_inode_acl(struct inode *inode, int type)
+static inline struct posix_acl *__nocfi get_inode_acl(struct inode *inode, int type)
 {
 	return (*vns_ovl_vfsc_get_acl)(inode, type);
 }
-static inline struct posix_acl *vfs_get_acl(struct mnt_idmap *idmap,
+static inline struct posix_acl *__nocfi vfs_get_acl(struct mnt_idmap *idmap,
 					    struct dentry *dentry,
 					    const char *acl_name)
 {
@@ -1559,9 +1570,10 @@ static inline bool is_posix_acl_xattr(const char *name)
  * hooks). Pre-6.12 kernels only take the xattr `name`. Wrap the resolved
  * (pre-6.12-shaped) function pointer in a 2-arg shim that drops `src`;
  * degraded only for LSMs that would have used `src` (none of the in-tree
- * hooks on these kernels do -- the parameter is purely additive in 6.12). */
+ * hooks on these kernels do -- the parameter is purely additive in 6.12).
+ * The shim is __nocfi because it calls the runtime-resolved kernel helper. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
-static inline int vns_ovl_security_inode_copy_up_xattr(struct dentry *src,
+static inline int __nocfi vns_ovl_security_inode_copy_up_xattr(struct dentry *src,
 							const char *name)
 {
 	return security_inode_copy_up_xattr(name);
@@ -1579,8 +1591,9 @@ static inline int vns_ovl_security_inode_copy_up_xattr(struct dentry *src,
  * looking up any dentry alias for the inode. `flags` is dropped: every
  * ovl_encode_real_fh() call site in this source passes flags=0 (plain,
  * non-FID-only encoding) with parent either NULL or set, i.e. exactly what
- * `connectable = !!parent` already reproduces via exportfs_encode_fh(). */
-static inline int vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct fid *fid,
+ * `connectable = !!parent` already reproduces via exportfs_encode_fh(). The
+ * shim is __nocfi because both VFS calls are runtime-resolved. */
+static inline int __nocfi vns_ovl_exportfs_encode_inode_fh(struct inode *inode, struct fid *fid,
 						   int *max_len, struct inode *parent,
 						   int flags)
 {

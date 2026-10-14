@@ -123,7 +123,7 @@ unsigned long flags,
 	 * inherited that real nsproxy verbatim -- i.e. never yet had its
 	 * task->nsproxy replaced by vendor_kernel's own
 	 * create_new_namespaces()/switch_task_namespaces() path -- still has
-	 * a literal NULL ipc_ns here. Passing that straight to get_ipc_ns()
+	 * a literal NULL ipc_ns here. Passing that straight to the kernel's get_ipc_ns()
 	 * below (CLONE_NEWIPC not requested) would silently propagate NULL
 	 * into the freshly built nsproxy, which every real-kernel-invoked
 	 * proc_ns_operations callback below (ipcns_install() in particular)
@@ -140,8 +140,28 @@ unsigned long flags,
 	if (!ns)
 		ns = vns_ipc_active_default();
 	if (!(flags & CLONE_NEWIPC))
-		return get_ipc_ns(ns);
+		return vns_get_ipc_ns(ns);
 	return create_ipc_ns(user_ns, ns);
+}
+
+struct ipc_namespace *vns_get_ipc_ns(struct ipc_namespace *ns)
+{
+	if (ns)
+		vns_ipc_get_ref(ns);
+	return ns;
+}
+
+/*
+ * The kernel's get_ipc_ns()/put_ipc_ns() helpers are no-ops when
+ * CONFIG_IPC_NS=n, but vendor_kernel owns and refcounts its IPC namespaces
+ * independently of that kernel option. Keep every vendored reference on
+ * these local helpers so nsproxy and IPC-object lifetimes stay balanced.
+ */
+struct ipc_namespace *vns_get_ipc_ns_not_zero(struct ipc_namespace *ns)
+{
+	if (ns && vns_ipc_get_ref_not_zero(ns))
+		return ns;
+	return NULL;
 }
 
 /*
@@ -268,7 +288,7 @@ static struct ns_common *ipcns_get(struct task_struct *task)
 	task_lock(task);
 	nsproxy = task->nsproxy;
 	if (nsproxy)
-		ns = get_ipc_ns(nsproxy->ipc_ns);
+		ns = vns_get_ipc_ns(nsproxy->ipc_ns);
 	task_unlock(task);
 
 	return ns ? &ns->ns : NULL;
@@ -288,7 +308,7 @@ static int ipcns_install(struct nsset *nsset, struct ns_common *new)
 		return -EPERM;
 
 	vns_put_ipc_ns(nsproxy->ipc_ns);
-	nsproxy->ipc_ns = get_ipc_ns(ns);
+	nsproxy->ipc_ns = vns_get_ipc_ns(ns);
 	return 0;
 }
 

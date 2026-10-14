@@ -57,11 +57,11 @@
 #include <linux/perf_event.h>
 #include <linux/hashtable.h>
 #include <linux/spinlock.h>
-#include <linux/kprobes.h>
 #include <linux/llist.h>
 #include <linux/workqueue.h>
 #include "../vendor_kernel.h"
 #include "../include/uapi/vendor_kernel.h"
+#include "../../glue/shadow_hook.h"
 #include "../../glue/lkm4ctr_log.h"
 
 /* [BUILD-COMPAT] Forward declaration for vendored time_namespace init object. */
@@ -70,8 +70,8 @@ extern struct time_namespace vns_init_time_ns;
 /*
  * [BUILD-COMPAT] vns_nsproxy_set tracks every module-owned struct nsproxy *
  * currently installed on some task_struct->nsproxy. It exists purely so
- * that vns_task_exit_cleanup() (invoked from the do_exit() shadow_hook in
- * glue/vendor_kernel_syscalls.c) can tell, for an arbitrary exiting task,
+ * that vns_task_exit_cleanup() (invoked by the exit_task_namespaces() hook
+ * below) can tell, for an arbitrary exiting task,
  * whether that task's nsproxy is one of vendor_kernel's own vendored
  * objects (allocated from vns_nsproxy_cachep) as opposed to the real
  * kernel's init_nsproxy/&vns_init_nsproxy singleton -- without needing any
@@ -208,10 +208,11 @@ static inline struct nsproxy *create_nsproxy(void)
  * copy_mnt_ns+...)" from inside create_new_namespaces(). Marking just this
  * function __nocfi (rather than disabling CFI for the whole nsproxy.o via
  * CFLAGS_REMOVE_<obj>.o in lkm4ctr/Makefile) keeps the rest of this file --
- * including vns_exit_kprobe_pre_handler(), a real-kernel-invoked kprobe
- * pre_handler callback -- CFI-instrumented and a valid indirect-call target
- * for the real kernel, matching the pattern used elsewhere in this module
- * (see e.g. vendor_kernel_procfs_userns.c's vns_idmap_create_fd()).
+ * including vns_exit_task_namespaces_hook(), the shadow-hook replacement
+ * reached from a real-kernel-invoked kprobe/ftrace callback --
+ * CFI-instrumented and a valid indirect-call target for the real kernel,
+ * matching the pattern used elsewhere in this module (see e.g.
+ * vendor_kernel_procfs_userns.c's vns_idmap_create_fd()).
  */
 static __nocfi struct nsproxy *create_new_namespaces(unsigned long flags,
 	struct task_struct *tsk, struct user_namespace *user_ns,
@@ -878,18 +879,13 @@ void vns_nsproxy_cache_init(void) /* [BUILD-COMPAT] */
 }
 
 /*
- * [BUILD-COMPAT] vns_task_exit_cleanup() runs from a plain pre_handler-only
- * kprobe on do_exit() (vns_exit_kprobe_pre_handler() below), and kprobe
- * handlers execute in atomic context (preemption disabled) regardless of
- * the underlying int3/brk trap mechanism -- see Documentation/trace/kprobes.rst:
- * "Probes are run with preemption disabled ... you must not do anything
- * that could cause a sleep". vns_put_nsproxy()/vns_free_nsproxy() can reach
- * put_mnt_ns() -> namespace_unlock() -> synchronize_rcu_expedited(), which
- * schedules -- calling that path directly from the kprobe pre_handler
- * triggers "BUG: scheduling while atomic". So the actual teardown of a
- * vendored nsproxy is deferred to process context via a workqueue; only the
- * task_lock()-protected pointer swap (fully atomic-safe: spinlock and plain
- * refcounting) happens inline in the kprobe handler itself.
+ * [BUILD-COMPAT] vns_task_exit_cleanup() runs from the
+ * exit_task_namespaces() replacement below, in the exiting task's normal
+ * process context. vns_put_nsproxy()/vns_free_nsproxy() can reach
+ * put_mnt_ns() -> namespace_unlock() -> synchronize_rcu_expedited(); keep
+ * that potentially long mount/RCU teardown off the task-exit path by
+ * deferring it to a workqueue. Only the task_lock()-protected pointer swap
+ * and plain refcounting happen inline before the real kernel teardown.
  */
 struct vns_nsproxy_deferred_put {
 	struct llist_node node;
@@ -939,9 +935,9 @@ static void vns_nsproxy_put_deferred(struct nsproxy *ns)
 
 /*
  * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
- * Called from the do_exit() shadow_hook (glue/vendor_kernel_syscalls.c)
- * for every exiting task, strictly before the real do_exit() body (and
- * therefore the real exit_task_namespaces()/free_nsproxy()) runs.
+ * Called from the exit_task_namespaces() shadow hook below for every
+ * exiting task, before the real exit_task_namespaces()/free_nsproxy() runs
+ * and before do_exit() reaches exit_notify()/child-reaper processing.
  */
 void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 {
@@ -1007,54 +1003,49 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 }
 
 /*
- * [BUILD-COMPAT] Exit-safety kprobe: a plain pre_handler-only kprobe on
- * do_exit(), NOT one of the redirecting shadow_hook entries used elsewhere
- * in vendor_kernel. do_exit() is __noreturn, so hooking it via the
- * SHADOW_HOOK()/shadow_hijack redirect mechanism (which relies on a
- * kretprobe firing on the *replacement* function's return to release the
- * rmmod-safety module reference -- see glue/shadow_hook.h's "rmmod
- * safety" note) would never release that reference, permanently pinning
- * module_refcount() above zero after the very first process exit on the
- * whole system. A pre_handler-only kprobe has no such problem: it runs
- * vns_task_exit_cleanup() and returns normally, letting the original
- * do_exit() instruction execute completely untouched immediately
- * afterwards, and register_kprobe()/unregister_kprobe() are already
- * synchronously safe to install/remove (the same primitive
- * shadow_hook_resolve() itself relies on for one-shot symbol resolution).
+ * [BUILD-COMPAT] Interpose on exit_task_namespaces(), not do_exit(). The
+ * latter is __noreturn and was being probed directly with a pre_handler that
+ * ran cleanup inside kprobe context; on an Android 6.1.138 stock image this
+ * path panicked with an arm64 BRK #0x6 at do_exit+4 during task exit. The
+ * namespace hook is a returning function, so the normal shadow-hook
+ * kretprobe can release its rmmod-safety module reference after the wrapper
+ * calls the original function. This also keeps cleanup immediately before
+ * the kernel's native nsproxy teardown and child-reaper processing.
  */
-static int vns_exit_kprobe_pre_handler(struct kprobe *p, struct pt_regs *regs)
+static void (*vns_real_exit_task_namespaces)(struct task_struct *);
+
+static const char * const vns_exit_task_namespaces_names[] = {
+	"exit_task_namespaces", NULL,
+};
+
+/*
+ * KMI kernels can assign a different CFI type hash to the same private
+ * exit_task_namespaces() prototype. The resolved target is therefore called
+ * through this narrow __nocfi wrapper; keep the replacement hook itself
+ * CFI-instrumented so it remains a valid kernel callback target.
+ */
+static void __nocfi vns_call_real_exit_task_namespaces(struct task_struct *tsk)
 {
-	vns_task_exit_cleanup(current);
-	return 0;
+	vns_real_exit_task_namespaces(tsk);
 }
 
-static struct kprobe vns_exit_kprobe = {
-	.symbol_name	= "do_exit",
-	.pre_handler	= vns_exit_kprobe_pre_handler,
-};
-static bool vns_exit_kprobe_installed;
+static void vns_exit_task_namespaces_hook(struct task_struct *tsk)
+{
+	vns_task_exit_cleanup(tsk);
+	vns_call_real_exit_task_namespaces(tsk);
+}
+
+static struct shadow_hook vns_exit_task_namespaces_shadow_hook =
+	SHADOW_HOOK(vns_exit_task_namespaces_names,
+		    vns_exit_task_namespaces_hook,
+		    &vns_real_exit_task_namespaces);
 
 int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 {
-	int ret;
-
-	if (vns_exit_kprobe_installed)
-		return 0;
-
-	ret = register_kprobe(&vns_exit_kprobe);
-	if (ret) {
-		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
-			"do_exit exit-safety kprobe registration failed (%d)", ret);
-		return ret;
-	}
-	vns_exit_kprobe_installed = true;
-	return 0;
+	return shadow_hook_install(&vns_exit_task_namespaces_shadow_hook);
 }
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
-	if (vns_exit_kprobe_installed) {
-		unregister_kprobe(&vns_exit_kprobe);
-		vns_exit_kprobe_installed = false;
-	}
+	shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
 }

@@ -186,6 +186,13 @@ static inline void vns_count_inc(void *count, bool is_refcount)
 		atomic_inc((atomic_t *)count);
 }
 
+static inline bool vns_count_inc_not_zero(void *count, bool is_refcount)
+{
+	if (is_refcount)
+		return refcount_inc_not_zero((refcount_t *)count);
+	return atomic_inc_not_zero((atomic_t *)count);
+}
+
 #define VNS_COUNT_TYPE_IS_REFCOUNT(ptr) \
 	__builtin_types_compatible_p(typeof(*(ptr)), refcount_t)
 
@@ -197,6 +204,9 @@ static inline void vns_count_inc(void *count, bool is_refcount)
 
 #define vns_get_count(ptr) \
 	vns_count_inc((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
+
+#define vns_get_count_not_zero(ptr) \
+	vns_count_inc_not_zero((void *)(ptr), VNS_COUNT_TYPE_IS_REFCOUNT(ptr))
 
 /*
  * [BUILD-COMPAT] refcount_dec_and_lock() itself is not always exported /
@@ -236,6 +246,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->count, 1)
 #define vns_ipc_pin_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->count)
+#define vns_ipc_get_ref_not_zero(obj) vns_get_count_not_zero(&(obj)->count)
 #define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
@@ -252,6 +263,7 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_ipc_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
 #define vns_ipc_pin_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define vns_ipc_get_ref(obj) vns_get_count(&(obj)->ns.count)
+#define vns_ipc_get_ref_not_zero(obj) vns_get_count_not_zero(&(obj)->ns.count)
 #define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->ns.count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->ns.count, (value))
 #define VNS_TIME_REF_INIT .ns.count = REFCOUNT_INIT(1),
@@ -315,6 +327,8 @@ void vns_exit_hook_exit(void);
 void vns_nsproxy_deferred_flush(void);
 
 struct ipc_namespace *vns_copy_ipcs(unsigned long flags, struct user_namespace *user_ns, struct ipc_namespace *old_ns);
+struct ipc_namespace *vns_get_ipc_ns(struct ipc_namespace *ns);
+struct ipc_namespace *vns_get_ipc_ns_not_zero(struct ipc_namespace *ns);
 void vns_put_ipc_ns(struct ipc_namespace *ns);
 extern const struct proc_ns_operations vns_ipcns_operations;
 
@@ -527,6 +541,7 @@ void vns_dec_ucount(struct ucounts *ucounts, enum ucount_type type);
 bool vns_setup_userns_sysctls(struct user_namespace *ns);
 void vns_retire_userns_sysctls(struct user_namespace *ns);
 void vns_compat_resolve(void);
+bool vns_native_userns_core_available(void);
 void vns_ipc_compat_resolve(void);
 /* glue/vendor_kernel_ipc_callbacks.c: resolves simple_lookup() and the
  * security_{msg_queue,sem,shm}_associate wrappers separately, in their own

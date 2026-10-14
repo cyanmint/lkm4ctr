@@ -603,7 +603,7 @@ static void vns_exit_shm_list(struct task_struct *task, struct list_head *head)
 		 *    The refcount could be already 0. If it is 0, then
 		 *    the shm objects will be free by free_ipc_work().
 		 */
-		ns = get_ipc_ns_not_zero(ns);
+		ns = vns_get_ipc_ns_not_zero(ns);
 		if (!ns) {
 unlink_continue:
 			list_del_init(&shp->shm_clist);
@@ -656,7 +656,7 @@ unlink_continue:
 		}
 
 		up_write(&shm_ids(ns).rwsem);
-		put_ipc_ns(ns); /* paired with get_ipc_ns_not_zero */
+		vns_put_ipc_ns(ns); /* paired with vns_get_ipc_ns_not_zero */
 	}
 }
 
@@ -801,7 +801,7 @@ static int shm_release(struct inode *ino, struct file *file)
 {
 	struct shm_file_data *sfd = shm_file_data(file);
 
-	put_ipc_ns(sfd->ns);
+	vns_put_ipc_ns(sfd->ns);
 	fput(sfd->file);
 	shm_file_data(file) = NULL;
 	kfree(sfd);
@@ -1828,7 +1828,7 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg,
 	}
 
 	sfd->id = shp->shm_perm.id;
-	sfd->ns = get_ipc_ns(ns);
+	sfd->ns = vns_get_ipc_ns(ns);
 	sfd->file = base;
 	sfd->vm_ops = NULL;
 	file->private_data = sfd;

@@ -2595,11 +2595,11 @@ void exit_sem(struct task_struct *tsk)
 		return;
 	vns_task_undo_list_set(tsk, NULL, GFP_KERNEL);
 #endif
-	ns = get_ipc_ns(vns_task_ipc_ns(tsk));
+	ns = vns_get_ipc_ns(vns_task_ipc_ns(tsk));
 	pid = get_pid(task_tgid(tsk));
 	vns_exit_sem_undo_list(ns, ulp, pid);
 	put_pid(pid);
-	put_ipc_ns(ns);
+	vns_put_ipc_ns(ns);
 }
 
 #if !defined(CONFIG_SYSVIPC)
@@ -2612,7 +2612,7 @@ static void vns_sysvsem_exit_work(struct work_struct *work)
 		vns_exit_sem_undo_list(state->exit_ns, state->undo_list,
 				       state->exit_pid);
 	put_pid(state->exit_pid);
-	put_ipc_ns(state->exit_ns);
+	vns_put_ipc_ns(state->exit_ns);
 	put_task_struct(state->task);
 	kfree(state);
 }
@@ -2628,7 +2628,7 @@ void vns_prepare_exit_sem(struct task_struct *tsk)
 		}
 		return;
 	}
-	state->exit_ns = get_ipc_ns(vns_task_ipc_ns(tsk));
+	state->exit_ns = vns_get_ipc_ns(vns_task_ipc_ns(tsk));
 	state->exit_pid = get_pid(task_tgid(tsk));
 	schedule_work(&state->exit_work);
 }
