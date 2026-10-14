@@ -2409,7 +2409,7 @@ long ksys_semtimedop(int semid, struct sembuf __user *tsops,
 }
 
 #ifdef CONFIG_COMPAT_32BIT_TIME
-long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
+static long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
 			    unsigned int nsops,
 			    const struct old_timespec32 __user *timeout)
 {
