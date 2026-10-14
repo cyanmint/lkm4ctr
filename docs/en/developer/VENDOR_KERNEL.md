@@ -496,6 +496,13 @@ Android GKI ranges instead of carrying separate per-era copies.
   | `MID` | `[5.12, 6.3)` | Idmapped mounts exist but still use `struct user_namespace *`; the compat layer aliases `mnt_idmap` to that type, translates the newer helper surface back to the older equivalents, and uses the manual backing-file I/O fallback. | `android13-5.15`, `android14-5.15`, `android14-6.1` |
   | `NEW` | `[6.3, 6.19)` | The 6.12 source is mostly native; the shim resolves trim-prone helpers, uses the manual backing-file I/O fallback before 6.9, adapts lookup helpers to `struct qstr *` on 6.17+, and bridges the 6.18 fileattr, mkdir, rename, dentry-revalidation, and default dentry-op API changes. | `android15-6.6`, `android16-6.12`, `android17-6.18` |
 
+  On Linux 6.18, `override_creds()`/`revert_creds()` became inline pointer swaps
+  that do not manage credential references. The vendored 6.12 overlayfs call
+  sites rely on the earlier reference-managing contract; the NEW-tier compat
+  header wraps the inline helpers to acquire the replacement cred and release
+  the displaced cred on revert. Using the raw 6.18 inlines with those call
+  sites can free the active `current->cred` during overlay file creation.
+
   The detailed tier rationale lives in the header comment of
   `glue/vendor_kernel_ovl_vfs_compat.h` and should be treated as the
   authoritative design note when extending the compat layer.

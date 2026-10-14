@@ -841,14 +841,33 @@ VNS_OVL_VFS_COMPAT_LIST_BF(VNS_OVL_VFSC_DECLARE)
  * linkage against these always succeeds on MID/NEW-tier kernels. Resolved
  * via shadow_hook_resolve() like the rest of this list instead. From Linux
  * 6.18, override_creds() and revert_creds() are static inlines in
- * <linux/cred.h>, so the NEW tier uses those inlines rather than trying to
- * resolve nonexistent symbols.
+ * <linux/cred.h> that only replace current->cred; they no longer acquire or
+ * release references. The vendored 6.12 overlayfs source expects the older
+ * reference-managing contract, so NEW-tier 6.18 builds wrap those inlines to
+ * preserve it rather than using the pointer-swap helpers directly.
  */
 #define down_write_killable (*vns_ovl_vfsc_down_write_killable)
 #define d_invalidate (*vns_ovl_vfsc_d_invalidate)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 #define revert_creds (*vns_ovl_vfsc_revert_creds)
 #define override_creds (*vns_ovl_vfsc_override_creds)
+#else
+static inline const struct cred *vns_ovl_override_creds_compat(
+	const struct cred *override_cred)
+{
+	get_cred(override_cred);
+	return override_creds(override_cred);
+}
+
+static inline void vns_ovl_revert_creds_compat(const struct cred *revert_cred)
+{
+	const struct cred *override_cred = revert_creds(revert_cred);
+
+	put_cred(override_cred);
+}
+
+#define override_creds vns_ovl_override_creds_compat
+#define revert_creds vns_ovl_revert_creds_compat
 #endif
 #define security_file_ioctl (*vns_ovl_vfsc_security_file_ioctl)
 #define iterate_dir (*vns_ovl_vfsc_iterate_dir)
