@@ -245,7 +245,8 @@ jobs:
           KDIR="/opt/ddk/kdir/${{ matrix.kmi }}"
           ROOT="$GITHUB_WORKSPACE/vendor"
 
-          make -C "$KDIR" M="$ROOT" modules -j"$(nproc)"
+          # Mirror module lifecycle/exit-hook diagnostics to QEMU's serial log.
+          make -C "$KDIR" M="$ROOT" LKM4CTR_LOG_DMESG=y modules -j"$(nproc)"
 
           # collect the built .ko into a staging dir for upload.
           mkdir -p "$GITHUB_WORKSPACE/modules-out"

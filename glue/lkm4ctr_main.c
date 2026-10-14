@@ -27,11 +27,18 @@ static int __init lkm4ctr_init(void)
 	int ret;
 
 	ret = shadow_hijack_init();
-	if (ret)
+	if (ret) {
+		LKM4CTR_ERR(LKM4CTR_TAG,
+			    "[DEBUG-KMI-EXIT] shadow_hijack_init failed: %d",
+			    ret);
 		return ret;
+	}
 
 	ret = vendor_kernel_init();
 	if (ret) {
+		LKM4CTR_ERR(LKM4CTR_TAG,
+			    "[DEBUG-KMI-EXIT] vendor_kernel_init failed: %d",
+			    ret);
 		shadow_hijack_exit();
 		return ret;
 	}

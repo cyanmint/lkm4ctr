@@ -84,6 +84,7 @@ extern struct time_namespace vns_init_time_ns;
 static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
 static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
 static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
+static atomic_t vns_exit_task_namespaces_intercepts = ATOMIC_INIT(0);
 
 struct vns_nsproxy_set_entry {
 	struct nsproxy *ns;
@@ -1065,7 +1066,36 @@ static void __nocfi vns_call_real_exit_task_namespaces(struct task_struct *tsk)
 
 static void vns_exit_task_namespaces_hook(struct task_struct *tsk)
 {
+	int hit = atomic_inc_return(&vns_exit_task_namespaces_intercepts);
+
+	if (hit <= 8) {
+		struct nsproxy *ns = READ_ONCE(tsk->nsproxy);
+		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
+
+		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+			     "[DEBUG-KMI-EXIT] exit hook pre #%d pid=%d comm=%s tracked_nsproxy=%d pid_ns=%s child_reaper=%d",
+			     hit, task_pid_nr(tsk), tsk->comm,
+			     vns_nsproxy_set_contains(ns),
+			     !pid_ns ? "NULL" :
+			     pid_ns == &init_pid_ns ? "init" : "non-init",
+			     pid_ns && pid_ns->child_reaper == tsk);
+	}
+
 	vns_task_exit_cleanup(tsk);
+
+	if (hit <= 8) {
+		struct nsproxy *ns = READ_ONCE(tsk->nsproxy);
+		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
+
+		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+			     "[DEBUG-KMI-EXIT] exit hook post #%d pid=%d comm=%s tracked_nsproxy=%d pid_ns=%s child_reaper=%d",
+			     hit, task_pid_nr(tsk), tsk->comm,
+			     vns_nsproxy_set_contains(ns),
+			     !pid_ns ? "NULL" :
+			     pid_ns == &init_pid_ns ? "init" : "non-init",
+			     pid_ns && pid_ns->child_reaper == tsk);
+	}
+
 	vns_call_real_exit_task_namespaces(tsk);
 }
 
@@ -1079,12 +1109,23 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 	int ret;
 
 	ret = shadow_hook_install(&vns_free_nsproxy_shadow_hook);
-	if (ret)
+	if (ret) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "[DEBUG-KMI-EXIT] free_nsproxy hook install failed: %d",
+			    ret);
 		return ret;
+	}
 
 	ret = shadow_hook_install(&vns_exit_task_namespaces_shadow_hook);
-	if (ret)
+	if (ret) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "[DEBUG-KMI-EXIT] exit_task_namespaces hook install failed: %d",
+			    ret);
 		shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
+	} else {
+		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+			     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
+	}
 
 	return ret;
 }
