@@ -25,3 +25,4 @@ modules.order
 # Never commit these; they are large, throwaway, and regenerated on demand.
 /modules-out/
 /ramdisk-root/
+/plans/
