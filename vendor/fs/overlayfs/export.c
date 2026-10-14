@@ -434,7 +434,11 @@ __nocfi static struct dentry *ovl_lookup_real_one(struct dentry *connected,
 	 * permission checking altogether, but for now just use non-idmap
 	 * transformed ids.
 	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	this = lookup_one(&nop_mnt_idmap, &name.name, connected);
+#else
 	this = lookup_one_len(name.name.name, connected, name.name.len);
+#endif
 	release_dentry_name_snapshot(&name);
 	err = PTR_ERR(this);
 	if (IS_ERR(this)) {
