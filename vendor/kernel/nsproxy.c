@@ -58,6 +58,7 @@
 #include <linux/hashtable.h>
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
+#include <linux/sched/task.h>
 #include <linux/llist.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
@@ -71,16 +72,14 @@ extern struct time_namespace vns_init_time_ns;
 
 /*
  * [BUILD-COMPAT] vns_nsproxy_set tracks every module-owned struct nsproxy *
- * currently installed on some task_struct->nsproxy. It exists purely so
- * that vns_task_exit_cleanup() (invoked by the exit_task_namespaces() hook
- * below) can tell, for an arbitrary exiting task,
- * whether that task's nsproxy is one of vendor_kernel's own vendored
- * objects (allocated from vns_nsproxy_cachep) as opposed to the real
- * kernel's init_nsproxy/&vns_init_nsproxy singleton -- without needing any
- * unexported mm-internal helper such as virt_to_cache(). Membership is a
- * pointer identity check only; the hash table is a small fixed-size
- * spinlock-protected chain, sized generously since a device is expected to
- * have at most a handful of concurrently-live vendored nsproxy objects.
+ * currently installed on some task_struct->nsproxy. Both
+ * vns_task_exit_cleanup() and the free_nsproxy() fallback use pointer
+ * identity to distinguish vendored objects (allocated from
+ * vns_nsproxy_cachep) from the real kernel's init_nsproxy/&vns_init_nsproxy
+ * singleton, without relying on an unexported helper such as virt_to_cache()
+ * or on task lookups. The hash table is a small, fixed-size,
+ * spinlock-protected chain sized for the handful of concurrently-live
+ * vendored nsproxy objects expected on a device.
  */
 static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
 static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
@@ -942,47 +941,53 @@ static void vns_nsproxy_put_deferred(struct nsproxy *ns)
 }
 
 /*
+ * Hand off a vendored PID namespace's child reaper before native
+ * exit_notify()->find_child_reaper() reaches the target kernel's CONFIG_PID_NS=n
+ * zap_pid_ns_processes() BUG stub. free_nsproxy() is a fallback entry point:
+ * the exit_task_namespaces() call can be inlined in some stock GKI builds,
+ * while the native free_nsproxy() call remains hookable.
+ */
+static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
+{
+	struct pid_namespace *pid_ns;
+	bool handed_off = false;
+
+	if (vns_pidns_runtime_supported)
+		return;
+
+	pid_ns = task_active_pid_ns(tsk);
+	if (!pid_ns || pid_ns == &init_pid_ns ||
+	    READ_ONCE(pid_ns->child_reaper) != tsk)
+		return;
+
+	/* Only the non-blocking cascade is safe on this task-exit path. */
+	vns_zap_pid_ns_processes(pid_ns);
+
+	/* Serialize with find_child_reaper(), which reads this under tasklist_lock. */
+	write_lock_irq(&tasklist_lock);
+	if (pid_ns->child_reaper == tsk) {
+		pid_ns->child_reaper = READ_ONCE(init_pid_ns.child_reaper);
+		handed_off = true;
+	}
+	write_unlock_irq(&tasklist_lock);
+
+	if (handed_off)
+		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+			     "[DEBUG-KMI-EXIT] handed off PID namespace reaper pid=%d comm=%s pid_ns=%p",
+			     task_pid_nr(tsk), tsk->comm, pid_ns);
+}
+
+/*
  * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
- * Called from the exit_task_namespaces() shadow hook below for every
- * exiting task, before the real exit_task_namespaces()/free_nsproxy() runs
- * and before do_exit() reaches exit_notify()/child-reaper processing.
+ * Runs from the exit_task_namespaces() shadow hook for each exiting task.
+ * The free_nsproxy() hook invokes only the PID-reaper cleanup above as a
+ * fallback when the exit_task_namespaces() call site is not intercepted.
  */
 void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 {
 	struct nsproxy *ns;
 
-	if (!vns_pidns_runtime_supported) {
-		struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
-
-		/*
-		 * [BUILD-COMPAT] task_active_pid_ns() is derived from
-		 * tsk->thread_pid, fixed at fork time, and is untouched by
-		 * the tsk->nsproxy swap further down. If tsk is the last
-		 * live thread of one of vendor_kernel's own module-owned pid
-		 * namespaces (kernel/pid_namespace.c:vns_copy_pid_ns()) and
-		 * also that namespace's pid 1, the real kernel's own
-		 * copy_process() (kernel/fork.c, unconditional of
-		 * CONFIG_PID_NS) has already set pid_ns->child_reaper == tsk.
-		 * Left untouched, the real
-		 * do_exit()->forget_original_parent()->find_child_reaper()
-		 * path (kernel/exit.c) is about to see that and call this
-		 * target kernel's own zap_pid_ns_processes(), an
-		 * unconditional BUG() stub on a CONFIG_PID_NS=n build
-		 * (include/linux/pid_namespace.h). Run the safe half of that
-		 * cascade ourselves right now and then hand the namespace off
-		 * to the real init task as its child_reaper, so the real
-		 * find_child_reaper() takes its "reaper != father" fast path
-		 * moments later in this same do_exit() call instead of ever
-		 * reaching the broken stub. See vns_zap_pid_ns_processes()
-		 * (kernel/pid_namespace.c) for the reduced-scope cascade
-		 * this runs.
-		 */
-		if (pid_ns && pid_ns != &init_pid_ns &&
-		    pid_ns->child_reaper == tsk) {
-			vns_zap_pid_ns_processes(pid_ns);
-			pid_ns->child_reaper = init_pid_ns.child_reaper;
-		}
-	}
+	vns_task_exit_pidns_cleanup(tsk);
 
 #if !defined(CONFIG_SYSVIPC)
 	vns_prepare_exit_sem(tsk);
@@ -1040,6 +1045,8 @@ static void vns_free_nsproxy_hook(struct nsproxy *ns)
 				     is_child_reaper);
 	}
 #endif
+	if (current->flags & PF_EXITING)
+		vns_task_exit_pidns_cleanup(current);
 
 	if (vns_nsproxy_set_contains(ns)) {
 		if (atomic_inc_return(&vns_free_nsproxy_intercepts) == 1)
