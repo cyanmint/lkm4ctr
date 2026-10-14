@@ -366,10 +366,17 @@ static void ovl_file_modified(struct file *file)
 }
 
 #if VNS_OVL_HAVE_BACKING_FILE_RW
+#if VNS_OVL_BACKING_FILE_KIOCB
+static void ovl_file_end_write(struct kiocb *iocb, ssize_t ret)
+{
+	ovl_file_modified(iocb->ki_filp);
+}
+#else
 static void ovl_file_end_write(struct file *file, loff_t pos, ssize_t ret)
 {
 	ovl_file_modified(file);
 }
+#endif
 #endif
 
 static void ovl_file_accessed(struct file *file)
@@ -408,7 +415,7 @@ __nocfi static ssize_t ovl_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 #if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(file)->i_sb),
-		.user_file = file,
+		VNS_OVL_BACKING_FILE_CTX_USER_FILE(file)
 		.accessed = ovl_file_accessed,
 	};
 #else
@@ -472,7 +479,7 @@ __nocfi static ssize_t ovl_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 #if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(inode->i_sb),
-		.user_file = file,
+		VNS_OVL_BACKING_FILE_CTX_USER_FILE(file)
 		.end_write = ovl_file_end_write,
 	};
 #else
@@ -555,9 +562,12 @@ __nocfi static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
 #if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(in)->i_sb),
-		.user_file = in,
+		VNS_OVL_BACKING_FILE_CTX_USER_FILE(in)
 		.accessed = ovl_file_accessed,
 	};
+#if VNS_OVL_BACKING_FILE_KIOCB
+	struct kiocb iocb;
+#endif
 #else
 	const struct cred *old_cred;
 #endif
@@ -567,7 +577,14 @@ __nocfi static ssize_t ovl_splice_read(struct file *in, loff_t *ppos,
 		return ret;
 
 #if VNS_OVL_HAVE_BACKING_FILE_RW
+#if VNS_OVL_BACKING_FILE_KIOCB
+	init_sync_kiocb(&iocb, in);
+	iocb.ki_pos = *ppos;
+	ret = backing_file_splice_read(fd_file(real), &iocb, pipe, len, flags, &ctx);
+	*ppos = iocb.ki_pos;
+#else
 	ret = backing_file_splice_read(fd_file(real), ppos, pipe, len, flags, &ctx);
+#endif
 #else
 	old_cred = ovl_override_creds(file_inode(in)->i_sb);
 	ret = generic_file_splice_read(fd_file(real), ppos, pipe, len, flags);
@@ -596,9 +613,12 @@ __nocfi static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct fil
 #if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(inode->i_sb),
-		.user_file = out,
+		VNS_OVL_BACKING_FILE_CTX_USER_FILE(out)
 		.end_write = ovl_file_end_write,
 	};
+#if VNS_OVL_BACKING_FILE_KIOCB
+	struct kiocb iocb;
+#endif
 #else
 	const struct cred *old_cred;
 #endif
@@ -612,7 +632,14 @@ __nocfi static ssize_t ovl_splice_write(struct pipe_inode_info *pipe, struct fil
 		goto out_unlock;
 
 #if VNS_OVL_HAVE_BACKING_FILE_RW
+#if VNS_OVL_BACKING_FILE_KIOCB
+	init_sync_kiocb(&iocb, out);
+	iocb.ki_pos = *ppos;
+	ret = backing_file_splice_write(pipe, fd_file(real), &iocb, len, flags, &ctx);
+	*ppos = iocb.ki_pos;
+#else
 	ret = backing_file_splice_write(pipe, fd_file(real), ppos, len, flags, &ctx);
+#endif
 #else
 	old_cred = ovl_override_creds(inode->i_sb);
 	file_start_write(fd_file(real));
@@ -661,7 +688,7 @@ __nocfi static int ovl_mmap(struct file *file, struct vm_area_struct *vma)
 #if VNS_OVL_HAVE_BACKING_FILE_RW
 	struct backing_file_ctx ctx = {
 		.cred = ovl_creds(file_inode(file)->i_sb),
-		.user_file = file,
+		VNS_OVL_BACKING_FILE_CTX_USER_FILE(file)
 		.accessed = ovl_file_accessed,
 	};
 #else

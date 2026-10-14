@@ -382,6 +382,7 @@ extern const struct proc_ns_operations vns_ipcns_operations;
 
 struct cgroup_namespace *vns_copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns, struct cgroup_namespace *old_cgroup_ns);
 void vns_put_cgroup_ns(struct cgroup_namespace *ns);
+void vns_free_cgroup_ns(struct cgroup_namespace *ns);
 extern const struct proc_ns_operations vns_cgroupns_operations;
 /*
  * vns_default_cgroup_ns / vns_cgroup_default_init() (kernel/cgroup/namespace.c)

@@ -143,6 +143,16 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 #define VNS_OVL_HAVE_BACKING_FILE_RW   (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0))
 #define VNS_OVL_NEED_BACKING_FILE_FALLBACK (!VNS_OVL_HAVE_BACKING_FILE_RW)
 
+/* Linux 6.18 changed backing_file_ctx (dropping user_file and changing
+ * end_write to take a kiocb) and changed backing_file_splice_{read,write}
+ * from loff_t * positions to struct kiocb *. */
+#define VNS_OVL_BACKING_FILE_KIOCB (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0))
+#if VNS_OVL_BACKING_FILE_KIOCB
+#define VNS_OVL_BACKING_FILE_CTX_USER_FILE(file)
+#else
+#define VNS_OVL_BACKING_FILE_CTX_USER_FILE(file) .user_file = (file),
+#endif
+
 /* kernel_file_open() exists since 6.5 (pre-6.10 with an extra `struct inode *`
  * argument, dropped again at 6.10); vfs_parse_monolithic_sep() exists since
  * 6.6. Both, like backing_file_open() above, are real kernel helpers that may

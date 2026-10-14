@@ -50,7 +50,7 @@ void vns_free_cgroup_ns(struct cgroup_namespace *ns) /* [RENAME] */
 	vns_put_cgroup_ns(ns);
 }
 
-static struct cgroup_namespace *to_cg_ns(struct ns_common *ns)
+static struct cgroup_namespace *vns_to_cg_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct cgroup_namespace, ns);
 }
@@ -58,7 +58,7 @@ static struct cgroup_namespace *to_cg_ns(struct ns_common *ns)
 static int vns_cgroupns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct nsproxy *nsproxy = nsset->nsproxy;
-	struct cgroup_namespace *cgroup_ns = to_cg_ns(ns);
+	struct cgroup_namespace *cgroup_ns = vns_to_cg_ns(ns);
 
 	if (!ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN) ||
 	    !ns_capable(cgroup_ns->user_ns, CAP_SYS_ADMIN))
@@ -86,12 +86,12 @@ static struct ns_common *vns_cgroupns_get(struct task_struct *task)
 
 static void vns_cgroupns_put(struct ns_common *ns)
 {
-	vns_put_cgroup_ns(to_cg_ns(ns));
+	vns_put_cgroup_ns(vns_to_cg_ns(ns));
 }
 
 static struct user_namespace *vns_cgroupns_owner(struct ns_common *ns)
 {
-	return to_cg_ns(ns)->user_ns;
+	return vns_to_cg_ns(ns)->user_ns;
 }
 
 const struct proc_ns_operations vns_cgroupns_operations = { /* [RENAME] */
