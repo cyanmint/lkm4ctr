@@ -410,6 +410,7 @@ jobs:
       - name: Boot ${{ matrix.kmi }} kernels under QEMU
         run: |
           set +e
+          set -o pipefail
           failures=0
           kernel_count=0
           for kernel in testkernels/Image."$SHORT_KMI".*; do
@@ -426,10 +427,9 @@ jobs:
             else
               echo "No matching module artifact for $name; running checker-only boot test"
             fi
-            LKM4CTR_TEST_MODULE="$module_test" bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
-            rc=$?
+            LKM4CTR_TEST_MODULE="$module_test" bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
             echo "launcher_rc=$rc"
-            grep -E 'summary:|checker mode DONE|LKM4CTR_QEMU_TEST: DONE|QEMU exited with status|Kernel panic|Oops:|BUG:|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log" || true
             if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
               echo "KERNEL_ERROR: $name (see $log)"
               failures=$((failures + 1))
