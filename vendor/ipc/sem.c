@@ -100,7 +100,6 @@
 
 #include <linux/uaccess.h>
 #include "../vendor_kernel.h"
-#include "util.h"
 
 #undef SYSCALL_METADATA
 #define SYSCALL_METADATA(sname, nb, ...)
@@ -120,6 +119,7 @@
 #define copy_semundo vns_copy_semundo
 #define sem_init vns_sem_init
 #define free_ipcs vns_free_ipcs
+#include "util.h"
 
 /* One semaphore structure for each semaphore in the system. */
 struct sem {
@@ -2123,7 +2123,7 @@ out:
 	return un;
 }
 
-long __do_semtimedop(int semid, struct sembuf *sops,
+static long __do_semtimedop(int semid, struct sembuf *sops,
 		unsigned nsops, const struct timespec64 *timeout,
 		struct ipc_namespace *ns)
 {

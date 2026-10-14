@@ -58,7 +58,6 @@
 #include <linux/uaccess.h>
 
 #include "../vendor_kernel.h"
-#include "util.h"
 /* [BUILD-COMPAT] VFS/mm helper shims that paper over kernel-version API drift
  * (do_mmap()/vfs_mmap() argument changes); see glue/lkm4ctr_compat.h. */
 #include "lkm4ctr_compat.h"
@@ -78,6 +77,7 @@
 #define ksys_shmdt vns_ksys_shmdt
 #define shm_init vns_shm_init
 #define free_ipcs vns_free_ipcs
+#include "util.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 typedef struct user_struct vns_shm_lock_owner_t;
@@ -1708,7 +1708,7 @@ long compat_ksys_old_shmctl(int shmid, int cmd, void __user *uptr)
  * "raddr" thing points to kernel space, and there has to be a wrapper around
  * this.
  */
-long do_shmat(int shmid, char __user *shmaddr, int shmflg,
+static long do_shmat(int shmid, char __user *shmaddr, int shmflg,
 	      ulong *raddr, unsigned long shmlba)
 {
 	struct shmid_kernel *shp;

@@ -53,7 +53,6 @@
 #include <asm/current.h>
 #include <linux/uaccess.h>
 #include "../vendor_kernel.h"
-#include "util.h"
 
 #undef SYSCALL_METADATA
 #define SYSCALL_METADATA(sname, nb, ...)
@@ -72,6 +71,7 @@
 #define compat_ksys_msgrcv vns_compat_ksys_msgrcv
 #define msg_init vns_msg_init
 #define free_ipcs vns_free_ipcs
+#include "util.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static inline void vns_msg_hdrs_add(struct ipc_namespace *ns, unsigned long delta)
