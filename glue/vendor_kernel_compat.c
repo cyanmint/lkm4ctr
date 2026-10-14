@@ -113,6 +113,10 @@ typedef void (*key_put_fn_t)(struct key *);
 #endif
 typedef void (*kill_litter_super_fn_t)(struct super_block *);
 typedef void (*generic_shutdown_super_fn_t)(struct super_block *);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+typedef int (*ns_common_init_fn_t)(struct ns_common *, u32,
+					  const struct proc_ns_operations *, int);
+#endif
 
 static inc_ucount_fn_t            vns_inc_ucount_real;
 static dec_ucount_fn_t            vns_dec_ucount_real;
@@ -148,6 +152,9 @@ static key_put_fn_t                vns_key_put_real;
 #endif
 static kill_litter_super_fn_t      vns_kill_litter_super_real;
 static generic_shutdown_super_fn_t vns_generic_shutdown_super_real;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static ns_common_init_fn_t vns_ns_common_init_real;
+#endif
 
 /*
  * [BUILD-COMPAT] tasklist_lock (kernel/fork.c, not exported).
@@ -318,6 +325,9 @@ void vns_compat_resolve(void)
 #endif
 	RESOLVE(vns_kill_litter_super_real,     kill_litter_super);
 	RESOLVE(vns_generic_shutdown_super_real, generic_shutdown_super);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	RESOLVE(vns_ns_common_init_real,        __ns_common_init);
+#endif
 #ifdef CONFIG_CGROUPS
 	/*
 	 * Best-effort resolve of the *real* kernel's init_cgroup_ns. This is
@@ -396,6 +406,15 @@ bool vns_native_userns_core_available(void)
 	return shadow_hook_resolve("create_user_ns") != 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+int __nocfi vns_ns_common_compat_init(struct ns_common *ns, unsigned int type)
+{
+	if (!vns_ns_common_init_real)
+		return -ENOENT;
+	return vns_ns_common_init_real(ns, type, ns->ops, (int)ns->inum);
+}
+#endif
+
 bool vns_compat_ready(void)
 {
 	bool ready = true;
@@ -420,6 +439,13 @@ bool vns_compat_ready(void)
 			    "compat: do_exit unresolved; vendor_kernel unavailable");
 		ready = false;
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	if (!vns_ns_common_init_real) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "compat: __ns_common_init unresolved; vendor_kernel unavailable");
+		ready = false;
+	}
+#endif
 	/*
 	 * uts_ns_cache/nsproxy_cachep/pid_ns_cachep/user_ns_cachep are no
 	 * longer resolved from the running kernel at all (see the comment in

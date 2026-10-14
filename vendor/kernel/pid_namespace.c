@@ -123,6 +123,7 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
 		goto out_free_idr;
 	/* [RENAME] vendored proc-ns ops are namespaced. */
 	ns->ns.ops = &vns_pidns_operations;
+	vns_init_ns_common(&ns->ns, CLONE_NEWPID);
 
 	vns_pid_init_ref(ns);
 	ns->level = level;
@@ -528,7 +529,7 @@ static struct user_namespace *pidns_owner(struct ns_common *ns)
 
 const struct proc_ns_operations vns_pidns_operations = { /* [RENAME] */
 	.name		= "pid",
-	.type		= CLONE_NEWPID,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWPID)
 	.get		= pidns_get,
 	.put		= pidns_put,
 	.install	= pidns_install,
@@ -539,7 +540,7 @@ const struct proc_ns_operations vns_pidns_operations = { /* [RENAME] */
 const struct proc_ns_operations vns_pidns_for_children_operations = { /* [RENAME] */
 	.name		= "pid_for_children",
 	.real_ns_name	= "pid",
-	.type		= CLONE_NEWPID,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWPID)
 	.get		= pidns_for_children_get,
 	.put		= pidns_put,
 	.install	= pidns_install,

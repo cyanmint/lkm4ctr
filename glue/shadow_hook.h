@@ -212,6 +212,8 @@ struct shadow_hook {
  * shadow_hook_is_quiescing() - current state of that flag.
  */
 unsigned long shadow_hook_resolve(const char *name);
+int shadow_hijack_init(void);
+void shadow_hijack_exit(void);
 int shadow_hook_install(struct shadow_hook *hook);
 void shadow_hook_remove(struct shadow_hook *hook);
 int shadow_hook_install_all(struct shadow_hook **hooks, const char *tag);

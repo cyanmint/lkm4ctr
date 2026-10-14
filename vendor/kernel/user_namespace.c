@@ -159,6 +159,7 @@ struct cred *new)
 	if (ret)
 		goto fail_free;
 	ns->ns.ops = &vns_userns_operations;
+	vns_init_ns_common(&ns->ns, CLONE_NEWUSER);
 
 	vns_user_init_ref(ns);
 	/* Leave the new->user_ns reference with the new user namespace. */
@@ -1464,7 +1465,7 @@ static struct user_namespace *userns_owner(struct ns_common *ns)
 
 const struct proc_ns_operations vns_userns_operations = { /* [RENAME] */
 	.name		= "user",
-	.type		= CLONE_NEWUSER,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWUSER)
 	.get		= userns_get,
 	.put		= userns_put,
 	.install	= userns_install,

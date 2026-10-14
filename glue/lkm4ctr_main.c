@@ -2,14 +2,12 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 
+#include "lkm4ctr_diagfs.h"
 #include "lkm4ctr_log.h"
+#include "shadow_hook.h"
 
-int shadow_hijack_init(void);
-void shadow_hijack_exit(void);
 int vendor_kernel_init(void);
 void vendor_kernel_exit(void);
-int lkm4ctr_diagfs_init(void);
-void lkm4ctr_diagfs_exit(void);
 int lkm4ctr_hotreload_init(void);
 void lkm4ctr_hotreload_exit(void);
 

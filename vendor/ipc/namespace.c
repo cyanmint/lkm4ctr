@@ -66,6 +66,7 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 		goto fail_free;
 	/* [RENAME] vendored proc-ns ops are prefixed. */
 	ns->ns.ops = &vns_ipcns_operations;
+	vns_init_ns_common(&ns->ns, CLONE_NEWIPC);
 
 	vns_ipc_init_ref(ns);
 	ns->user_ns = vns_get_user_ns(user_ns); /* [BUILD-COMPAT] */
@@ -319,7 +320,7 @@ static struct user_namespace *ipcns_owner(struct ns_common *ns)
 
 const struct proc_ns_operations vns_ipcns_operations = { /* [RENAME] */
 	.name		= "ipc",
-	.type		= CLONE_NEWIPC,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWIPC)
 	.get		= ipcns_get,
 	.put		= ipcns_put,
 	.install	= ipcns_install,

@@ -26,6 +26,9 @@
 
 #include "../../vendor_kernel.h"
 
+/* NS_COMMON_INIT must bind the static singleton to the vendored ops. */
+#define cgroupns_operations vns_cgroupns_operations
+
 struct cgroup_namespace *vns_copy_cgroup_ns(unsigned long flags,
 					struct user_namespace *user_ns,
 					struct cgroup_namespace *old_ns) /* [RENAME] */
@@ -93,7 +96,7 @@ static struct user_namespace *vns_cgroupns_owner(struct ns_common *ns)
 
 const struct proc_ns_operations vns_cgroupns_operations = { /* [RENAME] */
 	.name		= "cgroup",
-	.type		= CLONE_NEWCGROUP,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWCGROUP)
 	.get		= vns_cgroupns_get,
 	.put		= vns_cgroupns_put,
 	.install	= vns_cgroupns_install,
@@ -116,7 +119,7 @@ const struct proc_ns_operations vns_cgroupns_operations = { /* [RENAME] */
  * which is out of scope here.
  */
 struct cgroup_namespace vns_default_cgroup_ns = {
-	.ns.ops		= &vns_cgroupns_operations,
+	VNS_NS_COMMON_TYPE_INIT(vns_default_cgroup_ns, CLONE_NEWCGROUP)
 	/* [BUILD-COMPAT] .user_ns set at runtime in vns_cgroup_default_init():
 	 * init_user_ns is now a runtime pointer dereference (vendor_kernel.h),
 	 * not a compile-time constant usable in a static initializer. */
@@ -125,6 +128,7 @@ struct cgroup_namespace vns_default_cgroup_ns = {
 void vns_cgroup_default_init(void) /* [BUILD-COMPAT] */
 {
 	vns_default_cgroup_ns.user_ns = vns_real_init_user_ns;
+	vns_default_cgroup_ns.ns.ops = &vns_cgroupns_operations;
 
 	/*
 	 * Pin vns_default_cgroup_ns's refcount to a large sentinel value so

@@ -7,10 +7,15 @@ lkm4ctr_run_qemu_mode() {
 	KERNEL="$2"
 	INIT="$3"
 	RAMDISK="${4:-}"
-	MODULE_ARG=""
-	case "${KERNEL##*/}" in
-		*.patched) MODULE_ARG=" lkm4ctr_test_module=1" ;;
-		*) MODULE_ARG=" lkm4ctr_test_module=0" ;;
+	case "${LKM4CTR_TEST_MODULE:-auto}" in
+		1) MODULE_ARG=" lkm4ctr_test_module=1" ;;
+		0) MODULE_ARG=" lkm4ctr_test_module=0" ;;
+		*)
+			case "${KERNEL##*/}" in
+				*.patched) MODULE_ARG=" lkm4ctr_test_module=1" ;;
+				*) MODULE_ARG=" lkm4ctr_test_module=0" ;;
+			esac
+			;;
 	esac
 
 	mkdir -p qemu-logs
@@ -70,7 +75,7 @@ lkm4ctr_run_checker_mode() {
 	# it never does.
 	SAFE_UNLOAD_TIMEOUT_SEC=30
 	if [ "$MODULE" = "-" ]; then
-		echo "=== LKM4CTR_QEMU_TEST: checker (stock baseline; module intentionally omitted) ==="
+		echo "=== LKM4CTR_QEMU_TEST: checker (module test intentionally disabled) ==="
 		"$CHECKER" || true
 		echo "=== LKM4CTR_QEMU_TEST: checker mode DONE (no module) ==="
 		return 0
@@ -122,7 +127,7 @@ lkm4ctr_init_1() {
 		cp /lkm4ctr_checker /newroot/
 		if [ "$module_test_status" -eq 0 ]; then
 			if [ ! -f /lkm4ctr.ko ]; then
-				echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+				echo "module test requested but /lkm4ctr.ko is missing"
 				return 1
 			fi
 			cp /lkm4ctr.ko /newroot/ || return 1
@@ -144,7 +149,7 @@ lkm4ctr_init_1() {
 		cp /lkm4ctr_checker /newroot/
 		if [ "$module_test_status" -eq 0 ]; then
 			if [ ! -f /lkm4ctr.ko ]; then
-				echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+				echo "module test requested but /lkm4ctr.ko is missing"
 				return 1
 			fi
 			cp /lkm4ctr.ko /newroot/ || return 1
@@ -208,13 +213,13 @@ lkm4ctr_init_2() {
 	echo "=== LKM4CTR_QEMU_TEST: running shared checker mode ==="
 	if [ "$module_test_status" -eq 0 ]; then
 		if [ ! -f /lkm4ctr.ko ]; then
-			echo "patched-kernel test requested but /lkm4ctr.ko is missing"
+			echo "module test requested but /lkm4ctr.ko is missing"
 			exit 1
 		fi
 		/system/bin/sh /second_init -t /lkm4ctr_checker /lkm4ctr.ko || exit 1
 	else
 		/system/bin/sh /second_init -t /lkm4ctr_checker - || exit 1
-		echo "=== LKM4CTR_QEMU_TEST: stock baseline; skipping module and container-runtime tests ==="
+		echo "=== LKM4CTR_QEMU_TEST: module test disabled; skipping module and container-runtime tests ==="
 		echo "=== LKM4CTR_QEMU_TEST: DONE ==="
 		source /do-umounts.sh
 		return 0

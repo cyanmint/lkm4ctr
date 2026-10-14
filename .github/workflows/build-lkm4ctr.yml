@@ -83,23 +83,21 @@
 #     runs its stage-2 body instead of stage-1.
 # The stage-2 body (running as PID 1 of the real root, image1.ext4) populates
 # /dev again (switch_root does not preserve the initramfs's un-mounted /dev
-# contents, so mdev must repopulate it) and runs lkm4ctr_checker. Stock images
-# are boot baselines: they do not load the module or run container-runtime
-# tests. For a `.patched` image with a built module, stage 2 insmods
-# lkm4ctr.ko, runs the checker again, starts dockerd, and runs the alpine and
-# ubuntu images already present in image1.ext4.
+# contents, so mdev must repopulate it) and runs lkm4ctr_checker. For a
+# `.patched` image with a built module, stage 2 insmods lkm4ctr.ko, runs the
+# checker again, starts dockerd, and runs the alpine and ubuntu images already
+# present in image1.ext4. Stock images remain module-free boot baselines.
 #
 # Within one KMI's job, every kernel Image available for that KMI (stock,
-# and patched if bundled) is booted sequentially, so QEMU is installed and
+# patched if bundled, and DDK-built for the four stock-only KMI cases) is
+# booted sequentially, so QEMU is installed and
 # the (sizeable) prebuilt image1.ext4 is downloaded only once per KMI
 # instead of once per kernel:
 #   - "stock": a stock, unpatched Android GKI kernel (no SukiSU/SUSFS/
-#     lkm4ctr patches at all), a baseline sanity check of the QEMU boot
-#     environment itself.
+#     lkm4ctr patches at all), used as a boot baseline only.
 #   - "patched": a SukiSU/SUSFS + ctr_patches Image from the archive, or a
-#     DDK-built module-test Image for the four requested KMIs; these are the
-#     images against which the matching remote-built module and Docker path
-#     are exercised.
+#     DDK-built module-test Image for the four requested KMIs; these images
+#     exercise the matching remote-built module and Docker path.
 #
 # Credit: SukiSU-Ultra (https://github.com/SukiSU-Ultra/SukiSU-Ultra).
 
@@ -177,8 +175,8 @@ jobs:
           " "$kmis")
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
           # The "test" matrix is the "build" matrix above plus
-          # $TEST_ONLY_KMIS (KMIs with no DDK image/build job yet, boot-
-          # tested bare -- see "Boot test (QEMU)" above), deduplicated.
+          # $TEST_ONLY_KMIS (KMIs with no DDK image/build job yet, booted
+          # without a module artifact), deduplicated.
           test_json=$(python3 -c "
           import json, sys
           build_kmis = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
@@ -334,7 +332,16 @@ jobs:
           test -s "$KDIR/.config"
           test -s "$KDIR/Module.symvers"
           grep -qw register_kprobe "$KDIR/Module.symvers"
-          make -C "$KERNEL_SRC" O="$KDIR" ARCH=arm64 LLVM=1 Image -j"$(nproc)"
+          echo "=== available memory ==="
+          free -h || true
+          for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events; do
+            if [ -r "$f" ]; then printf '%s: ' "$f"; tr '\n' ' ' < "$f"; echo; fi
+          done
+          LD_PATH="$(command -v ld.lld)"
+          printf '#!/bin/sh\nexec "%s" --threads=1 "$@"\n' "$LD_PATH" > "$RUNNER_TEMP/ld-serial"
+          chmod 755 "$RUNNER_TEMP/ld-serial"
+          "$RUNNER_TEMP/ld-serial" --version
+          make -C "$KERNEL_SRC" O="$KDIR" ARCH=arm64 LLVM=1 LD="$RUNNER_TEMP/ld-serial" Image -j2
           IMAGE="$KDIR/arch/arm64/boot/Image"
           test -s "$IMAGE"
           output="Image.a${KMI#android}.patched"
@@ -347,6 +354,7 @@ jobs:
         with:
           name: ddk-kernel-image-${{ matrix.kmi }}
           path: Image.a*.patched
+
 
   # Build a single injected (busybox) ramdisk carrying lkm4ctr.ko (if this
   # KMI was actually built), lkm4ctr_checker and the merged init script,
@@ -361,9 +369,8 @@ jobs:
   # build matrix plus $TEST_ONLY_KMIS), independently of the full "build"
   # matrix's overall pass/fail -- an individual KMI's lkm4ctr.ko download
   # is allowed to fail (continue-on-error) so a KMI excluded from the build
-  # matrix (e.g. via a custom `kmis` workflow_dispatch input) still gets
-  # boot-tested bare (see "Boot test (QEMU)"
-  # above), it just skips the insmod.
+  # matrix still gets boot-tested bare, but the four stock-only module tests
+  # require their matching DDK-built kernel Images.
   test:
     needs: [prepare, build, build-checker, build-test-kernel]
     if: ${{ !cancelled() && needs.build-checker.result == 'success' && (needs.build-test-kernel.result == 'success' || needs.build-test-kernel.result == 'skipped') }}
@@ -440,8 +447,8 @@ jobs:
       # --- 3. injected ramdisk: lkm4ctr.ko (if built for this KMI) +
       #        lkm4ctr_checker, /busybox (prebuilt, from testsuite.zip) and
       #        the merged qemu_test.sh (init mode), which mounts
-      #        image1.ext4 (/dev/nvme0n1) and switch_root's into it. The
-      #        host launcher enables module loading only for *.patched images;
+      #        image1.ext4 (/dev/nvme0n1) and switch_root's into it. The host
+      #        launcher enables module testing only for *.patched images;
       #        stock images remain module-free boot baselines. ---
       - name: Build injected (busybox) ramdisk
         run: |
@@ -456,7 +463,7 @@ jobs:
           if [ -f payload/lkm4ctr.ko ]; then
             cp payload/lkm4ctr.ko injected-ramdisk/
           else
-            echo "no lkm4ctr.ko built for ${{ matrix.kmi }} -- booting bare (boot/dockerd sanity only)"
+            echo "no lkm4ctr.ko built for ${{ matrix.kmi }} -- boot/checker baseline only"
           fi
 
           # Merged host-launcher/stage-1/stage-2 script: committed at
@@ -490,7 +497,11 @@ jobs:
             echo "--- $name ---"
             # qemu_test.sh's shebang is #!/busybox sh (needed for its
             # ramdisk-init roles), so invoke the host-launcher mode via bash.
-            bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+            if [ -f payload/lkm4ctr.ko ]; then
+              LKM4CTR_TEST_MODULE=auto bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+            else
+              LKM4CTR_TEST_MODULE=0 bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio >"$log" 2>&1
+            fi
             rc=$?
             echo "launcher_rc=$rc"
             grep -E 'summary:|checker mode DONE|LKM4CTR_QEMU_TEST: DONE|QEMU exited with status|Kernel panic|Oops:|BUG:|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log" || true

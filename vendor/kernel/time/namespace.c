@@ -21,6 +21,9 @@
 
 #include "../../vendor_kernel.h"
 
+/* NS_COMMON_INIT must bind the static singleton to the vendored ops. */
+#define timens_operations vns_timens_operations
+
 struct time_namespace *vns_copy_time_ns(unsigned long flags,
 					struct user_namespace *user_ns,
 					struct time_namespace *old_ns) /* [RENAME] */
@@ -138,7 +141,7 @@ static struct user_namespace *vns_timens_owner(struct ns_common *ns)
 
 const struct proc_ns_operations vns_timens_operations = { /* [RENAME] */
 	.name		= "time",
-	.type		= CLONE_NEWTIME,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWTIME)
 	.get		= vns_timens_get,
 	.put		= vns_timens_put,
 	.install	= vns_timens_install,
@@ -148,7 +151,7 @@ const struct proc_ns_operations vns_timens_operations = { /* [RENAME] */
 const struct proc_ns_operations vns_timens_for_children_operations = { /* [RENAME] */
 	.name		= "time_for_children",
 	.real_ns_name	= "time",
-	.type		= CLONE_NEWTIME,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWTIME)
 	.get		= vns_timens_for_children_get,
 	.put		= vns_timens_put,
 	.install	= vns_timens_install,
@@ -157,15 +160,16 @@ const struct proc_ns_operations vns_timens_for_children_operations = { /* [RENAM
 
 struct time_namespace vns_init_time_ns = { /* [RENAME] */
 	VNS_TIME_REF_INIT
+	VNS_NS_COMMON_TYPE_INIT(vns_init_time_ns, CLONE_NEWTIME)
 	/* [BUILD-COMPAT] .user_ns set at runtime in vns_time_ns_default_init()
 	 * (glue/vendor_kernel_module.c): init_user_ns is now a runtime pointer
 	 * dereference (vendor_kernel.h), not a compile-time constant usable
 	 * in a static initializer. */
-	.ns.ops		= &vns_timens_operations,
 	.frozen_offsets	= true,
 };
 
 void vns_time_ns_default_init(void) /* [BUILD-COMPAT] */
 {
 	vns_init_time_ns.user_ns = vns_real_init_user_ns;
+	vns_init_time_ns.ns.ops = &vns_timens_operations;
 }

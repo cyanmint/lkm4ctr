@@ -30,7 +30,8 @@
  * ns->flags). Splitting these callbacks into their own translation unit
  * (kept out of lkm4ctr/Makefile's VNS_CFI_UNSAFE_OBJS) lets them keep
  * normal CFI instrumentation; only vns_idmap_create_fd()'s own outgoing
- * resolved-pointer call (anon_inode_getfd_secure(), via
+ * resolved-pointer call (anon_inode_getfd_secure() or its
+ * anon_inode_create_getfd() fallback, via
  * shadow_hook_resolve()) is marked __nocfi individually, mirroring
  * vendor_kernel_ipc_callbacks.c/vns_kill_litter_super().
  */
@@ -50,7 +51,7 @@
 
 /*
  * The fabricated inode has no connection to the target task's real
- * /proc/<pid> directory (it is a fresh, unique anon_inode_getfd_secure()
+ * /proc/<pid> directory (it is a fresh, unique secure anon-inode
  * inode), so the (pid, kind) it was created for is tagged onto
  * inode->i_private as a single packed integer: the low 2 bits carry
  * @kind (see enum vns_idmap_kind), the rest carry @pid. This lets a later
@@ -301,14 +302,17 @@ long __nocfi vns_idmap_create_fd(pid_t pid, enum vns_idmap_kind kind)
 		return -EINVAL;
 
 	/*
-	 * anon_inode_getfd_secure() (not the plain, shared-singleton-inode
-	 * anon_inode_getfd()) is required here so both the initial open
-	 * below and any later magic-link reopen get their own private
-	 * inode to tag with (pid, kind), and the symbol still needs to be
+	 * anon_inode_getfd_secure() or anon_inode_create_getfd() is required here.
+	 * Plain anon_inode_getfd() uses a shared singleton inode; this helper is
+	 * required so both the initial open and any later magic-link reopen get a
+	 * private inode to tag with (pid, kind), and the symbol still needs to be
 	 * resolved via shadow_hook_resolve() rather than called directly.
 	 */
 	anon_inode_getfd_secure_fn = (vns_anon_inode_getfd_secure_fn)
 		shadow_hook_resolve("anon_inode_getfd_secure");
+	if (!anon_inode_getfd_secure_fn)
+		anon_inode_getfd_secure_fn = (vns_anon_inode_getfd_secure_fn)
+			shadow_hook_resolve("anon_inode_create_getfd");
 	if (!anon_inode_getfd_secure_fn)
 		return -ENOENT;
 

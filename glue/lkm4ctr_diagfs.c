@@ -223,6 +223,7 @@
 #include "../vendor/vendor_kernel.h"
 #include "vendor_kernel_diag.h"
 #include "lkm4ctr_log.h"
+#include "lkm4ctr_diagfs.h"
 #include "lkm4ctr_compat.h"
 
 #define LKM4CTR_DIAGFS_MAGIC	0x4C4B4D34 /* "LKM4" */

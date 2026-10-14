@@ -94,6 +94,7 @@ static struct uts_namespace *clone_uts_ns(struct user_namespace *user_ns,
 	ns->ucounts = ucounts;
 	/* [RENAME] vendored proc-ns ops are namespaced to avoid kernel symbol collisions. */
 	ns->ns.ops = &vns_utsns_operations;
+	vns_init_ns_common(&ns->ns, CLONE_NEWUTS);
 
 	down_read(&uts_sem);
 	memcpy(&ns->name, &old_ns->name, sizeof(ns->name));
@@ -158,7 +159,7 @@ void vns_put_uts_ns(struct uts_namespace *ns) /* [BUILD-COMPAT] */
 		vns_free_uts_ns(ns);
 }
 
-static inline struct uts_namespace *to_uts_ns(struct ns_common *ns)
+static inline struct uts_namespace *vns_to_uts_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct uts_namespace, ns);
 }
@@ -181,13 +182,13 @@ static struct ns_common *utsns_get(struct task_struct *task)
 
 static void utsns_put(struct ns_common *ns)
 {
-	vns_put_uts_ns(to_uts_ns(ns)); /* [BUILD-COMPAT] */
+	vns_put_uts_ns(vns_to_uts_ns(ns)); /* [BUILD-COMPAT] */
 }
 
 static int utsns_install(struct nsset *nsset, struct ns_common *new)
 {
 	struct nsproxy *nsproxy = nsset->nsproxy;
-	struct uts_namespace *ns = to_uts_ns(new);
+	struct uts_namespace *ns = vns_to_uts_ns(new);
 
 	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
@@ -201,12 +202,12 @@ static int utsns_install(struct nsset *nsset, struct ns_common *new)
 
 static struct user_namespace *utsns_owner(struct ns_common *ns)
 {
-	return to_uts_ns(ns)->user_ns;
+	return vns_to_uts_ns(ns)->user_ns;
 }
 
 const struct proc_ns_operations vns_utsns_operations = { /* [RENAME] */
 	.name		= "uts",
-	.type		= CLONE_NEWUTS,
+	VNS_PROC_NS_OP_TYPE_INIT(CLONE_NEWUTS)
 	.get		= utsns_get,
 	.put		= utsns_put,
 	.install	= utsns_install,

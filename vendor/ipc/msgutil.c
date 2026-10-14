@@ -31,17 +31,20 @@ DEFINE_SPINLOCK(mq_lock);
 struct ipc_namespace init_ipc_ns = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 	.count = REFCOUNT_INIT(1),
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 	.ns.count = REFCOUNT_INIT(1),
 #endif
+	VNS_NS_COMMON_TYPE_INIT(vns_default_ipc_ns, CLONE_NEWIPC)
 	/* [BUILD-COMPAT] .user_ns can't be initialized to &init_user_ns here:
 	 * init_user_ns is now a runtime pointer dereference (see
 	 * vendor_kernel.h), not a compile-time constant, so it can't appear
 	 * in a static initializer. Assigned instead in vns_ipc_default_init()
 	 * (glue/vendor_kernel_ipc_syscalls.c), once vns_real_init_user_ns has
 	 * been captured. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 	.ns.inum = PROC_IPC_INIT_INO,
-#ifdef CONFIG_IPC_NS
+#endif
+#if defined(CONFIG_IPC_NS) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 	.ns.ops = &ipcns_operations,
 #endif
 };

@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/refcount.h>
 #include <linux/nsproxy.h>
+#include <linux/ns_common.h>
 #include <linux/proc_ns.h>
 #include <linux/utsname.h>
 #include <linux/pid_namespace.h>
@@ -233,6 +234,36 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 	memset(&ns->stashed, 0, sizeof(ns->stashed));
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+/* Static module-owned default namespaces must not be freed by task teardown. */
+#define VNS_NS_COMMON_TYPE_INIT(object, clone_flag) \
+	.ns = NS_COMMON_INIT(object, 0x40000000),
+#define VNS_PROC_NS_OP_TYPE_INIT(clone_flag)
+int __nocfi vns_ns_common_compat_init(struct ns_common *ns, unsigned int type);
+static inline void vns_init_ns_common(struct ns_common *ns, unsigned int type)
+{
+	(void)vns_ns_common_compat_init(ns, type);
+}
+
+static inline unsigned int vns_get_ns_type(struct ns_common *ns)
+{
+	return ns->ns_type;
+}
+#else
+#define VNS_NS_COMMON_TYPE_INIT(object, clone_flag)
+#define VNS_PROC_NS_OP_TYPE_INIT(clone_flag) .type = (clone_flag),
+static inline void vns_init_ns_common(struct ns_common *ns, unsigned int type)
+{
+	(void)ns;
+	(void)type;
+}
+
+static inline unsigned int vns_get_ns_type(struct ns_common *ns)
+{
+	return ns->ops->type;
+}
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->kref.refcount, 1)
 #define vns_uts_get_ref(obj) vns_get_count(&(obj)->kref.refcount)
@@ -250,6 +281,23 @@ static inline void vns_zero_stashed(struct ns_common *ns)
 #define vns_ipc_put_ref_lock(obj, lock) vns_refcount_dec_and_lock(&(obj)->count, (lock))
 #define vns_cgroupns_init_ref(obj, value) vns_init_count(&(obj)->count, (value))
 #define VNS_TIME_REF_INIT .kref = KREF_INIT(1),
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define vns_uts_init_ref(obj) do { } while (0)
+#define vns_uts_get_ref(obj) ns_ref_inc(obj)
+#define vns_uts_put_ref(obj) ns_ref_put(obj)
+#define vns_pid_init_ref(obj) do { } while (0)
+#define vns_pid_get_ref(obj) ns_ref_inc(obj)
+#define vns_pid_put_ref(obj) ns_ref_put(obj)
+#define vns_user_init_ref(obj) do { } while (0)
+#define vns_user_get_ref(obj) ns_ref_inc(obj)
+#define vns_user_put_ref(obj) ns_ref_put(obj)
+#define vns_ipc_init_ref(obj) do { } while (0)
+#define vns_ipc_pin_ref(obj, value) do { } while (0)
+#define vns_ipc_get_ref(obj) ns_ref_inc(obj)
+#define vns_ipc_get_ref_not_zero(obj) ns_ref_get(obj)
+#define vns_ipc_put_ref_lock(obj, lock) ns_ref_put_and_lock(obj, lock)
+#define vns_cgroupns_init_ref(obj, value) do { } while (0)
+#define VNS_TIME_REF_INIT
 #else
 #define vns_uts_init_ref(obj) vns_init_count(&(obj)->ns.count, 1)
 #define vns_uts_get_ref(obj) vns_get_count(&(obj)->ns.count)

@@ -820,9 +820,9 @@ long vns_sys_setns(int fd, int flags) /* [RENAME] */
 
 	if (proc_ns_file(file)) {
 		ns = get_proc_ns(file_inode(file));
-		if (flags && (ns->ops->type != flags))
+		if (flags && (vns_get_ns_type(ns) != flags))
 			err = -EINVAL;
-		flags = ns->ops->type;
+		flags = vns_get_ns_type(ns);
 	} else if (!IS_ERR(pidfd_pid(file))) {
 		err = check_setns_flags(flags);
 	} else {
