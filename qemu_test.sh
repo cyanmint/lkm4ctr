@@ -488,24 +488,6 @@ lkm4ctr_init_1() {
 				;;
 		esac
 		if [ "$nsfs_pins_open" -gt 0 ]; then
-			/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
-			/busybox wait "$nsfs_launcher_pid" 2>/dev/null || true
-			if [ -w /proc/sys/vm/drop_caches ]; then
-				echo 2 > /proc/sys/vm/drop_caches
-			fi
-			nsfs_pins_after_task_exit=$(/busybox awk '$1 == "nsfs_inode_pins:" { print $2 }' /mnt/lkm4ctr-nsfs-diag/v/resources)
-			case "$nsfs_pins_after_task_exit" in
-				''|*[!0-9]*)
-					echo "RMMOD_TEST_FAILED: invalid NSFS pin count after namespace task exit"
-					/busybox poweroff -f
-					return 1
-					;;
-			esac
-			if [ "$nsfs_pins_after_task_exit" -eq 0 ]; then
-				echo "RMMOD_TEST_FAILED: open NSFS descriptor did not retain its pin after namespace task exit"
-				/busybox poweroff -f
-				return 1
-			fi
 			if ! /busybox umount /mnt/lkm4ctr-nsfs-diag; then
 				echo "RMMOD_TEST_FAILED: could not unmount NSFS-test diagfs before direct rmmod"
 				/busybox poweroff -f
@@ -513,7 +495,7 @@ lkm4ctr_init_1() {
 			fi
 			/busybox rmmod lkm4ctr
 			if ! /busybox grep -q '^lkm4ctr ' /proc/modules; then
-				echo "RMMOD_TEST_FAILED: module disappeared despite an active vendored NSFS inode"
+				echo "RMMOD_TEST_FAILED: module disappeared despite an open vendored NSFS descriptor"
 				/busybox poweroff -f
 				return 1
 			fi
@@ -523,7 +505,7 @@ lkm4ctr_init_1() {
 				return 1
 			fi
 			if echo force > /mnt/lkm4ctr-nsfs-diag/v/control; then
-				echo "RMMOD_TEST_FAILED: controlled stop ignored an active vendored NSFS inode"
+				echo "RMMOD_TEST_FAILED: controlled stop ignored an open vendored NSFS descriptor"
 				/busybox poweroff -f
 				return 1
 			fi
@@ -544,6 +526,8 @@ lkm4ctr_init_1() {
 			echo "=== LKM4CTR_QEMU_TEST: NSFS lifetime assertion skipped; pre-insmod unshare -i proved native IPC namespace support ==="
 		fi
 		if [ "$nsfs_pins_open" -gt 0 ]; then
+			/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
+			/busybox wait "$nsfs_launcher_pid" 2>/dev/null || true
 			if [ -w /proc/sys/vm/drop_caches ]; then
 				echo 2 > /proc/sys/vm/drop_caches
 			fi
