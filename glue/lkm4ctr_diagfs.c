@@ -1233,6 +1233,19 @@ static int lkm4ctr_diagfs_parse_control_cmd(const char *cmd, bool is_global,
 	return 0;
 }
 
+/*
+ * vendor_kernel_module.o is built without CFI because it contains runtime-
+ * resolved kernel calls. Keep that exception scoped to this lifecycle-vtable
+ * trampoline rather than disabling CFI across the diagfs control paths.
+ */
+typedef int (*lkm4ctr_diagfs_lifecycle_fn)(void);
+
+static noinline int __nocfi
+lkm4ctr_diagfs_call_lifecycle(lkm4ctr_diagfs_lifecycle_fn fn)
+{
+	return fn();
+}
+
 static int lkm4ctr_diagfs_module_load(struct lkm4ctr_diagfs_module *mod,
 					      bool from_global)
 {
@@ -1259,7 +1272,7 @@ static int lkm4ctr_diagfs_module_load(struct lkm4ctr_diagfs_module *mod,
 	mutex_unlock(&lkm4ctr_unload_lock);
 
 	LKM4CTR_INFO(mod->tag, "load requested via diagfs control write");
-	ret = mod->mod_init();
+	ret = lkm4ctr_diagfs_call_lifecycle(mod->mod_init);
 
 	mutex_lock(&lkm4ctr_unload_lock);
 	mod->state = lkm4ctr_diagfs_module_stable_state(mod);
@@ -1299,7 +1312,7 @@ static int lkm4ctr_diagfs_module_unload(struct lkm4ctr_diagfs_module *mod,
 
 	if (force && !from_global)
 		shadow_hook_quiesce(true);
-	ret = mod->mod_exit();
+	ret = lkm4ctr_diagfs_call_lifecycle(mod->mod_exit);
 	if (force && !from_global)
 		shadow_hook_quiesce(false);
 
