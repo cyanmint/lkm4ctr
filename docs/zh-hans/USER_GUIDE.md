@@ -157,14 +157,14 @@ sudo cat /mnt/lkm4ctr/v/resources
 sudo cat /mnt/lkm4ctr/v/namespaces
 ```
 
-这不是 Docker 的必需步骤。停止 Docker 并卸载诊断文件系统后，才请求普通卸载：
+这不是 Docker 的必需步骤。停止 Docker 并卸载诊断文件系统后，如果 `/dev/mqueue` 已挂载，也要先正常卸载；活动 superblock 会固定模块，`rmmod` 会安全地拒绝，直到挂载消失。仍持有 vendored namespace proxy 的进程会固定模块直到退出；请查看 `/v/resources` 的 `nsproxy_live`。vendored IPC 与 user namespace 数量分别见 `ipcns_live`、`userns_live`，对应释放 work 见 `ipcns_free_work_pending`、`userns_pending_work`。指向 vendored namespace 的 NSFS descriptor 也可能在 inode 缓存期间固定模块。vendored SysV 共享内存 segment 会令模块保持忙碌，请用 `ipcrm -m` 移除；无原生 `CONFIG_SYSVIPC` 时，SEM_UNDO 状态及 `sem_exit_work_pending` 会固定模块直到清理完成。受控停止在受跟踪的 IPC 资源或 task-exit work 尚存时会拒绝；不要强制移除：
 
 ```sh
 sudo umount /mnt/lkm4ctr
 sudo rmmod lkm4ctr
 ```
 
-模块会追踪正在执行的 hook，并可能拒绝不安全卸载。高级用户可使用 diagfs 的 hot-reload：
+模块会追踪正在执行的 hook、vendored namespace/NSFS 引用与 IPC 对象/work，并可能拒绝不安全卸载。高级用户可使用 diagfs 的 hot-reload：
 
 ```sh
 sudo sh -c 'printf "%s\n" "/absolute/path/to/new/lkm4ctr.ko" > /mnt/lkm4ctr/v/hotreload/do-hot-reload'

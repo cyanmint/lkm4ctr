@@ -157,14 +157,15 @@ sudo cat /mnt/lkm4ctr/v/resources
 sudo cat /mnt/lkm4ctr/v/namespaces
 ```
 
-這不是 Docker 的必要步驟。停止 Docker 並卸載診斷檔案系統後，才請求一般卸載：
+這不是 Docker 的必要步驟。停止 Docker 並卸載診斷檔案系統後，若 `/dev/mqueue` 有掛載，也要先正常卸載；掛載中的 superblock 會固定模組，`rmmod` 會安全地拒絕，直到該掛載消失。仍持有 vendored namespace proxy 的程序也會固定模組，請查看 `/v/resources` 的 `nsproxy_live`。vendored IPC 與 user namespace 數量分別顯示於 `ipcns_live`、`userns_live`，釋放 work 則見 `ipcns_free_work_pending`、`userns_pending_work`。指向 vendored namespace 的 NSFS descriptor 也會在 inode 快取期間固定模組；關閉 descriptor 後，引用不一定立即釋放。若卸載遭拒，請查看 `nsfs_inode_pins`，不可強制移除。vendored SysV 共用記憶體 segment 會令模組保持忙碌，請以 `ipcrm -m` 移除；未啟用原生 `CONFIG_SYSVIPC` 時，`SEM_UNDO` 狀態與 `sem_exit_work_pending` 也會固定模組直到清理完成。受控停止在受追蹤的 IPC 資源或 task-exit work 尚存時會拒絕。`mqueue_public_fs_registered` 則顯示公開的 mqueue 檔案系統名稱由模組註冊，或已被執行中的核心預先註冊：
 
 ```sh
+sudo umount /dev/mqueue  # 若已掛載
 sudo umount /mnt/lkm4ctr
 sudo rmmod lkm4ctr
 ```
 
-模組會追蹤正在執行的 hook，並可能拒絕不安全卸載。進階使用者可使用 diagfs 的 hot-reload：
+模組會追蹤執行中的 hook、live vendored namespace proxy、namespace inode 引用及 IPC 物件／work，並可能拒絕不安全卸載。hot-reload 前也必須先卸載 `/dev/mqueue`、移除 SysV 共用記憶體 segment、結束使用 vendored namespace 的程序並關閉 namespace descriptor。進階使用者可使用 diagfs 的 hot-reload：
 
 ```sh
 sudo sh -c 'printf "%s\n" "/absolute/path/to/new/lkm4ctr.ko" > /mnt/lkm4ctr/v/hotreload/do-hot-reload'

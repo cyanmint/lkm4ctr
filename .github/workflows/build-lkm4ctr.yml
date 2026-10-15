@@ -380,7 +380,6 @@ jobs:
           mkdir injected-ramdisk/
           cp testsuite/busybox injected-ramdisk/busybox
           chmod 755 injected-ramdisk/busybox
-
           cp payload/lkm4ctr_checker injected-ramdisk/
           chmod 755 injected-ramdisk/lkm4ctr_checker
 
@@ -409,6 +408,8 @@ jobs:
       # The official Google GKI Image exercises the module and
       # Docker/containerd path for every KMI.
       - name: Boot ${{ matrix.kmi }} kernels under QEMU
+        env:
+          KMI: ${{ matrix.kmi }}
         run: |
           set +e
           set -o pipefail
@@ -427,6 +428,24 @@ jobs:
               module_test=1
             else
               echo "No matching module artifact for $name; running checker-only boot test"
+            fi
+            if [ "$module_test" -eq 1 ]; then
+              rmmod_log="qemu-${name}.rmmod.log"
+              echo "Running direct insmod/rmmod regression test: $rmmod_log"
+              LKM4CTR_TEST_MODULE=1 LKM4CTR_TEST_RMMOD=1 bash qemu_test.sh -l "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$rmmod_log"
+              rmmod_rc=${PIPESTATUS[0]}
+              if [ "$rmmod_rc" -ne 0 ] || \
+                grep -Eq 'Kernel panic|Oops:|BUG:|RMMOD_TEST_FAILED' "$rmmod_log" || \
+                ! grep -Fq '=== LKM4CTR_QEMU_TEST: direct insmod/rmmod safety test DONE ===' "$rmmod_log" || \
+                ! grep -Eq '=== LKM4CTR_QEMU_TEST: (rmmod safely refused while mqueue refs are active|built-in mqueue collision confirmed before insmod; module mount guard not applicable) ===' "$rmmod_log" || \
+                ! grep -Eq '=== LKM4CTR_QEMU_TEST: (live vendored nsproxy pins module until task exit|live nsproxy assertion skipped; pre-insmod unshare -i proved native IPC namespace support) ===' "$rmmod_log" || \
+                ! grep -Eq '=== LKM4CTR_QEMU_TEST: (direct rmmod and diagfs stop refused NSFS bind mount after task exit|NSFS lifetime assertion skipped; pre-insmod unshare -i proved native IPC namespace support) ===' "$rmmod_log" || \
+                { [ "$KMI" = "android14-6.1" ] && grep -Fq 'NSFS lifetime assertion skipped;' "$rmmod_log"; }; then
+                echo "RMMOD_TEST_FAILED: $name (see $rmmod_log)"
+                failures=$((failures + 1))
+              else
+                echo "RMMOD_TEST_PASSED: $name"
+              fi
             fi
             LKM4CTR_TEST_MODULE="$module_test" bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$log"
             rc=${PIPESTATUS[0]}

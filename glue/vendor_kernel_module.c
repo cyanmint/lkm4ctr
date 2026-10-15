@@ -4,6 +4,7 @@
  * This is NEW code (not vendored from kernel-common).
  */
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -70,47 +71,18 @@ struct nsproxy *vns_current_nsproxy(void)
 	return t ? t->nsproxy : NULL;
 }
 
-/*
- * vns_ipc_ns_is_vendored() - true iff @ns is an ipc_namespace vendor_kernel is
- * allowed to operate its shadow SysV/mqueue handlers against.
- *
- * The only ipc_namespace a hooked task can legitimately carry are: the
- * module-owned vendored default (&vns_default_ipc_ns), or one built by our own
- * unshare/setns/clone install path via vns_copy_ipcs()/create_ipc_ns() (which,
- * because CLONE_NEWIPC is handled entirely by the vendored path, is always a
- * vendored object). The one pointer we must reject is the running kernel's own
- * real init_ipc_ns (vns_init_ipc_ns_ptr, resolved only for cosmetic
- * bookkeeping): a task that unshared a *non*-IPC namespace on a kernel that
- * itself ships CONFIG_SYSVIPC/CONFIG_POSIX_MQUEUE would inherit that real
- * init_ipc_ns by reference, and the vendored handlers must never touch its
- * real, kernel-owned message-queue / SysV state. NULL is likewise rejected.
- */
-static bool vns_ipc_ns_is_vendored(struct ipc_namespace *ns)
-{
-	if (!ns)
-		return false;
-	if (vns_init_ipc_ns_ptr && ns == vns_init_ipc_ns_ptr)
-		return false;
-	return true;
-}
-
 struct ipc_namespace *vns_task_ipc_ns(struct task_struct *task)
 {
-	struct vns_task *t = vns_task_find(task_tgid_nr(task));
-	struct ipc_namespace *ns;
+	struct ipc_namespace *ns = task->nsproxy ? task->nsproxy->ipc_ns : NULL;
 
-	ns = (t && t->nsproxy) ? t->nsproxy->ipc_ns : NULL;
-	if (vns_ipc_ns_is_vendored(ns))
-		return ns;
-	ns = task->nsproxy ? task->nsproxy->ipc_ns : NULL;
 	if (vns_ipc_ns_is_vendored(ns))
 		return ns;
 	/*
 	 * The task has no vendored ipc_namespace of its own: either its nsproxy
-	 * carries no ipc_ns (e.g. CONFIG_IPC_NS=n, so init_nsproxy.ipc_ns is
-	 * NULL and the task never unshare(CLONE_NEWIPC)'d), or it carries the
-	 * running kernel's real init_ipc_ns (rejected above). Fall back to
-	 * vendor_kernel's own fully-initialised, module-owned default so the
+	 * carries no ipc_ns, or it carries any native (non-vendored) namespace.
+	 * The pointer-identity set in vendor/ipc/namespace.c is authoritative;
+	 * a native child namespace is never mistaken for a module object. Fall
+	 * back to vendor_kernel's own fully-initialised, module-owned default so the
 	 * SysV/mqueue handlers always act on vendored state exclusively.
 	 */
 	return vns_ipc_active_default();
@@ -231,6 +203,7 @@ int vendor_kernel_init(void)
 {
 	int hooked;
 	int total_hooked;
+	int err;
 
 	if (vendor_kernel_enabled)
 		return 0;
@@ -294,7 +267,9 @@ int vendor_kernel_init(void)
 	 * module-owned slab caches instead of resolving the real kernel's. */
 	vns_uts_ns_init();
 	vns_pid_ns_init();
-	vns_user_ns_init();
+	err = vns_user_ns_init();
+	if (err)
+		return err;
 	vns_nsproxy_cache_init();
 	vns_nsfs_init();
 
@@ -325,26 +300,63 @@ int vendor_kernel_init(void)
 	 */
 	vns_init_nsproxy.ipc_ns = vns_ipc_active_default();
 
+	/*
+	 * Initialize overlayfs before installing the namespace syscall hooks.
+	 * This leaves no fallible initialization after module-owned namespace
+	 * objects become reachable through procfs, so a failed module init can
+	 * always remove the NSFS lifetime hooks without leaving cached callbacks.
+	 */
+	hooked = vns_overlay_init();
+	if (hooked) {
+		vns_ipc_default_exit();
+		return hooked;
+	}
+
+	hooked = vns_nsfs_lifecycle_init();
+	if (hooked) {
+		vns_overlay_exit();
+		vns_ipc_default_exit();
+		return hooked;
+	}
+
 	/* [BUILD-COMPAT] must succeed before any hooks are live: without it,
 	 * an exiting task's module-owned nsproxy could be freed by the real
 	 * kernel's own exit path against the real, mismatched kmem_cache. */
 	hooked = vns_exit_hook_init();
 	if (hooked) {
+		vns_nsfs_lifecycle_exit();
+		vns_overlay_exit();
 		vns_ipc_default_exit();
 		return hooked;
 	}
 
 	hooked = shadow_hook_install_all(vendor_kernel_core_hooks, "vendor_kernel");
 	if (hooked < 0) {
+		shadow_hook_remove_all(vendor_kernel_core_hooks);
+		vns_nsfs_lifecycle_exit();
 		vns_exit_hook_exit();
+		vns_overlay_exit();
 		vns_ipc_default_exit();
 		return hooked;
+	}
+	if (!vendor_kernel_required_lifecycle_hooks_ready()) {
+		LKM4CTR_ERR("vendor_kernel",
+			    "required clone, pre-wakeup namespace-copy, or user-credential lifetime hooks are unavailable");
+		shadow_hook_remove_all(vendor_kernel_core_hooks);
+		vns_nsfs_lifecycle_exit();
+		vns_exit_hook_exit();
+		vns_overlay_exit();
+		vns_ipc_default_exit();
+		return -ENOENT;
 	}
 
 	hooked = shadow_hook_install_all(vendor_kernel_ipc_hooks, "vendor_kernel_ipc");
 	if (hooked < 0) {
+		shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 		shadow_hook_remove_all(vendor_kernel_core_hooks);
+		vns_nsfs_lifecycle_exit();
 		vns_exit_hook_exit();
+		vns_overlay_exit();
 		vns_ipc_default_exit();
 		return hooked;
 	}
@@ -390,17 +402,6 @@ int vendor_kernel_init(void)
 			total_hooked += hooked;
 	}
 
-	hooked = vns_overlay_init();
-	if (hooked) {
-		shadow_hook_remove_all(vendor_kernel_userns_hooks);
-		shadow_hook_remove_all(vendor_kernel_procfs_hooks);
-		shadow_hook_remove_all(vendor_kernel_ipc_hooks);
-		shadow_hook_remove_all(vendor_kernel_core_hooks);
-		vns_exit_hook_exit();
-		vns_ipc_default_exit();
-		return hooked;
-	}
-
 	/*
 	 * Best-effort: make sure /dev/mqueue is already a working mountpoint by
 	 * the time this returns, instead of only reacting to a container's own
@@ -414,24 +415,21 @@ int vendor_kernel_init(void)
 	 * itself used to call this right before its own "return 0;", which is
 	 * too early: any *subsequent* failure in this function -- e.g.
 	 * vns_exit_hook_init(), either shadow_hook_install_all(), or
-	 * vns_overlay_init() above -- unwound back through
-	 * vns_ipc_default_exit(), whose vns_mqueue_dev_teardown() detaches
-	 * the mount via path_umount() but can only *defer* its real
-	 * superblock teardown (cleanup_mnt()/deactivate_super()) to task_work
-	 * run when the current task next returns to userspace (see that
-	 * function's own comment) -- i.e. once insmod's init_module() syscall
-	 * itself returns. But a failed vendor_kernel_init() means
-	 * lkm4ctr_init() itself fails, which the kernel's module loader
-	 * unwinds by freeing this module's memory synchronously, well before
-	 * that deferred task_work runs. The mount's superblock (owned by this
-	 * module's own mqueue_fs_type) then outlives the module, so the
-	 * deferred deactivate_super() call panics on a use-after-free once it
-	 * finally runs. Performing this mount only once nothing else in this
-	 * function can still fail closes that window entirely: from here on,
+	 * vns_overlay_init() above -- would fail module initialization without
+	 * running the normal module-exit path, leaving a mount whose callbacks
+	 * point into code the loader is about to discard. This now only schedules
+	 * delayed work; the worker waits until the module is LIVE, takes a module
+	 * reference, and lets the public mqueue filesystem acquire its own owner
+	 * reference. Scheduling is deliberately the last operation that can be
+	 * reached after the other failure points, so failed initialization cannot
+	 * leave the worker or mount behind. From here on,
 	 * vendor_kernel_init() unconditionally succeeds.
 	 */
+	vns_nsproxy_stop_abort();
 	vns_mqueue_dev_ensure();
 
+	/* Open user-namespace creation only after every required hook is live. */
+	vns_user_ns_stop_abort();
 	vendor_kernel_enabled = true;
 	LKM4CTR_INFO("vendor_kernel", "loaded (%d hook(s) installed)", total_hooked);
 	if (!vns_pidns_runtime_supported)
@@ -440,10 +438,110 @@ int vendor_kernel_init(void)
 	return 0;
 }
 
-void vendor_kernel_exit(void)
+int vendor_kernel_exit(void)
 {
+	unsigned int waited_ms = 0;
+	bool was_quiescing;
+	int err;
+
 	if (!vendor_kernel_enabled)
-		return;
+		return 0;
+
+	/*
+	 * Keep lifecycle hooks live while existing vendored nsproxy objects
+	 * drain. The gate prevents new namespace objects from being created,
+	 * while the pre-quiesce count check ensures task-exit cleanup cannot be
+	 * bypassed by the global hook quiesce below.
+	 */
+	vns_nsproxy_stop_begin();
+	vns_user_ns_stop_begin();
+	if (vns_nsproxy_live_count() > 0) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "refusing stop while %d vendored nsproxy object(s) remain live",
+			     vns_nsproxy_live_count());
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return -EBUSY;
+	}
+	vns_nsfs_lifecycle_begin_exit();
+	while (shadow_hook_inflight_count() > 0 && waited_ms < 30000) {
+		msleep(10);
+		waited_ms += 10;
+	}
+	err = vns_user_ns_prepare_exit();
+	if (!err)
+		err = vns_ipc_namespace_prepare_exit();
+	if (shadow_hook_inflight_count() > 0 || vns_nsproxy_live_count() > 0 ||
+	    err) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "refusing stop before quiesce: %d hook call(s), %d vendored nsproxy object(s), %d user namespace object(s), %d IPC namespace object(s) remain or teardown work is pending",
+			     shadow_hook_inflight_count(), vns_nsproxy_live_count(),
+			     vns_user_ns_live_count(), vns_ipc_ns_live_count());
+		vns_nsfs_lifecycle_abort_exit();
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return err ? err : -EBUSY;
+	}
+
+	was_quiescing = shadow_hook_is_quiescing();
+	shadow_hook_quiesce(true);
+	vns_mqueue_dev_cancel();
+	while (shadow_hook_inflight_count() > 0 && waited_ms < 30000) {
+		msleep(10);
+		waited_ms += 10;
+	}
+	if (shadow_hook_inflight_count() > 0) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "refusing stop with %d in-flight hook call(s)",
+			     shadow_hook_inflight_count());
+		vns_mqueue_dev_ensure();
+		if (!was_quiescing)
+			shadow_hook_quiesce(false);
+		vns_nsfs_lifecycle_abort_exit();
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return -EBUSY;
+	}
+
+	err = vns_nsfs_lifecycle_prepare_exit();
+	if (err) {
+		vns_mqueue_dev_ensure();
+		if (!was_quiescing)
+			shadow_hook_quiesce(false);
+		vns_nsfs_lifecycle_abort_exit();
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return err;
+	}
+
+	err = vns_sem_prepare_exit();
+	if (!err)
+		err = vns_shm_prepare_exit(vns_ipc_active_default());
+	if (err) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "refusing stop while SysV semaphore undo state, shared-memory segments/mappings, or task-exit work remain");
+		vns_mqueue_dev_ensure();
+		if (!was_quiescing)
+			shadow_hook_quiesce(false);
+		vns_nsfs_lifecycle_abort_exit();
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return err;
+	}
+
+	err = vns_mqueue_fs_prepare_exit();
+	if (err) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "refusing stop while mqueue filesystem contexts, mounts, or open files remain");
+		vns_mqueue_dev_ensure();
+		if (!was_quiescing)
+			shadow_hook_quiesce(false);
+		vns_nsfs_lifecycle_abort_exit();
+		vns_nsproxy_stop_abort();
+		vns_user_ns_stop_abort();
+		return err;
+	}
+
 	vendor_kernel_enabled = false;
 	vns_overlay_exit();
 	shadow_hook_remove_all(vendor_kernel_userns_hooks);
@@ -451,8 +549,15 @@ void vendor_kernel_exit(void)
 	shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
 	vns_exit_hook_exit();
-	vns_ipc_default_exit();
+	vns_nsfs_lifecycle_exit();
 	vns_nsproxy_deferred_flush();
 	vns_registry_clear_all();
+	vns_nsproxy_deferred_flush();
+	vns_user_ns_flush_work();
+	vns_ipc_namespace_flush_work();
+	vns_ipc_default_exit();
 	LKM4CTR_INFO("vendor_kernel", "unloaded");
+	if (!was_quiescing)
+		shadow_hook_quiesce(false);
+	return 0;
 }

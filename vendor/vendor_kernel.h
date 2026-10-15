@@ -348,6 +348,10 @@ void vns_switch_task_namespaces(struct task_struct *p, struct nsproxy *new);
 void vns_exit_task_namespaces(struct task_struct *p);
 long vns_sys_setns(int fd, int flags);
 void vns_nsproxy_cache_init(void);
+int vns_nsproxy_live_count(void);
+void vns_nsproxy_stop_begin(void);
+void vns_nsproxy_stop_abort(void);
+bool vns_namespace_creation_allowed(void);
 /*
  * vns_task_exit_cleanup() - called from the exit_task_namespaces() shadow
  * hook (kernel/nsproxy.c), or from the Linux 5.15 exit_fs() fallback, for
@@ -377,6 +381,7 @@ struct ipc_namespace *vns_copy_ipcs(unsigned long flags, struct user_namespace *
 struct ipc_namespace *vns_get_ipc_ns(struct ipc_namespace *ns);
 struct ipc_namespace *vns_get_ipc_ns_not_zero(struct ipc_namespace *ns);
 void vns_put_ipc_ns(struct ipc_namespace *ns);
+void vns_ipc_namespace_flush_work(void);
 extern const struct proc_ns_operations vns_ipcns_operations;
 
 struct cgroup_namespace *vns_copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns, struct cgroup_namespace *old_cgroup_ns);
@@ -462,11 +467,22 @@ struct user_namespace *vns_current_user_ns(void);
  * objects and must refcount/free them correctly regardless of the target
  * kernel's CONFIG_USER_NS setting, so every vendored call site uses these
  * local equivalents (which route to vns___put_user_ns() below) instead of
- * get_user_ns()/put_user_ns() directly.
+ * get_user_ns()/put_user_ns() directly. The wrappers distinguish objects by
+ * the module-owned USER_NS pointer set: vendored objects always use the
+ * module-owned cache/workqueue, while native objects retain native ref/free
+ * semantics when a native core is present.
  */
 struct user_namespace *vns_get_user_ns(struct user_namespace *ns);
 void vns_put_user_ns(struct user_namespace *ns);
 void vns___put_user_ns(struct user_namespace *ns);
+bool vns_user_ns_is_vendored(const struct user_namespace *ns);
+int vns_user_ns_cred_get(const struct cred *cred);
+int vns_user_ns_cred_adopt(struct cred *cred, struct user_namespace *ns,
+			   bool drop_old_ref);
+struct user_namespace *vns_user_ns_cred_detach(const struct cred *cred);
+bool vns_native_userns_core_available(void);
+bool vns_native_userns_core_is_available(void);
+void vns_native___put_user_ns(struct user_namespace *ns);
 kuid_t vns_make_kuid(struct user_namespace *ns, uid_t uid);
 uid_t vns_from_kuid(struct user_namespace *targ, kuid_t kuid);
 uid_t vns_from_kuid_munged(struct user_namespace *targ, kuid_t kuid);
@@ -489,7 +505,17 @@ extern const struct proc_ns_operations vns_userns_operations;
 extern const struct seq_operations vns_proc_uid_seq_operations;
 extern const struct seq_operations vns_proc_gid_seq_operations;
 extern const struct seq_operations vns_proc_projid_seq_operations;
-void vns_user_ns_init(void);
+int vns_user_ns_init(void);
+bool vns_user_ns_creation_begin(void);
+void vns_user_ns_creation_end(void);
+void vns_user_ns_stop_begin(void);
+void vns_user_ns_stop_abort(void);
+void vns_user_ns_flush_work(void);
+int vns_user_ns_prepare_exit(void);
+int vns_user_ns_live_count(void);
+int vns_user_ns_creating_count(void);
+int vns_user_ns_pending_work_count(void);
+void vns_user_ns_exit(void);
 
 /*
  * glue/vendor_kernel_procfs_userns.c: fabricates /proc/<pid>/{uid_map,
@@ -525,6 +551,7 @@ static inline struct ipc_namespace *vns_current_ipc_ns(void)
 }
 
 extern struct shadow_hook *vendor_kernel_core_hooks[];
+bool vendor_kernel_required_lifecycle_hooks_ready(void);
 extern struct shadow_hook *vendor_kernel_ipc_hooks[];
 extern struct shadow_hook *vendor_kernel_procfs_hooks[];
 extern struct shadow_hook *vendor_kernel_userns_hooks[];
@@ -569,6 +596,10 @@ extern struct ipc_namespace vns_default_ipc_ns;
 int vns_ipc_default_init(void);
 void vns_ipc_default_exit(void);
 struct ipc_namespace *vns_ipc_active_default(void);
+bool vns_ipc_ns_is_vendored(struct ipc_namespace *ns);
+int vns_ipc_ns_live_count(void);
+int vns_ipc_ns_free_work_pending_count(void);
+int vns_ipc_namespace_prepare_exit(void);
 /*
  * Module-owned kmem_cache pointers (created via kmem_cache_create() in
  * vns_uts_ns_init()/vns_nsproxy_cache_init()/vns_pid_ns_init()/
@@ -630,15 +661,32 @@ void vns_key_put(struct key *key);
 void vns_kill_litter_super(struct super_block *sb);
 void vns_sem_init_ns(struct ipc_namespace *ns);
 void vns_sem_exit_ns(struct ipc_namespace *ns);
+int vns_sem_prepare_exit(void);
 void vns_shm_init_ns(struct ipc_namespace *ns);
 void vns_shm_exit_ns(struct ipc_namespace *ns);
+int vns_shm_prepare_exit(struct ipc_namespace *ns);
 void vns_exit_sem(struct task_struct *tsk);
 void vns_prepare_exit_sem(struct task_struct *tsk);
+int vns_semundo_clone_begin(unsigned long clone_flags);
+unsigned long vns_semundo_clone_wake(struct task_struct *child);
+void vns_semundo_clone_abort(void);
+unsigned long vns_semundo_clone_flags(void);
+bool vns_semundo_clone_namespace_admitted(void);
+int vns_sem_undo_live_count(void);
+int vns_sem_exit_work_pending_count(void);
+int vns_nsfs_lifecycle_init(void);
+void vns_nsfs_lifecycle_begin_exit(void);
+void vns_nsfs_lifecycle_abort_exit(void);
+int vns_nsfs_lifecycle_prepare_exit(void);
+void vns_nsfs_lifecycle_exit(void);
+int vns_nsfs_lifecycle_pin_count(void);
 int vns_mq_init_ns(struct ipc_namespace *ns);
 int vns_mqueue_fs_init(void);
-void vns_mqueue_fs_exit(bool cache_teardown_unsafe);
+int vns_mqueue_public_fs_registered(void);
+int vns_mqueue_fs_prepare_exit(void);
+void vns_mqueue_fs_exit(void);
 void vns_mqueue_dev_ensure(void);
-bool vns_mqueue_dev_teardown(void);
+void vns_mqueue_dev_cancel(void);
 long vns_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		struct mq_attr __user *u_attr);
 long vns_mq_unlink(const char __user *u_name);
@@ -657,7 +705,6 @@ long vns_ksys_msgsnd(int msqid, struct msgbuf __user *msgp, size_t msgsz,
 		    int msgflg);
 long vns_ksys_msgrcv(int msqid, struct msgbuf __user *msgp, size_t msgsz,
 		    long msgtyp, int msgflg);
-int vns_copy_semundo(unsigned long clone_flags, struct task_struct *tsk);
 void vns_msg_exit_ns(struct ipc_namespace *ns);
 long vns_ksys_semget(key_t key, int nsems, int semflg);
 long vns_semctl(int semid, int semnum, int cmd, unsigned long arg);
@@ -701,7 +748,7 @@ bool vns_is_file_shm_hugepages(struct file *file);
 #define shm_init_ns vns_shm_init_ns
 #define shm_exit_ns vns_shm_exit_ns
 #define exit_sem vns_exit_sem
-#define copy_semundo vns_copy_semundo
+
 #define setup_ipc_sysctls vns_setup_ipc_sysctls
 #define retire_ipc_sysctls vns_retire_ipc_sysctls
 #define set_cred_ucounts vns_set_cred_ucounts
@@ -728,7 +775,7 @@ bool vns_is_file_shm_hugepages(struct file *file);
 #endif
 
 int vendor_kernel_init(void);
-void vendor_kernel_exit(void);
+int vendor_kernel_exit(void);
 size_t vendor_kernel_diag_snprintf(char *buf, size_t buflen);
 
 #endif /* _VENDOR_KERNEL_H */

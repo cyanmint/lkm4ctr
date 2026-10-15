@@ -41,6 +41,23 @@ static long (*real_sys_clone3)(const struct pt_regs *regs);
 static long (*real_sys_fork)(const struct pt_regs *regs);
 static long (*real_sys_vfork)(const struct pt_regs *regs);
 static long (*real_sys_reboot)(const struct pt_regs *regs);
+static void (*real_wake_up_new_task)(struct task_struct *task);
+static struct cred *(*real_prepare_creds)(void);
+static struct cred *(*real_prepare_kernel_cred)(struct task_struct *daemon);
+static void (*real_put_cred_rcu)(struct rcu_head *rcu);
+static void (*real___put_user_ns)(struct user_namespace *ns);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static int (*real_copy_creds)(struct task_struct *task, u64 clone_flags);
+#else
+static int (*real_copy_creds)(struct task_struct *task,
+			      unsigned long clone_flags);
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+static int (*real_copy_namespaces)(u64 flags, struct task_struct *task);
+#else
+static int (*real_copy_namespaces)(unsigned long flags,
+				   struct task_struct *task);
+#endif
 
 static const char * const vendor_kernel_unshare_names[] = {
 	"__arm64_sys_unshare", "__x64_sys_unshare", "sys_unshare", NULL,
@@ -62,6 +79,27 @@ static const char * const vendor_kernel_vfork_names[] = {
 };
 static const char * const vendor_kernel_reboot_names[] = {
 	"__arm64_sys_reboot", "__x64_sys_reboot", "sys_reboot", NULL,
+};
+static const char * const vendor_kernel_wake_up_new_task_names[] = {
+	"wake_up_new_task", NULL,
+};
+static const char * const vendor_kernel_prepare_creds_names[] = {
+	"prepare_creds", NULL,
+};
+static const char * const vendor_kernel_prepare_kernel_cred_names[] = {
+	"prepare_kernel_cred", NULL,
+};
+static const char * const vendor_kernel_put_cred_rcu_names[] = {
+	"put_cred_rcu", NULL,
+};
+static const char * const vendor_kernel_put_user_ns_names[] = {
+	"__put_user_ns", NULL,
+};
+static const char * const vendor_kernel_copy_namespaces_names[] = {
+	"copy_namespaces", NULL,
+};
+static const char * const vendor_kernel_copy_creds_names[] = {
+	"copy_creds", NULL,
 };
 
 #if defined(CONFIG_ARM64)
@@ -121,10 +159,9 @@ static long vendor_kernel_hook_unshare(const struct pt_regs *regs)
 	 * mntns_install() (fs/namespace.c) hard-requires `fs->users == 1` and
 	 * fails the setns() with -EINVAL otherwise, observed as Android
 	 * init's "Cannot switch back to bootstrap mount namespace: Invalid
-	 * argument" / "SetupMountNamespaces failed" abort. Mirrors the
-	 * clone(CLONE_NEWNS, ...) path's identical fs_struct-isolation fix in
-	 * vendor_kernel_clone_track() above (matching upstream's
-	 * unshare_fs()).
+	 * argument" / "SetupMountNamespaces failed" abort. The clone path now
+	 * runs the vendored copy_namespaces hook before child wakeup, after the
+	 * child's private fs_struct has been constructed by the native fork core.
 	 */
 	if (vns_flags & CLONE_NEWNS) {
 		struct fs_struct *fs = current->fs;
@@ -200,96 +237,10 @@ static long vendor_kernel_hook_setns(const struct pt_regs *regs)
 	return ret;
 }
 
-static void vendor_kernel_clone_track(long ret, unsigned long clone_flags,
-				      unsigned long vns_flags)
+static void vendor_kernel_clone_track(long ret)
 {
-	struct nsproxy *new_nsp = NULL;
-	struct pid *child_pid;
-	struct task_struct *child;
-
-	if (ret <= 0)
-		return;
-	if (!vns_flags) {
+	if (ret > 0)
 		vendor_kernel_registry.stat_clone++;
-		return;
-	}
-
-	/*
-	 * clone(CLONE_NEWxxx, ...) requested new namespaces directly
-	 * (rather than unshare()+fork()). The real clone() syscall was
-	 * already invoked with the vns_* flags masked off, so the
-	 * child was created sharing the parent's nsproxy. Build the
-	 * new namespaces now and install them for real on the child
-	 * task (same effect create_new_namespaces()+switch would have
-	 * had, minus pid_ns_for_children applying to the child's own
-	 * struct pid, which is unavoidable without hooking
-	 * copy_process() itself since the child's pid was already
-	 * allocated from the parent's pid namespace by the time this
-	 * hook runs).
-	 *
-	 * The child task must be looked up *before* calling
-	 * vns_unshare_nsproxy_namespaces() and its own fs_struct (child->fs)
-	 * must be passed as new_fs. This hook runs in the parent's context
-	 * (right after real_sys_clone()/real_sys_clone3() returns there), so
-	 * a NULL new_fs would make vns_unshare_nsproxy_namespaces() default
-	 * to current->fs -- the *parent's* fs_struct, not the child's own,
-	 * separately-copied one. For CLONE_NEWNS specifically that would
-	 * make the real, resolved copy_mnt_ns() retarget the parent's own
-	 * root/pwd onto the freshly copied mount tree while leaving the
-	 * child's fs_struct pointing at the old tree, completely
-	 * disconnected from the new mnt_namespace about to be installed on
-	 * it below. Every subsequent mount(2) the child performs on an
-	 * absolute path then resolves through that stale root/pwd, whose
-	 * vfsmount belongs to a different mnt_namespace than
-	 * current->nsproxy->mnt_ns, and the kernel's check_mnt() rejects it
-	 * with -EINVAL -- observed as e.g. systemd's generator sandbox
-	 * (clone(CLONE_NEWNS, ...) + a plain "mount tmpfs /tmp") failing
-	 * with "Failed to overmount /tmp/: Invalid argument".
-	 */
-	child_pid = find_get_pid((pid_t)ret);
-	if (!child_pid) {
-		vendor_kernel_registry.stat_clone++;
-		return;
-	}
-	child = get_pid_task(child_pid, PIDTYPE_PID);
-	put_pid(child_pid);
-	if (!child) {
-		vendor_kernel_registry.stat_clone++;
-		return;
-	}
-
-	if (!vns_unshare_nsproxy_namespaces(vns_flags, &new_nsp, NULL, child->fs)) {
-#if !defined(CONFIG_SYSVIPC)
-		copy_semundo(clone_flags, child);
-#endif
-		/*
-		 * new_nsp can legitimately still be NULL here: vns_flags ==
-		 * CLONE_NEWUSER alone builds nothing in nsproxy (matching
-		 * upstream unshare_nsproxy_namespaces()), so only switch when
-		 * a new nsproxy was actually produced.
-		 */
-		if (new_nsp)
-			vns_switch_task_namespaces(child, new_nsp);
-		new_nsp = NULL;
-	} else {
-		/*
-		 * vns_unshare_nsproxy_namespaces() failed: *new_nsp may have
-		 * been left untouched (still NULL) or, if
-		 * create_new_namespaces() itself failed after the ns_capable()
-		 * check passed, set to an ERR_PTR() encoding the failure --
-		 * never a real nsproxy. Passing that ERR_PTR to
-		 * vns_put_nsproxy() below would treat a bogus, near-top
-		 * address (e.g. -EPERM/-ENOMEM as a pointer) as a live
-		 * nsproxy and corrupt/crash on the resulting bad refcount
-		 * dereference, so make sure the pending release below never
-		 * fires for a failed call.
-		 */
-		new_nsp = NULL;
-	}
-	if (new_nsp)
-		vns_put_nsproxy(new_nsp);
-	put_task_struct(child);
-	vendor_kernel_registry.stat_clone++;
 }
 
 static long vendor_kernel_hook_clone(const struct pt_regs *regs)
@@ -299,10 +250,31 @@ static long vendor_kernel_hook_clone(const struct pt_regs *regs)
 	unsigned long vns_flags = flags & VNS_CLONE_FLAGS;
 	long ret;
 
+	if (!vns_namespace_creation_allowed())
+		return -EBUSY;
+	if ((flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
+	    (CLONE_NEWIPC | CLONE_SYSVSEM))
+		return -EINVAL;
+	if ((flags & (CLONE_NEWUSER | CLONE_THREAD)) ==
+	    (CLONE_NEWUSER | CLONE_THREAD))
+		return -EINVAL;
+	if ((flags & (CLONE_NEWUSER | CLONE_FS)) ==
+	    (CLONE_NEWUSER | CLONE_FS))
+		return -EINVAL;
+	if ((flags & (CLONE_NEWNS | CLONE_FS)) ==
+	    (CLONE_NEWNS | CLONE_FS))
+		return -EINVAL;
+	if ((flags & (CLONE_NEWPID | CLONE_THREAD)) ==
+	    (CLONE_NEWPID | CLONE_THREAD))
+		return -EINVAL;
+	ret = vns_semundo_clone_begin(flags);
+	if (ret)
+		return ret;
 	if (vns_flags)
 		vns_sys_set_arg0(&regs_copy, flags & ~VNS_CLONE_FLAGS);
 	ret = real_sys_clone(vns_flags ? &regs_copy : regs);
-	vendor_kernel_clone_track(ret, flags, vns_flags);
+	vns_semundo_clone_abort();
+	vendor_kernel_clone_track(ret);
 	return ret;
 }
 
@@ -315,36 +287,128 @@ static long vendor_kernel_hook_clone3(const struct pt_regs *regs)
 	long ret;
 	bool patched = false;
 
+	if (!vns_namespace_creation_allowed())
+		return -EBUSY;
 	if (!uargs || copy_from_user(&orig_flags, uargs, sizeof(orig_flags)))
 		return real_sys_clone3(regs);
 
 	vns_flags = (unsigned long)(orig_flags & VNS_CLONE_FLAGS);
+	if ((orig_flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
+	    (CLONE_NEWIPC | CLONE_SYSVSEM))
+		return -EINVAL;
+	if ((orig_flags & (CLONE_NEWUSER | CLONE_THREAD)) ==
+	    (CLONE_NEWUSER | CLONE_THREAD))
+		return -EINVAL;
+	if ((orig_flags & (CLONE_NEWUSER | CLONE_FS)) ==
+	    (CLONE_NEWUSER | CLONE_FS))
+		return -EINVAL;
+	if ((orig_flags & (CLONE_NEWNS | CLONE_FS)) ==
+	    (CLONE_NEWNS | CLONE_FS))
+		return -EINVAL;
+	if ((orig_flags & (CLONE_NEWPID | CLONE_THREAD)) ==
+	    (CLONE_NEWPID | CLONE_THREAD))
+		return -EINVAL;
 	native_flags = orig_flags & ~((u64)VNS_CLONE_FLAGS);
 	if (vns_flags) {
 		if (copy_to_user(uargs, &native_flags, sizeof(native_flags)))
 			return -EFAULT;
 		patched = true;
 	}
+	ret = vns_semundo_clone_begin((unsigned long)orig_flags);
+	if (ret) {
+		if (patched && copy_to_user(uargs, &orig_flags, sizeof(orig_flags)))
+			return -EFAULT;
+		return ret;
+	}
 
 	ret = real_sys_clone3(regs);
-	if (patched && copy_to_user(uargs, &orig_flags, sizeof(orig_flags)))
-		return -EFAULT;
-	vendor_kernel_clone_track(ret, (unsigned long)orig_flags, vns_flags);
+	vns_semundo_clone_abort();
+	if (patched && copy_to_user(uargs, &orig_flags, sizeof(orig_flags))) {
+		if (ret < 0)
+			return -EFAULT;
+		LKM4CTR_WARN("vendor_kernel",
+			     "clone3 succeeded but could not restore the caller's flags field");
+	}
+	vendor_kernel_clone_track(ret);
 	return ret;
 }
 
 static long vendor_kernel_hook_fork(const struct pt_regs *regs)
 {
-	long ret = real_sys_fork(regs);
-	vendor_kernel_clone_track(ret, 0, 0);
+	long ret;
+
+	if (!vns_namespace_creation_allowed())
+		return -EBUSY;
+	ret = real_sys_fork(regs);
+	vendor_kernel_clone_track(ret);
 	return ret;
 }
 
 static long vendor_kernel_hook_vfork(const struct pt_regs *regs)
 {
-	long ret = real_sys_vfork(regs);
-	vendor_kernel_clone_track(ret, 0, 0);
+	long ret;
+
+	if (!vns_namespace_creation_allowed())
+		return -EBUSY;
+	ret = real_sys_vfork(regs);
+	vendor_kernel_clone_track(ret);
 	return ret;
+}
+
+static int vendor_kernel_hook_copy_namespaces(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	u64 flags,
+#else
+	unsigned long flags,
+#endif
+	struct task_struct *task)
+{
+	unsigned long clone_flags = vns_semundo_clone_flags();
+	unsigned long vns_flags = clone_flags & VNS_CLONE_FLAGS;
+	struct nsproxy *new_nsproxy;
+	int err;
+
+	err = vns_user_ns_cred_get(task->cred);
+	if (err)
+		return err;
+	err = real_copy_namespaces(flags, task);
+	if (err || !vns_flags)
+		return err;
+
+	if (vns_flags & CLONE_NEWUSER) {
+		err = vns_user_ns_cred_get(task->cred);
+		if (err)
+			return err;
+		err = vns_create_user_ns((struct cred *)task->cred);
+		if (err)
+			return err;
+	}
+
+	new_nsproxy = vns_copy_namespaces(vns_flags, task);
+	if (IS_ERR(new_nsproxy))
+		return PTR_ERR(new_nsproxy);
+	vns_switch_task_namespaces(task, new_nsproxy);
+	return 0;
+}
+
+static int vendor_kernel_hook_copy_creds(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	struct task_struct *task, u64 clone_flags
+#else
+	struct task_struct *task, unsigned long clone_flags
+#endif
+)
+{
+	int err;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	err = real_copy_creds(task, clone_flags);
+#else
+	err = real_copy_creds(task, clone_flags);
+#endif
+	if (err)
+		return err;
+	return vns_user_ns_cred_get(task->cred);
 }
 
 /*
@@ -401,6 +465,63 @@ static long vendor_kernel_hook_reboot(const struct pt_regs *regs)
 	return vns_reboot_pid_ns(pid_ns, (int)cmd);
 }
 
+static void vendor_kernel_hook_wake_up_new_task(struct task_struct *task)
+{
+	if (vns_user_ns_cred_get(task->cred))
+		LKM4CTR_ERR("vendor_kernel",
+			    "could not account vendored user namespace on child credentials %p; retaining a fail-safe reference",
+			    task->cred);
+	vns_semundo_clone_wake(task);
+	real_wake_up_new_task(task);
+}
+
+static struct cred *vendor_kernel_hook_prepare_creds(void)
+{
+	struct cred *cred = real_prepare_creds();
+
+	if (cred && vns_user_ns_cred_get(cred))
+		LKM4CTR_ERR("vendor_kernel",
+			    "could not account vendored user namespace on prepared credentials %p; retaining a fail-safe reference",
+			    cred);
+	return cred;
+}
+
+static struct cred *vendor_kernel_hook_prepare_kernel_cred(
+	struct task_struct *daemon)
+{
+	struct cred *cred = real_prepare_kernel_cred(daemon);
+
+	if (cred && vns_user_ns_cred_get(cred))
+		LKM4CTR_ERR("vendor_kernel",
+			    "could not account vendored user namespace on kernel credentials %p; retaining a fail-safe reference",
+			    cred);
+	return cred;
+}
+
+static void vendor_kernel_hook_put_cred_rcu(struct rcu_head *rcu)
+{
+	struct cred *cred = container_of(rcu, struct cred, rcu);
+	struct user_namespace *user_ns = vns_user_ns_cred_detach(cred);
+
+	real_put_cred_rcu(rcu);
+	if (user_ns)
+		vns_put_user_ns(user_ns);
+}
+
+static void vendor_kernel_hook_put_user_ns(struct user_namespace *ns)
+{
+	if (vns_user_ns_is_vendored(ns))
+		vns___put_user_ns(ns);
+	else
+		real___put_user_ns(ns);
+}
+
+void vns_native___put_user_ns(struct user_namespace *ns)
+{
+	if (real___put_user_ns)
+		real___put_user_ns(ns);
+}
+
 static struct shadow_hook vendor_kernel_unshare_hook =
 	SHADOW_HOOK(vendor_kernel_unshare_names, vendor_kernel_hook_unshare, &real_sys_unshare);
 static struct shadow_hook vendor_kernel_setns_hook =
@@ -415,6 +536,56 @@ static struct shadow_hook vendor_kernel_vfork_hook =
 	SHADOW_HOOK(vendor_kernel_vfork_names, vendor_kernel_hook_vfork, &real_sys_vfork);
 static struct shadow_hook vendor_kernel_reboot_hook =
 	SHADOW_HOOK(vendor_kernel_reboot_names, vendor_kernel_hook_reboot, &real_sys_reboot);
+static struct shadow_hook vendor_kernel_wake_up_new_task_hook = {
+	.names = vendor_kernel_wake_up_new_task_names,
+	.function = vendor_kernel_hook_wake_up_new_task,
+	.original = &real_wake_up_new_task,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_prepare_creds_hook = {
+	.names = vendor_kernel_prepare_creds_names,
+	.function = vendor_kernel_hook_prepare_creds,
+	.original = &real_prepare_creds,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_prepare_kernel_cred_hook = {
+	.names = vendor_kernel_prepare_kernel_cred_names,
+	.function = vendor_kernel_hook_prepare_kernel_cred,
+	.original = &real_prepare_kernel_cred,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_put_cred_rcu_hook = {
+	.names = vendor_kernel_put_cred_rcu_names,
+	.function = vendor_kernel_hook_put_cred_rcu,
+	.original = &real_put_cred_rcu,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_put_user_ns_hook = {
+	.names = vendor_kernel_put_user_ns_names,
+	.function = vendor_kernel_hook_put_user_ns,
+	.original = &real___put_user_ns,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_copy_namespaces_hook = {
+	.names = vendor_kernel_copy_namespaces_names,
+	.function = vendor_kernel_hook_copy_namespaces,
+	.original = &real_copy_namespaces,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
+static struct shadow_hook vendor_kernel_copy_creds_hook =
+{
+	.names = vendor_kernel_copy_creds_names,
+	.function = vendor_kernel_hook_copy_creds,
+	.original = &real_copy_creds,
+	.owner = THIS_MODULE,
+	.quiesce_exempt = true,
+};
 
 struct shadow_hook *vendor_kernel_core_hooks[] = {
 	&vendor_kernel_unshare_hook,
@@ -424,5 +595,43 @@ struct shadow_hook *vendor_kernel_core_hooks[] = {
 	&vendor_kernel_fork_hook,
 	&vendor_kernel_vfork_hook,
 	&vendor_kernel_reboot_hook,
+	&vendor_kernel_wake_up_new_task_hook,
+	&vendor_kernel_prepare_creds_hook,
+	&vendor_kernel_prepare_kernel_cred_hook,
+	&vendor_kernel_put_cred_rcu_hook,
+	&vendor_kernel_put_user_ns_hook,
+	&vendor_kernel_copy_namespaces_hook,
+	&vendor_kernel_copy_creds_hook,
 	NULL,
 };
+
+bool vendor_kernel_required_lifecycle_hooks_ready(void)
+{
+	bool native_userns = vns_native_userns_core_available();
+	bool clone_hooks = vendor_kernel_clone_hook.installed &&
+	       vendor_kernel_clone_hook.retprobe_installed &&
+	       vendor_kernel_clone3_hook.installed &&
+	       vendor_kernel_clone3_hook.retprobe_installed &&
+	       vendor_kernel_fork_hook.installed &&
+	       vendor_kernel_fork_hook.retprobe_installed &&
+	       vendor_kernel_vfork_hook.installed &&
+	       vendor_kernel_vfork_hook.retprobe_installed &&
+	       vendor_kernel_wake_up_new_task_hook.installed &&
+	       vendor_kernel_wake_up_new_task_hook.retprobe_installed &&
+	       vendor_kernel_copy_namespaces_hook.installed &&
+	       vendor_kernel_copy_namespaces_hook.retprobe_installed;
+
+	if (!clone_hooks)
+		return false;
+	if (native_userns)
+		return vendor_kernel_put_user_ns_hook.installed &&
+		       vendor_kernel_put_user_ns_hook.retprobe_installed;
+	return vendor_kernel_prepare_creds_hook.installed &&
+	       vendor_kernel_prepare_creds_hook.retprobe_installed &&
+	       vendor_kernel_prepare_kernel_cred_hook.installed &&
+	       vendor_kernel_prepare_kernel_cred_hook.retprobe_installed &&
+	       vendor_kernel_copy_creds_hook.installed &&
+	       vendor_kernel_copy_creds_hook.retprobe_installed &&
+	       vendor_kernel_put_cred_rcu_hook.installed &&
+	       vendor_kernel_put_cred_rcu_hook.retprobe_installed;
+}

@@ -51,6 +51,27 @@ size_t vendor_kernel_diag_snprintf(char *buf, size_t buflen)
 			 vendor_kernel_registry.stat_setns,
 			 vendor_kernel_registry.stat_clone,
 			 vendor_kernel_registry.stat_reboot);
+	pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+			 "nsfs_inode_pins: %d\n"
+			 "nsproxy_live: %d\n"
+			 "ipcns_live: %d\n"
+			 "ipcns_free_work_pending: %d\n"
+			 "userns_live: %d\n"
+			 "userns_creating: %d\n"
+			 "userns_pending_work: %d\n"
+			 "semundo_live: %d\n"
+			 "sem_exit_work_pending: %d\n"
+			 "mqueue_public_fs_registered: %d\n",
+			 vns_nsfs_lifecycle_pin_count(),
+			 vns_nsproxy_live_count(),
+			 vns_ipc_ns_live_count(),
+			 vns_ipc_ns_free_work_pending_count(),
+			 vns_user_ns_live_count(),
+			 vns_user_ns_creating_count(),
+			 vns_user_ns_pending_work_count(),
+			 vns_sem_undo_live_count(),
+			 vns_sem_exit_work_pending_count(),
+			 vns_mqueue_public_fs_registered());
 	hash_for_each(vendor_kernel_registry.tasks, bkt, t, node)
 		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
 				 "tgid=%d nsproxy=%px\n", t->tgid, t->nsproxy);

@@ -40,6 +40,7 @@
 #include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/nsproxy.h>
 #include <linux/init_task.h>
 #include <linux/mnt_namespace.h>
@@ -58,6 +59,7 @@
 #include <linux/hashtable.h>
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
+#include <linux/smp.h>
 #include <linux/sched/task.h>
 #include <linux/llist.h>
 #include <linux/version.h>
@@ -71,18 +73,19 @@
 extern struct time_namespace vns_init_time_ns;
 
 /*
- * [BUILD-COMPAT] vns_nsproxy_set tracks every module-owned struct nsproxy *
- * currently installed on some task_struct->nsproxy. Both
- * vns_task_exit_cleanup() and the free_nsproxy() fallback use pointer
- * identity to distinguish vendored objects (allocated from
- * vns_nsproxy_cachep) from the real kernel's init_nsproxy/&vns_init_nsproxy
- * singleton, without relying on an unexported helper such as virt_to_cache()
- * or on task lookups. The hash table is a small, fixed-size,
- * spinlock-protected chain sized for the handful of concurrently-live
- * vendored nsproxy objects expected on a device.
+ * [BUILD-COMPAT] vns_nsproxy_set tracks every live module-owned struct
+ * nsproxy, from allocation in create_nsproxy() through final destruction in
+ * vns_free_nsproxy(). It provides pointer-identity classification for
+ * vns_task_exit_cleanup() and the free_nsproxy fallback, plus an exact live
+ * object count for safe controlled teardown. Every tracked object holds a
+ * module reference. The set distinguishes vendored objects allocated from
+ * vns_nsproxy_cachep from the real kernel's init_nsproxy/
+ * &vns_init_nsproxy singleton, without virt_to_cache() or task lookups.
  */
 static DEFINE_HASHTABLE(vns_nsproxy_set, 6);
 static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
+static atomic_t vns_nsproxy_live = ATOMIC_INIT(0);
+static bool vns_namespace_stop_gate;
 static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
@@ -96,30 +99,31 @@ struct vns_nsproxy_set_entry {
 	struct hlist_node node;
 };
 
-static void vns_nsproxy_set_add(struct nsproxy *ns)
+static bool vns_nsproxy_set_add(struct nsproxy *ns)
 {
 	struct vns_nsproxy_set_entry *entry;
 	unsigned long flags;
 
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
-		/*
-		 * Allocation failure here just means vns_task_exit_cleanup()
-		 * will fail to recognize this object later and the real
-		 * kernel's exit path may attempt to free it against its own
-		 * cache. This is exceedingly unlikely (a tiny fixed-size
-		 * allocation) and there is no safe way to fail create_nsproxy()
-		 * at this point without unwinding a fully-populated object, so
-		 * we log and continue rather than leak the whole nsproxy.
-		 */
-		LKM4CTR_WARN(VENDOR_KERNEL_TAG, "vns_nsproxy_set_add: kmalloc failed, exit-safety tracking degraded for %p", ns);
-		return;
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "vns_nsproxy_set_add: tracking allocation failed for %p; refusing untracked namespace proxy",
+			    ns);
+		return false;
 	}
 	entry->ns = ns;
 
 	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	/* Close the check-then-register race with vns_nsproxy_stop_begin(). */
+	if (vns_namespace_stop_gate) {
+		spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+		kfree(entry);
+		return false;
+	}
 	hash_add(vns_nsproxy_set, &entry->node, (unsigned long)ns);
+	atomic_inc(&vns_nsproxy_live);
 	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+	return true;
 }
 
 static bool vns_nsproxy_set_remove(struct nsproxy *ns)
@@ -132,6 +136,7 @@ static bool vns_nsproxy_set_remove(struct nsproxy *ns)
 	hash_for_each_possible(vns_nsproxy_set, entry, node, (unsigned long)ns) {
 		if (entry->ns == ns) {
 			hash_del(&entry->node);
+			atomic_dec(&vns_nsproxy_live);
 			found = true;
 			break;
 		}
@@ -141,6 +146,36 @@ static bool vns_nsproxy_set_remove(struct nsproxy *ns)
 	if (found)
 		kfree(entry);
 	return found;
+}
+
+int vns_nsproxy_live_count(void)
+{
+	return atomic_read(&vns_nsproxy_live);
+}
+
+void vns_nsproxy_stop_begin(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	smp_store_release(&vns_namespace_stop_gate, true);
+	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+}
+
+void vns_nsproxy_stop_abort(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_nsproxy_set_lock, flags);
+	vns_namespace_stop_gate = false;
+	spin_unlock_irqrestore(&vns_nsproxy_set_lock, flags);
+}
+
+bool vns_namespace_creation_allowed(void)
+{
+	if (!smp_load_acquire(&vns_namespace_stop_gate))
+		return true;
+	return vns_semundo_clone_namespace_admitted();
 }
 
 static bool vns_nsproxy_set_contains(struct nsproxy *ns)
@@ -189,6 +224,11 @@ static inline struct nsproxy *create_nsproxy(void)
 {
 	struct nsproxy *nsproxy;
 
+	if (smp_load_acquire(&vns_namespace_stop_gate))
+		return NULL;
+	if (!try_module_get(THIS_MODULE))
+		return NULL;
+
 	/* [BUILD-COMPAT] allocate from vendor_kernel's own module-owned
 	 * nsproxy cache (created in vns_nsproxy_cache_init()) instead of the
 	 * real kernel's private nsproxy_cachep. See vns_task_exit_cleanup()
@@ -197,8 +237,13 @@ static inline struct nsproxy *create_nsproxy(void)
 	nsproxy = kmem_cache_alloc(vns_nsproxy_cachep, GFP_KERNEL);
 	if (nsproxy) {
 		vns_init_count(&nsproxy->count, 1); /* [BUILD-COMPAT] */
-		vns_nsproxy_set_add(nsproxy); /* [BUILD-COMPAT] */
+		if (!vns_nsproxy_set_add(nsproxy)) {
+			kmem_cache_free(vns_nsproxy_cachep, nsproxy);
+			nsproxy = NULL;
+		}
 	}
+	if (!nsproxy)
+		module_put(THIS_MODULE);
 	return nsproxy;
 }
 
@@ -231,7 +276,7 @@ static __nocfi struct nsproxy *create_new_namespaces(unsigned long flags,
 
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
-		return ERR_PTR(-ENOMEM);
+		return ERR_PTR(vns_namespace_creation_allowed() ? -ENOMEM : -EBUSY);
 
 	/* [BUILD-COMPAT] copy_mnt_ns is resolved lazily for vendor_kernel. */
 	if (vns_copy_mnt_ns_fn) {
@@ -340,7 +385,13 @@ out_uts:
 		if (vns_put_mnt_ns_fn)
 			vns_put_mnt_ns_fn(new_nsp->mnt_ns); /* [BUILD-COMPAT] */
 out_ns:
+	/* create_nsproxy() registered this unpublished object and took a module
+	 * reference. Construction failures reach this label directly instead of
+	 * going through vns_free_nsproxy(), so retire both explicitly here.
+	 */
+	vns_nsproxy_set_remove(new_nsp);
 	kmem_cache_free(vns_nsproxy_cachep, new_nsp); /* [BUILD-COMPAT] */
+	module_put(THIS_MODULE);
 	return ERR_PTR(err);
 }
 
@@ -400,6 +451,8 @@ struct nsproxy *vns_copy_namespaces(unsigned long flags, struct task_struct *tsk
  */
 void __nocfi vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 {
+	bool module_pinned;
+
 	if (ns->mnt_ns)
 		if (vns_put_mnt_ns_fn)
 			vns_put_mnt_ns_fn(ns->mnt_ns); /* [BUILD-COMPAT] */
@@ -416,8 +469,14 @@ void __nocfi vns_free_nsproxy(struct nsproxy *ns) /* [RENAME] */
 	vns_put_cgroup_ns(ns->cgroup_ns); /* [RENAME] */
 	if (ns->net_ns)
 		put_net(ns->net_ns); /* [BUILD-COMPAT] real inline, not resolved by name */
-	vns_nsproxy_set_remove(ns); /* [BUILD-COMPAT] */
+	module_pinned = vns_nsproxy_set_remove(ns); /* [BUILD-COMPAT] */
 	kmem_cache_free(vns_nsproxy_cachep, ns); /* [BUILD-COMPAT] */
+	if (module_pinned)
+		module_put(THIS_MODULE);
+	else
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "vns_free_nsproxy: untracked vendored nsproxy %p; module lifetime pin missing",
+			    ns);
 }
 
 /*
@@ -991,10 +1050,8 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 
 	vns_task_exit_pidns_cleanup(tsk);
 
-#if !defined(CONFIG_SYSVIPC)
 	vns_prepare_exit_sem(tsk);
 	vns_prepare_exit_shm(tsk);
-#endif
 
 	task_lock(tsk);
 	ns = tsk->nsproxy;
@@ -1183,6 +1240,16 @@ static struct shadow_hook vns_exit_task_namespaces_shadow_hook =
 int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 {
 	int ret;
+
+	/* Safe-unload quiesce must still admit task-exit cleanup so live
+	 * vendored nsproxy references can drain before the module is removed.
+	 */
+	vns_free_nsproxy_shadow_hook.quiesce_exempt = true;
+	vns_exit_task_namespaces_shadow_hook.quiesce_exempt = true;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+	vns_exit_fs_shadow_hook.quiesce_exempt = true;
+#endif
 
 	ret = shadow_hook_install(&vns_free_nsproxy_shadow_hook);
 	if (ret) {

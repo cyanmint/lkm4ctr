@@ -22,6 +22,8 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ipc.h>
+#include <linux/ipc_namespace.h>
+#include <linux/rcupdate.h>
 #include <linux/msg.h>
 #include <linux/sem.h>
 #include <linux/shm.h>
@@ -133,14 +135,8 @@ int vns_ipc_default_init(void)
 	 * glue/vendor_kernel_ipc_mount.c) is deliberately NOT performed here
 	 * anymore: it is now vendor_kernel_init()'s own responsibility, done
 	 * only once every other step that could still fail has already
-	 * succeeded. See the comment at that call site for why -- in short,
-	 * mounting here and then having some *later* vendor_kernel_init()
-	 * step fail used to leave a mount whose real superblock teardown
-	 * (deferred to task_work by path_umount(), see
-	 * vns_mqueue_dev_teardown()'s own comment) outlives this module's own
-	 * memory once the failed load is synchronously unwound, causing a
-	 * guaranteed use-after-free panic in deactivate_super() shortly after
-	 * insmod returns.
+	 * succeeded. This keeps a failed vendor_kernel_init() from leaving a
+	 * namespace-attached mqueue mount behind while the module load unwinds.
 	 */
 	return 0;
 
@@ -153,26 +149,30 @@ fail_mqueue:
 	 * proactively-mounted /dev/mqueue whose teardown could still be
 	 * pending -- always safe to destroy the cache here.
 	 */
-	vns_mqueue_fs_exit(false);
+	vns_mqueue_fs_exit();
 	return err;
 }
 
 void vns_ipc_default_exit(void)
 {
-	bool cache_teardown_unsafe;
-
+	vns_mqueue_dev_cancel();
+	vns_sem_exit_ns(&vns_default_ipc_ns);
+	vns_msg_exit_ns(&vns_default_ipc_ns);
+	vns_shm_exit_ns(&vns_default_ipc_ns);
 	vns_free_inum(&vns_default_ipc_ns.ns);
 	vns_retire_ipc_sysctls(&vns_default_ipc_ns);
-	/*
-	 * Must run before vns_mqueue_fs_exit()'s kmem_cache_destroy(), see
-	 * vns_mqueue_dev_mounted's comment in vendor_kernel_ipc_mount.c. Its
-	 * return value tells vns_mqueue_fs_exit() whether it actually had to
-	 * detach a namespace-attached mount whose real teardown is deferred
-	 * to task_work (and thus whether destroying the cache right now
-	 * would be unsafe).
+	/* SysV ipc_rcu_putref() callbacks contain module text. All task-exit
+	 * state must be absent before this point; wait for callbacks queued by
+	 * namespace and default-IPC teardown before the module can be removed.
 	 */
-	cache_teardown_unsafe = vns_mqueue_dev_teardown();
-	vns_mqueue_fs_exit(cache_teardown_unsafe);
+	rcu_barrier();
+	/*
+	 * vendor_kernel_exit() closes the mqueue context gate and refuses a
+	 * controlled stop while any module-owned user mount or open mqueue file
+	 * remains. It also drains deferred nsproxy and IPC-namespace teardown
+	 * work before this final default mount/cache cleanup.
+	 */
+	vns_mqueue_fs_exit();
 }
 
 /* --- argument accessors (extends the arg0/arg1 pair in

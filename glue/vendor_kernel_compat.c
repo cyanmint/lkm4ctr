@@ -45,6 +45,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/user_namespace.h>
@@ -394,16 +395,38 @@ void vns_compat_resolve(void)
 }
 
 /*
- * create_user_ns() is compiled into the running kernel only when its native
- * CONFIG_USER_NS core is enabled. Resolve it at runtime rather than relying
- * on this module's build-time config: a no-USER_NS DDK-built module can also
- * be tested or deployed on a kernel with native USER_NS enabled. There, the
- * kernel's uid/gid syscalls already translate credentials, so installing
- * the module's fallback translation hooks would map the results twice.
+ * Native USER_NS availability controls whether native credential teardown can
+ * queue the module-owned userns work callback. Prefer the matching kernel
+ * build config; for a no-USER_NS module tested against a native USER_NS
+ * kernel, probe create_user_ns once and reuse the cached result everywhere.
  */
+static DEFINE_MUTEX(vns_native_userns_core_lock);
+static bool vns_native_userns_core_checked;
+static bool vns_native_userns_core_cached;
+
 bool vns_native_userns_core_available(void)
 {
-	return shadow_hook_resolve("create_user_ns") != 0;
+	bool available;
+
+	mutex_lock(&vns_native_userns_core_lock);
+	if (!vns_native_userns_core_checked) {
+#ifdef CONFIG_USER_NS
+		available = true;
+#else
+		available = shadow_hook_resolve("create_user_ns") != 0;
+#endif
+		vns_native_userns_core_cached = available;
+		smp_store_release(&vns_native_userns_core_checked, true);
+	}
+	available = vns_native_userns_core_cached;
+	mutex_unlock(&vns_native_userns_core_lock);
+	return available;
+}
+
+bool vns_native_userns_core_is_available(void)
+{
+	return smp_load_acquire(&vns_native_userns_core_checked) &&
+	       READ_ONCE(vns_native_userns_core_cached);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
@@ -783,9 +806,16 @@ int __nocfi vns_set_cred_ucounts(struct cred *new)
  */
 struct cred *__nocfi vns_prepare_creds(void)
 {
-	if (vns_prepare_creds_real)
-		return vns_prepare_creds_real();
-	return NULL;
+	struct cred *cred;
+
+	if (!vns_prepare_creds_real)
+		return NULL;
+	cred = vns_prepare_creds_real();
+	if (cred && vns_user_ns_cred_get(cred))
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "could not account vendored user namespace on prepared credentials %p; retaining a fail-safe reference",
+			    cred);
+	return cred;
 }
 
 int __nocfi vns_commit_creds(struct cred *new)

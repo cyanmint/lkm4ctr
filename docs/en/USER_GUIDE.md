@@ -172,14 +172,15 @@ sudo cat /mnt/lkm4ctr/v/namespaces
 
 The mount is optional and is not required for Docker. `/log` is the combined log; `/v/` contains vendor-kernel state and live namespace/IPC information. Keep the output when reporting an issue, together with `uname -a`, the exact asset filename, and the `insmod`/Docker error.
 
-Do not attempt to unload while containers or other processes are using the module. After stopping Docker and unmounting the diagnostic filesystem, a normal unload may be requested:
+Do not attempt to unload while containers or other processes are using the module. If `/dev/mqueue` is mounted, normally unmount it first; its active superblock pins the module, so `rmmod` safely refuses until the mount is gone. Processes holding a vendored namespace proxy also pin the module until they exit; check `nsproxy_live` in `/mnt/lkm4ctr/v/resources`. Vendored IPC and user namespaces are shown by `ipcns_live` and `userns_live`; their teardown queues are shown by `ipcns_free_work_pending` and `userns_pending_work`. On kernels without native USER_NS, credentials referencing vendored user namespaces are released after the RCU credential-free callback. Descriptors for vendored namespaces also pin the module while their NSFS inode remains cached; closing a descriptor may not release that pin immediately. Check `nsfs_inode_pins` if unload is refused, and do not force removal. Vendored SysV shared-memory segments keep the module busy; remove them with `ipcrm -m`. On kernels built without native `CONFIG_SYSVIPC`, vendored semaphore `SEM_UNDO` state and `sem_exit_work_pending` keep the module busy until cleanup completes. Controlled stop refuses while tracked IPC resources or task-exit work remain. `mqueue_public_fs_registered` in `/v/resources` indicates whether this module owns the public mqueue filesystem name or the running kernel already registered it. After stopping Docker and other namespace-using processes, removing SysV shared-memory segments, closing namespace descriptors, and unmounting both filesystems, a normal unload may be requested:
 
 ```sh
+sudo umount /dev/mqueue  # if mounted
 sudo umount /mnt/lkm4ctr
 sudo rmmod lkm4ctr
 ```
 
-The module tracks in-flight hooks and can refuse an unsafe unload. The diagfs also provides a controlled hot-reload path for advanced users:
+The module tracks in-flight hooks, live vendored namespace proxies, namespace-inode pins, and active IPC objects/work, and can refuse an unsafe unload. The same `/dev/mqueue`, SysV IPC, namespace-process, and namespace-descriptor requirements apply before hot-reload. The diagfs also provides a controlled hot-reload path for advanced users:
 
 ```sh
 sudo sh -c 'printf "%s\n" "/absolute/path/to/new/lkm4ctr.ko" > /mnt/lkm4ctr/v/hotreload/do-hot-reload'

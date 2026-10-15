@@ -105,6 +105,9 @@
 #ifndef CLONE_NEWCGROUP
 #define CLONE_NEWCGROUP 0x02000000
 #endif
+#ifndef CLONE_SYSVSEM
+#define CLONE_SYSVSEM 0x00040000
+#endif
 
 #define LKM4CTR_CHECKER_VERSION "4.0"
 
@@ -801,6 +804,154 @@ static void shadow_checker_generic_ns(const char *label, const char *ns_file,
 	else
 		shadow_checker_report(label, SHADOW_CHECKER_STUB,
 				      "unshare() succeeded but namespace id unchanged (bookkeeping only)");
+}
+
+struct shadow_checker_clone_ipc_args {
+	int semid;
+	int result_fd;
+};
+
+static int shadow_checker_clone_ipc_child(void *opaque)
+{
+	struct shadow_checker_clone_ipc_args *args = opaque;
+	char result = 'F';
+	int local_semid;
+
+	if (semctl(args->semid, 0, GETVAL) < 0 &&
+	    (errno == EINVAL || errno == EIDRM)) {
+		local_semid = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+		if (local_semid >= 0) {
+			semctl(local_semid, 0, IPC_RMID);
+			result = 'P';
+		}
+	}
+	(void)write(args->result_fd, &result, sizeof(result));
+	return result == 'P' ? 0 : 1;
+}
+
+static void shadow_checker_clone_newipc(void)
+{
+	struct shadow_checker_clone_ipc_args args;
+	struct sembuf setval = { .sem_num = 0, .sem_op = 1, .sem_flg = 0 };
+	char result = 0;
+	void *stack;
+	int pipefd[2];
+	int semid;
+	pid_t child;
+	pid_t waited;
+	int status;
+	ssize_t n;
+
+	semid = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+	if (semid < 0 || semop(semid, &setval, 1)) {
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_FAIL,
+				      "could not create parent semaphore: %s",
+				      strerror(errno));
+		if (semid >= 0)
+			semctl(semid, 0, IPC_RMID);
+		return;
+	}
+	if (pipe(pipefd)) {
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_FAIL,
+				      "pipe(): %s", strerror(errno));
+		semctl(semid, 0, IPC_RMID);
+		return;
+	}
+	stack = malloc(64 * 1024);
+	if (!stack) {
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_FAIL,
+				      "malloc() for clone stack failed");
+		close(pipefd[0]);
+		close(pipefd[1]);
+		semctl(semid, 0, IPC_RMID);
+		return;
+	}
+	args.semid = semid;
+	args.result_fd = pipefd[1];
+	child = clone(shadow_checker_clone_ipc_child,
+		      (char *)stack + 64 * 1024,
+		      CLONE_NEWIPC | SIGCHLD, &args);
+	close(pipefd[1]);
+	if (child < 0) {
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_FAIL,
+				      "clone(): %s", strerror(errno));
+		goto out;
+	}
+	do {
+		n = read(pipefd[0], &result, sizeof(result));
+	} while (n < 0 && errno == EINTR);
+	waited = waitpid(child, &status, 0);
+	if (waited == child && n == sizeof(result) && result == 'P' &&
+	    WIFEXITED(status) && WEXITSTATUS(status) == 0)
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_PASS,
+				      "child had an isolated IPC namespace before SysV access");
+	else
+		shadow_checker_report("clone(CLONE_NEWIPC)", SHADOW_CHECKER_FAIL,
+				      "child inherited parent IPC semaphore or local semget failed");
+out:
+	close(pipefd[0]);
+	free(stack);
+	semctl(semid, 0, IPC_RMID);
+}
+
+static int shadow_checker_clone_sysvsem_child(void *opaque)
+{
+	int semid = *(int *)opaque;
+	struct sembuf op = { .sem_num = 0, .sem_op = -1, .sem_flg = SEM_UNDO };
+
+	return semop(semid, &op, 1) ? 1 : 0;
+}
+
+static void shadow_checker_clone_sysvsem(void)
+{
+	struct sembuf parent_op = { .sem_num = 0, .sem_op = 1,
+				    .sem_flg = SEM_UNDO };
+	void *stack;
+	int semid;
+	int status;
+	int val;
+	pid_t child;
+
+	semid = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+	if (semid < 0 || semop(semid, &parent_op, 1)) {
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_FAIL,
+				      "could not establish parent SEM_UNDO: %s",
+				      strerror(errno));
+		if (semid >= 0)
+			semctl(semid, 0, IPC_RMID);
+		return;
+	}
+	stack = malloc(64 * 1024);
+	if (!stack) {
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_FAIL,
+				      "malloc() for clone stack failed");
+		semctl(semid, 0, IPC_RMID);
+		return;
+	}
+	child = clone(shadow_checker_clone_sysvsem_child,
+		      (char *)stack + 64 * 1024,
+		      CLONE_SYSVSEM | SIGCHLD, &semid);
+	if (child < 0) {
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_FAIL,
+				      "clone(): %s", strerror(errno));
+		goto out;
+	}
+	if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0) {
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_FAIL,
+				      "child semop(SEM_UNDO) failed or wait failed");
+		goto out;
+	}
+	val = semctl(semid, 0, GETVAL);
+	if (val == 0)
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_PASS,
+				      "child and parent shared SEM_UNDO state through child exit");
+	else
+		shadow_checker_report("clone(CLONE_SYSVSEM)", SHADOW_CHECKER_FAIL,
+				      "child undo was not shared (value=%d, want 0)", val);
+out:
+	free(stack);
+	semctl(semid, 0, IPC_RMID);
 }
 
 /*
@@ -2096,6 +2247,7 @@ int main(int argc, char **argv)
 	shadow_checker_user();
 	shadow_checker_user_idmap();
 	shadow_checker_generic_ns("ns_ipc (IPC)", "ipc", CLONE_NEWIPC);
+	shadow_checker_clone_newipc();
 	shadow_checker_generic_ns("ns_net (NET)", "net", CLONE_NEWNET);
 	shadow_checker_generic_ns("ns_mnt (MNT)", "mnt", CLONE_NEWNS);
 	shadow_checker_generic_ns("ns_cgroup (CGROUP)", "cgroup", CLONE_NEWCGROUP);
@@ -2103,6 +2255,7 @@ int main(int argc, char **argv)
 	shadow_checker_mqueue_attr();
 	shadow_checker_sysvipc();
 	shadow_checker_sysv_sem();
+	shadow_checker_clone_sysvsem();
 	shadow_checker_sysv_shm();
 	shadow_checker_overlay();
 

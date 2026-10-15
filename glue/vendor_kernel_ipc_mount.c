@@ -37,7 +37,10 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
+#include <linux/module.h>
 #include <linux/mount.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <uapi/linux/mount.h>
 #include <linux/version.h>
 
@@ -47,26 +50,6 @@
 
 #define VNS_MQ_DEV_MQUEUE_PATH "/dev/mqueue"
 #define VNS_MQ_DEV_MQUEUE_MODE 0755
-
-/*
- * Whether vns_mqueue_dev_ensure() below actually mounted /dev/mqueue itself
- * (as opposed to finding it already a mountpoint and leaving it alone, or
- * failing outright). This is the *third* mqueue superblock in play, distinct
- * from mqueue_fs_type's mq_create_mount(SB_KERNMOUNT) instance backing
- * ipc_namespace::mq_mnt (ipc/mqueue.c) and from any real CONFIG_POSIX_MQUEUE=y
- * kernel's own builtin mqueue: path_mount() below attaches a brand-new
- * mqueue_get_tree() instance (its own superblock + root inode, both allocated
- * out of mqueue_inode_cachep) directly into the *host's* mount tree at
- * /dev/mqueue, same as a userspace mount(2) would. Unlike ns->mq_mnt (torn
- * down via kern_unmount() in vns_mqueue_fs_exit()), nothing else ever drops
- * this mount, so its root inode would otherwise still be alive -- and
- * mqueue_inode_cachep would still show it as an in-use object -- by the time
- * vns_mqueue_fs_exit() calls kmem_cache_destroy(mqueue_inode_cachep),
- * tripping slub's "Objects remaining ... on __kmem_cache_shutdown()" BUG
- * splat (and a slab UAF once its RCU-deferred free eventually runs). See
- * vns_mqueue_dev_teardown().
- */
-static bool vns_mqueue_dev_mounted;
 
 /*
  * vfs_mkdir()'s signature has changed twice upstream: it gained a
@@ -97,19 +80,19 @@ typedef void (*vns_mq_done_path_create_fn)(struct path *, struct dentry *);
 typedef int (*vns_mq_path_mount_fn)(const char *, struct path *,
 				     const char *, unsigned long, void *);
 typedef void (*vns_mq_path_put_fn)(const struct path *);
-typedef int (*vns_mq_path_umount_fn)(struct path *, int);
+
+static void vns_mqueue_dev_mount_workfn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(vns_mqueue_dev_mount_work,
+			    vns_mqueue_dev_mount_workfn);
+static DEFINE_MUTEX(vns_mqueue_dev_work_lock);
+static bool vns_mqueue_dev_work_stopping;
 
 /*
  * vns_mqueue_dev_do_mount() - mount at an already-resolved @path.
  *
- * Tries our own real "mqueue" filesystem type first (registered by
- * ipc/mqueue.c's vns_mqueue_fs_init(), see mqueue_fs_type there), which is
- * what makes the mounted /dev/mqueue an actually working POSIX mqueue rather
- * than a plain tmpfs stand-in. Falls back to tmpfs only in the unexpected
- * case that mount fails (e.g. the
- * "mqueue" name was already taken by the real kernel's own builtin
- * CONFIG_POSIX_MQUEUE=y filesystem and *that* mount somehow still fails here)
- * so /dev/mqueue is left as a working mountpoint either way.
+ * Uses the registered POSIX mqueue type first. If the kernel already owns the
+ * "mqueue" name, path_mount() resolves that built-in implementation instead.
+ * Falls back to tmpfs only if the mqueue mount itself fails.
  */
 static int vns_mqueue_dev_do_mount(vns_mq_path_mount_fn path_mount_fn,
 				    struct path *path)
@@ -124,7 +107,7 @@ static int vns_mqueue_dev_do_mount(vns_mq_path_mount_fn path_mount_fn,
 	return ret;
 }
 
-void vns_mqueue_dev_ensure(void)
+static void vns_mqueue_dev_mount(void)
 {
 	vns_mq_kern_path_fn kern_path_fn;
 	vns_mq_kern_path_create_fn kern_path_create_fn;
@@ -145,7 +128,6 @@ void vns_mqueue_dev_ensure(void)
 	vfs_mkdir_fn = (vns_mq_vfs_mkdir_fn)shadow_hook_resolve("vfs_mkdir");
 	path_mount_fn = (vns_mq_path_mount_fn)shadow_hook_resolve("path_mount");
 	path_put_fn = (vns_mq_path_put_fn)shadow_hook_resolve("path_put");
-
 	if (!kern_path_fn || !kern_path_create_fn || !done_path_create_fn ||
 	    !vfs_mkdir_fn || !path_mount_fn || !path_put_fn) {
 		LKM4CTR_INFO("vendor_kernel",
@@ -177,10 +159,9 @@ void vns_mqueue_dev_ensure(void)
 			LKM4CTR_INFO("vendor_kernel",
 				     "mqueue: proactive mount on existing %s failed: %d",
 				     VNS_MQ_DEV_MQUEUE_PATH, ret);
-		else {
-			vns_mqueue_dev_mounted = true;
-			LKM4CTR_INFO("vendor_kernel", "mqueue: mounted %s", VNS_MQ_DEV_MQUEUE_PATH);
-		}
+		else
+			LKM4CTR_INFO("vendor_kernel", "mqueue: mounted %s",
+				     VNS_MQ_DEV_MQUEUE_PATH);
 		return;
 	}
 
@@ -220,82 +201,43 @@ void vns_mqueue_dev_ensure(void)
 	if (ret)
 		LKM4CTR_INFO("vendor_kernel", "mqueue: created %s but mount failed: %d",
 			     VNS_MQ_DEV_MQUEUE_PATH, ret);
-	else {
-		vns_mqueue_dev_mounted = true;
+	else
 		LKM4CTR_INFO("vendor_kernel", "mqueue: created and mounted %s", VNS_MQ_DEV_MQUEUE_PATH);
-	}
 }
 
-/*
- * vns_mqueue_dev_teardown() - undo vns_mqueue_dev_ensure()'s own mount, if it
- * performed one, and report whether it is now unsafe to destroy
- * mqueue_inode_cachep.
- *
- * Must run before vns_mqueue_fs_exit() (ipc/mqueue.c) calls
- * kmem_cache_destroy(mqueue_inode_cachep): see vns_mqueue_dev_mounted's
- * comment above for why an un-torn-down /dev/mqueue mount otherwise leaves a
- * live mqueue_inode_cachep object behind and trips slub's "Objects remaining"
- * BUG. A no-op (returns false) if vns_mqueue_dev_ensure() found /dev/mqueue
- * already mounted (by something else) or never managed to mount it itself --
- * nothing to undo, and nothing of ours pinning the cache, in either case.
- *
- * Returns true iff the caller must NOT call kmem_cache_destroy() on
- * mqueue_inode_cachep right now. This is unconditionally true whenever this
- * function actually had something of its own to tear down: unlike
- * ipc/mqueue.c's own kern_unmount(init_ipc_ns.mq_mnt) (an MNT_INTERNAL
- * kernel-mount, whose final mntput() calls cleanup_mnt() synchronously),
- * path_umount() on a real, namespace-attached mount (what path_mount()
- * created in vns_mqueue_dev_ensure()) always defers the actual
- * superblock/inode teardown (cleanup_mnt() -> deactivate_super()) to
- * task_work run the next time the *current* task returns to userspace --
- * regardless of the MNT_DETACH flag, and regardless of whether the
- * path_umount() call below even succeeds. That can be well after this
- * function (and the caller's kmem_cache_destroy(), if it ran anyway) returns
- * -- e.g. only once the insmod/rmmod syscall itself returns -- so
- * mqueue_inode_cachep may still hold that mount's live root inode by the
- * time this returns, and destroying the cache regardless would hit the
- * "Objects remaining" BUG followed by a use-after-free once the deferred
- * task_work eventually runs against the now-destroyed cache.
- *
- * Best-effort, like vns_mqueue_dev_ensure() itself: a resolve or lookup
- * failure here is logged and left alone rather than propagated, since the
- * caller (vns_ipc_default_exit()/vns_mqueue_fs_exit()) must still tear down
- * the rest of the default ipc_namespace regardless. MNT_DETACH is used so a
- * still-busy /dev/mqueue (e.g. a task with a queue open or cwd inside it)
- * cannot block module unload; the mount is lazily unmounted instead.
- */
-bool vns_mqueue_dev_teardown(void)
+static void vns_mqueue_dev_mount_workfn(struct work_struct *work)
 {
-	vns_mq_kern_path_fn kern_path_fn;
-	vns_mq_path_umount_fn path_umount_fn;
-	struct path path;
-	int ret;
-
-	if (!vns_mqueue_dev_mounted)
-		return false;
-	vns_mqueue_dev_mounted = false;
-
-	kern_path_fn = (vns_mq_kern_path_fn)shadow_hook_resolve("kern_path");
-	path_umount_fn = (vns_mq_path_umount_fn)shadow_hook_resolve("path_umount");
-	if (!kern_path_fn || !path_umount_fn) {
-		LKM4CTR_INFO("vendor_kernel",
-			     "mqueue: could not resolve VFS helpers to unmount %s; leaving it mounted",
-			     VNS_MQ_DEV_MQUEUE_PATH);
-		return true;
+	/*
+	 * path_mount() resolves the public filesystem type through get_fs_type(),
+	 * which cannot take an owner reference while this module is still COMING.
+	 * Hold our own reference while attempting the mount, and retry after the
+	 * module loader has made the module LIVE. Once cancellation closes the
+	 * scheduling gate, a failed reference acquisition cannot requeue this work.
+	 */
+	if (!try_module_get(THIS_MODULE)) {
+		mutex_lock(&vns_mqueue_dev_work_lock);
+		if (!vns_mqueue_dev_work_stopping)
+			schedule_delayed_work(&vns_mqueue_dev_mount_work, 1);
+		mutex_unlock(&vns_mqueue_dev_work_lock);
+		return;
 	}
 
-	ret = kern_path_fn(VNS_MQ_DEV_MQUEUE_PATH, LOOKUP_DIRECTORY, &path);
-	if (ret) {
-		LKM4CTR_INFO("vendor_kernel", "mqueue: kern_path(%s) failed before unmount: %d",
-			     VNS_MQ_DEV_MQUEUE_PATH, ret);
-		return true;
-	}
+	vns_mqueue_dev_mount();
+	module_put(THIS_MODULE);
+}
 
-	ret = path_umount_fn(&path, MNT_DETACH);
-	if (ret)
-		LKM4CTR_INFO("vendor_kernel", "mqueue: umount(%s) failed: %d",
-			     VNS_MQ_DEV_MQUEUE_PATH, ret);
-	else
-		LKM4CTR_INFO("vendor_kernel", "mqueue: unmounted %s", VNS_MQ_DEV_MQUEUE_PATH);
-	return true;
+void vns_mqueue_dev_ensure(void)
+{
+	mutex_lock(&vns_mqueue_dev_work_lock);
+	vns_mqueue_dev_work_stopping = false;
+	schedule_delayed_work(&vns_mqueue_dev_mount_work, 1);
+	mutex_unlock(&vns_mqueue_dev_work_lock);
+}
+
+void vns_mqueue_dev_cancel(void)
+{
+	mutex_lock(&vns_mqueue_dev_work_lock);
+	vns_mqueue_dev_work_stopping = true;
+	mutex_unlock(&vns_mqueue_dev_work_lock);
+	cancel_delayed_work_sync(&vns_mqueue_dev_mount_work);
 }

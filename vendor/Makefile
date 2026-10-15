@@ -57,6 +57,7 @@ lkm4ctr-objs := \
 	kernel/cgroup/namespace.o \
 	kernel/time/namespace.o \
 	../glue/vendor_kernel_module.o \
+	../glue/vendor_kernel_nsfs_lifecycle.o \
 	../glue/vendor_kernel_syscalls.o \
 	../glue/vendor_kernel_syscalls_userns.o \
 	../glue/vendor_kernel_procfs.o \
@@ -292,6 +293,12 @@ ccflags-y += -I$(src)/../glue
 #     kernel/nsproxy.c), so this object can be removed from this list and
 #     keep normal CFI instrumentation for its real-kernel-invoked
 #     callbacks.
+#   - ../glue/vendor_kernel_nsfs_lifecycle.o: its replacements are invoked
+#     through shadow_hook's runtime ftrace/kprobe redirects and call the
+#     kernel's private nsfs/path helper symbols through name-resolved function
+#     pointers. Like the other runtime-resolved hook objects, this translation
+#     unit must not carry CFI checks against call targets unknown at compile
+#     time.
 #   - lkm4ctr_diagfs.o: not part of the vendor_kernel/shadow_hook_resolve()
 #     machinery above at all -- it resolves kill_litter_super/
 #     generic_shutdown_super/d_alloc_name/simple_lookup/
@@ -324,6 +331,7 @@ VNS_CFI_UNSAFE_OBJS := \
 	../glue/vendor_kernel_overlay.o \
 	../glue/vendor_kernel_ovl_vfs_compat.o \
 	../glue/vendor_kernel_diag.o \
+	../glue/vendor_kernel_nsfs_lifecycle.o \
 	../glue/vendor_kernel_procfs.o
 $(foreach o,$(VNS_CFI_UNSAFE_OBJS),$(eval CFLAGS_REMOVE_$(o) += $(CC_FLAGS_CFI)))
 

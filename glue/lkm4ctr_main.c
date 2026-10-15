@@ -7,7 +7,7 @@
 #include "shadow_hook.h"
 
 int vendor_kernel_init(void);
-void vendor_kernel_exit(void);
+int vendor_kernel_exit(void);
 int lkm4ctr_hotreload_init(void);
 void lkm4ctr_hotreload_exit(void);
 
@@ -40,6 +40,7 @@ static int __init lkm4ctr_init(void)
 			    "[DEBUG-KMI-EXIT] vendor_kernel_init failed: %d",
 			    ret);
 		shadow_hijack_exit();
+		vns_user_ns_exit();
 		return ret;
 	}
 
@@ -58,20 +59,23 @@ static int __init lkm4ctr_init(void)
 }
 
 /*
- * lkm4ctr_exit() unconditionally calls every subsystem's own _exit(), which
- * is idempotent-safe and force-frees all of its resources even if it was
- * never loaded (shadow_hook_remove_all() on hooks that were never installed
- * is a no-op; vendor_kernel's own resource-registry teardown is likewise a
- * no-op on an already-empty registry) or was already manually unloaded via
- * diagfs. This is what guarantees rmmod is never blocked by that state:
- * whatever the diagfs left active is force-cleaned up right here,
- * unconditionally, on the way out.
+ * Module exit repeats idempotent teardown for state still active after
+ * diagfs/hotreload shutdown. Active module-owned objects must prevent this
+ * callback from being reached through their real module references; the
+ * teardown return is diagnostic only because module_exit cannot veto rmmod.
  */
 static void __exit lkm4ctr_exit(void)
 {
+	int ret;
+
 	lkm4ctr_diagfs_exit();
 	lkm4ctr_hotreload_exit();
-	vendor_kernel_exit();
+	ret = vendor_kernel_exit();
+	if (ret)
+		LKM4CTR_ERR(LKM4CTR_TAG,
+			    "vendor_kernel teardown returned %d during module exit; active-object module pins should have prevented this state",
+			    ret);
+	vns_user_ns_exit();
 	shadow_hijack_exit();
 	LKM4CTR_INFO(LKM4CTR_TAG, "unloaded unified module");
 }

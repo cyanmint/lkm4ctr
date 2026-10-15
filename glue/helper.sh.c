@@ -214,7 +214,7 @@ const char lkm4ctr_helper_sh_data[] =
 "  on                             echo on > /status (load every submodule)\n"
 "  off                            echo off > /status (graceful self-unload)\n"
 "  forceunload                    echo forceunload > /status\n"
-"  force2                         echo force2 > /status (aggressive escalation)\n"
+"  force2                         echo force2 > /status (safe legacy alias)\n"
 "  control <target> <cmd>         write <cmd> to /status (target status) or /v/control (target v)\n"
 "  load [target]                  on, or control <target> load\n"
 "  unload [target]                off, or control <target> unload\n"

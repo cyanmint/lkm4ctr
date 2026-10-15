@@ -43,12 +43,14 @@
 #include <linux/mman.h>
 #include <linux/shmem_fs.h>
 #include <linux/security.h>
+#include <linux/atomic.h>
 #include <linux/syscalls.h>
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/ptrace.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
+#include <linux/module.h>
 #include <linux/rwsem.h>
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
@@ -120,9 +122,14 @@ struct shmid_kernel /* private to the kernel */
 	 */
 	struct list_head	shm_clist;
 	struct ipc_namespace	*ns;
+	bool			vns_module_pinned;
 } __randomize_layout;
 
-#if !defined(CONFIG_SYSVIPC)
+static atomic_t vns_sysvshm_live_states = ATOMIC_INIT(0);
+static atomic_t vns_sysvshm_exit_work_pending = ATOMIC_INIT(0);
+static atomic_t vns_shm_live_segments = ATOMIC_INIT(0);
+static atomic_t vns_shm_open_files = ATOMIC_INIT(0);
+
 #define VNS_SYSV_SHM_HASH_BITS 8
 
 struct vns_sysvshm_state {
@@ -160,6 +167,10 @@ vns_sysvshm_state_get(struct task_struct *task, bool create, gfp_t gfp)
 		new_state = kzalloc(sizeof(*new_state), gfp);
 		if (!new_state)
 			return NULL;
+		if (!try_module_get(THIS_MODULE)) {
+			kfree(new_state);
+			return NULL;
+		}
 		get_task_struct(task);
 		new_state->task = task;
 		INIT_LIST_HEAD(&new_state->shm_clist);
@@ -173,12 +184,14 @@ vns_sysvshm_state_get(struct task_struct *task, bool create, gfp_t gfp)
 			 (unsigned long)task);
 		state = new_state;
 		new_state = NULL;
+		atomic_inc(&vns_sysvshm_live_states);
 	}
 	spin_unlock_irqrestore(&vns_sysvshm_state_lock, flags);
 
 	if (new_state) {
 		put_task_struct(new_state->task);
 		kfree(new_state);
+		module_put(THIS_MODULE);
 	}
 	return state;
 }
@@ -195,7 +208,6 @@ static struct vns_sysvshm_state *vns_sysvshm_state_detach(struct task_struct *ta
 	spin_unlock_irqrestore(&vns_sysvshm_state_lock, flags);
 	return state;
 }
-#endif
 
 /* shm_mode upper byte flags */
 #define SHM_DEST	01000	/* segment will be destroyed on last detach */
@@ -214,6 +226,17 @@ static const struct file_operations shm_file_operations;
 static const struct vm_operations_struct shm_vm_ops;
 
 #define shm_ids(ns)	((ns)->ids[IPC_SHM_IDS])
+
+int vns_shm_prepare_exit(struct ipc_namespace *ns)
+{
+	(void)ns;
+	if (atomic_read(&vns_shm_live_segments) ||
+	    atomic_read(&vns_shm_open_files) ||
+	    atomic_read(&vns_sysvshm_live_states) ||
+	    atomic_read(&vns_sysvshm_exit_work_pending))
+		return -EBUSY;
+	return 0;
+}
 
 #define shm_unlock(shp)			\
 	ipc_unlock(&(shp)->shm_perm)
@@ -362,8 +385,14 @@ static void shm_rcu_free(struct rcu_head *head)
 							rcu);
 	struct shmid_kernel *shp = container_of(ptr, struct shmid_kernel,
 							shm_perm);
+	bool module_pinned = shp->vns_module_pinned;
+
 	security_shm_free(&shp->shm_perm);
 	kfree(shp);
+	if (module_pinned) {
+		atomic_dec(&vns_shm_live_segments);
+		module_put(THIS_MODULE);
+	}
 }
 
 /*
@@ -663,9 +692,6 @@ unlink_continue:
 /* Locking assumes this will only be called with task == current */
 void exit_shm(struct task_struct *task)
 {
-#if defined(CONFIG_SYSVIPC)
-	vns_exit_shm_list(task, &task->sysvshm.shm_clist);
-#else
 	struct vns_sysvshm_state *state = vns_sysvshm_state_detach(task);
 
 	if (!state)
@@ -673,10 +699,10 @@ void exit_shm(struct task_struct *task)
 	vns_exit_shm_list(task, &state->shm_clist);
 	put_task_struct(state->task);
 	kfree(state);
-#endif
+	atomic_dec(&vns_sysvshm_live_states);
+	module_put(THIS_MODULE);
 }
 
-#if !defined(CONFIG_SYSVIPC)
 static void vns_sysvshm_exit_work(struct work_struct *work)
 {
 	struct vns_sysvshm_state *state =
@@ -685,6 +711,9 @@ static void vns_sysvshm_exit_work(struct work_struct *work)
 	vns_exit_shm_list(state->task, &state->shm_clist);
 	put_task_struct(state->task);
 	kfree(state);
+	atomic_dec(&vns_sysvshm_exit_work_pending);
+	atomic_dec(&vns_sysvshm_live_states);
+	module_put(THIS_MODULE);
 }
 
 void vns_prepare_exit_shm(struct task_struct *task)
@@ -694,13 +723,10 @@ void vns_prepare_exit_shm(struct task_struct *task)
 	if (!state) {
 		return;
 	}
-	schedule_work(&state->exit_work);
+	atomic_inc(&vns_sysvshm_exit_work_pending);
+	if (!schedule_work(&state->exit_work))
+		atomic_dec(&vns_sysvshm_exit_work_pending);
 }
-#else
-void vns_prepare_exit_shm(struct task_struct *task)
-{
-}
-#endif
 
 static vm_fault_t shm_fault(struct vm_fault *vmf)
 {
@@ -805,6 +831,7 @@ static int shm_release(struct inode *ino, struct file *file)
 	fput(sfd->file);
 	shm_file_data(file) = NULL;
 	kfree(sfd);
+	atomic_dec(&vns_shm_open_files);
 	return 0;
 }
 
@@ -838,6 +865,7 @@ static unsigned long shm_get_unmapped_area(struct file *file,
 }
 
 static const struct file_operations shm_file_operations = {
+	.owner		= THIS_MODULE,
 	.mmap		= shm_mmap,
 	.fsync		= shm_fsync,
 	.release	= shm_release,
@@ -851,6 +879,7 @@ static const struct file_operations shm_file_operations = {
  * but we keep it distinct for the sake of is_file_shm_hugepages().
  */
 static const struct file_operations shm_file_operations_huge = {
+	.owner		= THIS_MODULE,
 	.mmap		= shm_mmap,
 	.fsync		= shm_fsync,
 	.release	= shm_release,
@@ -910,6 +939,13 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	shp = kmalloc(sizeof(*shp), GFP_KERNEL_ACCOUNT);
 	if (unlikely(!shp))
 		return -ENOMEM;
+	INIT_LIST_HEAD(&shp->shm_clist);
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(shp);
+		return -ENODEV;
+	}
+	shp->vns_module_pinned = true;
+	atomic_inc(&vns_shm_live_segments);
 
 	shp->shm_perm.key = key;
 	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
@@ -919,6 +955,8 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	error = security_shm_alloc(&shp->shm_perm);
 	if (error) {
 		kfree(shp);
+		atomic_dec(&vns_shm_live_segments);
+		module_put(THIS_MODULE);
 		return error;
 	}
 
@@ -971,12 +1009,9 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		goto no_id;
 
 	shp->ns = ns;
+	/* Account the segment before any cleanup path can call shm_destroy(). */
+	ns->shm_tot += numpages;
 
-#if defined(CONFIG_SYSVIPC)
-	task_lock(current);
-	list_add(&shp->shm_clist, &current->sysvshm.shm_clist);
-	task_unlock(current);
-#else
 	{
 		struct vns_sysvshm_state *state;
 
@@ -989,7 +1024,6 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		list_add(&shp->shm_clist, &state->shm_clist);
 		task_unlock(current);
 	}
-#endif
 
 	/*
 	 * shmid gets reported as "inode#" in /proc/pid/maps.
@@ -997,7 +1031,6 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	 */
 	file_inode(file)->i_ino = shp->shm_perm.id;
 
-	ns->shm_tot += numpages;
 	error = shp->shm_perm.id;
 
 	ipc_unlock_object(&shp->shm_perm);
@@ -1010,12 +1043,10 @@ no_id:
 	fput(file);
 	ipc_rcu_putref(&shp->shm_perm, shm_rcu_free);
 	return error;
-#if !defined(CONFIG_SYSVIPC)
 no_state:
 	shm_destroy(ns, shp);
 	rcu_read_unlock();
 	return error;
-#endif
 no_file:
 	call_rcu(&shp->shm_perm.rcu, shm_rcu_free);
 	return error;
@@ -1832,6 +1863,7 @@ static long do_shmat(int shmid, char __user *shmaddr, int shmflg,
 	sfd->file = base;
 	sfd->vm_ops = NULL;
 	file->private_data = sfd;
+	atomic_inc(&vns_shm_open_files);
 
 	err = security_mmap_file(file, prot, flags);
 	if (err)

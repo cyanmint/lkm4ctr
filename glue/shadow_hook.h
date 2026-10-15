@@ -115,7 +115,11 @@
  *            shadow_hook_remove() -- see shadow_hook_remove()'s own
  *            comment in shadow_hijack.c for why tearing it down early
  *            would permanently hang module_refcount() above zero.
- * @retprobe_installed: whether @retprobe is currently registered.
+ * @retprobe_installed: whether @retprobe is currently registered. A forward
+ *            redirect is not enabled unless this return probe is installed.
+ * @quiesce_exempt:    keep this lifecycle hook redirecting while ordinary
+ *            hooks are quiesced; its replacement must block new module-owned
+ *            acquisitions and preserve required release callbacks.
  *
  * rmmod safety
  * ------------
@@ -168,6 +172,8 @@ struct shadow_hook {
 	bool			installed;
 	struct kretprobe	retprobe;
 	bool			retprobe_installed;
+	/* Keep lifecycle hooks redirecting while ordinary hooks are quiesced. */
+	bool			quiesce_exempt;
 };
 
 /*
@@ -203,12 +209,10 @@ struct shadow_hook {
  *                              skipping (-ENOENT) ones whose symbol is absent;
  *                              returns the count installed, or negative errno.
  * shadow_hook_remove_all()   - remove a NULL-terminated array of hooks.
- * shadow_hook_quiesce()      - set/clear the module-wide "stop redirecting
- *                              new calls" flag checked by every hook's
- *                              redirect point. Used by the sysfs safe-unload
- *                              orchestration (lkm4ctr_safe_unload.c) to stop
- *                              new in-flight calls from starting while it
- *                              waits for module_refcount() to drain to zero.
+ * shadow_hook_quiesce()      - set/clear the synchronized module-wide gate.
+ *                              Ordinary hooks stop redirecting; hooks marked
+ *                              quiesce_exempt remain active for lifecycle
+ *                              release/guard behavior.
  * shadow_hook_is_quiescing() - current state of that flag.
  */
 unsigned long shadow_hook_resolve(const char *name);
@@ -240,9 +244,9 @@ int shadow_hook_registry_set_active(const char *tag, bool enable);
  * try_module_get(hook->owner) references acquired by the redirect points
  * below have not yet been released by the matching kretprobe return
  * handler). This is a strict subset of module_refcount(THIS_MODULE): it
- * exists purely so lkm4ctr_diagfs.c's "references" introspection files can
- * explain *why* module_refcount() is non-zero (as opposed to just
- * reporting the raw number), which is what actually blocks rmmod. See
+ * supports the synchronized controlled-stop barrier and lets
+ * lkm4ctr_diagfs.c's "references" files explain *why* module_refcount() is
+ * non-zero (as opposed to just reporting the raw number), which blocks rmmod. See
  * lkm4ctr_diagfs.c's references renderer and shadow_hijack.c's
  * shadow_hook_retprobe_ret()/shadow_hook_thunk()/shadow_hook_pre_handler().
  */

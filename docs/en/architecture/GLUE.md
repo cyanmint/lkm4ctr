@@ -75,9 +75,23 @@ breakdown as one deletable file per holder. This is meant to explain *why*
 an `rmmod`/unload attempt is stuck at "try again" instead of just reporting
 that it is.
 
-`rmmod lkm4ctr` (and `/status`, below) always force-clean up
-`vendor_kernel` if it is still active on the way out, so its own state can
-never block module removal.
+An ordinary `rmmod lkm4ctr` calls `vendor_kernel` teardown only after the
+kernel's module-reference checks allow it. Every live vendored `nsproxy` owns a
+module reference, so tasks using vendored namespaces keep the module resident;
+`/v/resources` reports their count as `nsproxy_live`. The controlled-stop path
+first blocks new namespace creation and refuses while any vendored nsproxy is
+live, before quiescing task-exit hooks. NSFS inodes retaining a module-owned
+`proc_ns_operations` table hold their own module reference until
+`nsfs_evict()` has released the namespace; `/v/resources` reports this as
+`nsfs_inode_pins`. The teardown also refuses while any such pin, mqueue mount,
+filesystem context, or open queue file remains. Once those references are gone,
+it drains in-flight hooks, deferred namespace-proxy/IPC-namespace work, and
+vendored user-namespace cleanup work before destroying the shared mqueue inode
+cache. Hook quiescing is synchronized with module-reference acquisition; the
+NSFS lifecycle hooks remain active during shutdown, rejecting new module-owned
+namespace paths while still allowing eviction to release existing pins. The
+resource field `mqueue_public_fs_registered` reports whether this module won
+the public `mqueue` filesystem-name registration.
 
 ## rmmod safety
 
@@ -97,14 +111,16 @@ triggers the module to unload itself with no further operator action:
 echo off > /mnt/status
 ```
 
-This spawns a worker thread that quiesces every hook (stopping new redirected
-calls from starting), waits for any already in-flight calls to finish, then
-explicitly frees `vendor_kernel`'s resources, and finally launches a real
-userspace `rmmod lkm4ctr` on its own. If in-flight calls don't drain within 30
-seconds, the attempt is aborted, hooks resume normal operation, and the module
-stays loaded. Writing `forceunload`/`force`/`force_unload` instead runs the
-same sequence, except `vendor_kernel`'s resources are freed immediately after
-quiescing rather than waiting until the very end.
+This spawns a worker thread that first blocks new namespace creation and
+refuses the stop while any vendored `nsproxy` remains live, keeping task-exit
+hooks active so those tasks can clean up safely. Otherwise it closes the NSFS
+path-acquisition gate, quiesces ordinary hooks, waits for already in-flight
+calls, checks NSFS/mqueue busy guards, frees
+`vendor_kernel` resources, and launches a real userspace `rmmod lkm4ctr` on its
+own. If a guard fails or calls do not drain within 30 seconds, the attempt is
+aborted, hooks resume normal operation, and the module stays loaded. Writing
+`forceunload`/`force`/`force_unload` requests the same safe cleanup; it never
+overrides live references. A refused stop leaves the module loaded.
 
 Reading `./mnt/status` prints the current lifecycle state; the accepted
 commands are documented in `./mnt/readme.txt` and `./mnt/v/control`.
@@ -113,27 +129,18 @@ the same underlying log filtered to vendor_kernel's own tag) and
 `./mnt/v/resources` aggregates the live resources still tracked by
 `vendor_kernel`.
 
-## `force2`: aggressive forced unload
+## `force2`: legacy safe alias
 
-Writing `force2` to `./mnt/status` starts (or, if a graceful/force
-unload is already waiting on in-flight calls to drain, immediately escalates
-it to) a more aggressive unload path, for the rare case where even
-`forceunload` still leaves `rmmod` reporting "try again" because something
-keeps re-acquiring the module reference:
+`force2` remains accepted for compatibility and requests the same cleanup as
+`forceunload`. It does **not** modify module reference counts or invoke
+`rmmod -f`; if references remain, the unload waits and then aborts safely:
 
 ```sh
 echo force2 > /mnt/status
 ```
 
-Unlike `forceunload`, `force2` does not wait for `module_refcount()` to drain
-on its own. Instead it directly loops calling `module_put(THIS_MODULE)` until
-the refcount reaches its unloaded floor (bounded, and every iteration is
-logged to `v/log`), then runs `rmmod -f` instead of a plain `rmmod`
-(requires the target kernel to have `CONFIG_MODULE_FORCE_UNLOAD=y` for `-f` to
-actually bypass the kernel's own refcount/version checks). Every step -- which
-hooks were quiesced, the mount/in-flight/other reference breakdown at each
-poll, and the final `rmmod`/`rmmod -f` invocation -- is logged verbosely to
-`v/log` (see `v/references` or `/resources` for the same breakdown on demand).
+The `force2` command exists only so existing automation does not fail on an
+unknown command. It cannot bypass kernel lifetime protection.
 
 ## Hot reload
 

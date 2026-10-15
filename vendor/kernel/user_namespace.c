@@ -4,10 +4,9 @@
  * android14-6.1 branch). CHANGES FROM UPSTREAM:
  *   - [RENAME] All non-static global symbols prefixed with vns_ to avoid
  *     collision with the built-in kernel implementation.
- *   - [BUILD-COMPAT] namespace struct allocated via kmem_cache_alloc/_zalloc
- *     against the real kernel's private cache, resolved at init via
- *     shadow_hook_resolve(), so the real kernel's own exit path can
- *     kmem_cache_free() it safely.
+ *   - [BUILD-COMPAT] namespace structs are allocated from the module-owned
+ *     user-namespace cache. When the native USER_NS core is present, each
+ *     object pins the module through its final free work callback.
  *   - [BUILD-COMPAT] ns_alloc_inum/ns_free_inum -> vns_alloc_inum/vns_free_inum
  *     (proc_alloc_inum not exported; resolved at init via shadow_hook_resolve).
  *   - [BUILD-COMPAT] __init/__exit removed from non-module-init functions.
@@ -25,6 +24,7 @@
  */
 #include "../../glue/vendor_kernel_data_syms.h"
 #include <linux/export.h>
+#include <linux/atomic.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
@@ -45,14 +45,230 @@
 #include <linux/fs_struct.h>
 #include <linux/bsearch.h>
 #include <linux/sort.h>
+#include <linux/module.h>
+#include <linux/workqueue.h>
+#include <linux/hashtable.h>
+#include <linux/spinlock.h>
 #include "../vendor_kernel.h"
 
+#define VNS_USER_NS_HASH_BITS 8
+
+struct vns_user_ns_entry {
+	struct user_namespace *ns;
+	struct hlist_node node;
+};
+
+struct vns_user_cred_ref {
+	const struct cred *cred;
+	struct user_namespace *ns;
+	struct hlist_node node;
+};
+
 static DEFINE_MUTEX(userns_state_mutex);
+static DEFINE_MUTEX(vns_user_ns_lifecycle_lock);
+static DEFINE_HASHTABLE(vns_user_ns_set, VNS_USER_NS_HASH_BITS);
+static DEFINE_SPINLOCK(vns_user_ns_set_lock);
+static DEFINE_HASHTABLE(vns_user_cred_refs, VNS_USER_NS_HASH_BITS);
+static DEFINE_SPINLOCK(vns_user_cred_refs_lock);
+static struct workqueue_struct *vns_user_ns_wq;
+static atomic_t vns_user_ns_pending_work = ATOMIC_INIT(0);
+static atomic_t vns_user_ns_live = ATOMIC_INIT(0);
+static atomic_t vns_user_ns_creating = ATOMIC_INIT(0);
+static bool vns_user_ns_stopping;
 
 static bool new_idmap_permitted(const struct file *file,
 				struct user_namespace *ns, int cap_setid,
 				struct uid_gid_map *map);
-static void free_user_ns(struct work_struct *work);
+static unsigned int free_user_ns(struct work_struct *work);
+static void vns_free_user_ns_work(struct work_struct *work);
+
+static int vns_user_ns_track(struct user_namespace *ns)
+{
+	struct vns_user_ns_entry *entry, *iter;
+	unsigned long flags;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	entry->ns = ns;
+	spin_lock_irqsave(&vns_user_ns_set_lock, flags);
+	hash_for_each_possible(vns_user_ns_set, iter, node, (unsigned long)ns) {
+		if (iter->ns == ns) {
+			spin_unlock_irqrestore(&vns_user_ns_set_lock, flags);
+			kfree(entry);
+			return -EEXIST;
+		}
+	}
+	hash_add(vns_user_ns_set, &entry->node, (unsigned long)ns);
+	spin_unlock_irqrestore(&vns_user_ns_set_lock, flags);
+	return 0;
+}
+
+static bool vns_user_ns_untrack(struct user_namespace *ns)
+{
+	struct vns_user_ns_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	spin_lock_irqsave(&vns_user_ns_set_lock, flags);
+	hash_for_each_possible(vns_user_ns_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			hash_del(&entry->node);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_user_ns_set_lock, flags);
+	if (found)
+		kfree(entry);
+	return found;
+}
+
+bool vns_user_ns_is_vendored(const struct user_namespace *ns)
+{
+	struct vns_user_ns_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	if (!ns)
+		return false;
+	spin_lock_irqsave(&vns_user_ns_set_lock, flags);
+	hash_for_each_possible(vns_user_ns_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_user_ns_set_lock, flags);
+	return found;
+}
+
+static int vns_user_ns_cred_replace(struct cred *cred,
+				    struct user_namespace *new_ns,
+				    bool take_new_ref, bool drop_old_ref)
+{
+	struct vns_user_cred_ref *entry = NULL, *old = NULL, *iter;
+	struct user_namespace *old_ns = NULL;
+	unsigned long flags;
+	bool track_new = !vns_native_userns_core_is_available() &&
+			 vns_user_ns_is_vendored(new_ns);
+
+	if (track_new) {
+		entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+		if (!entry) {
+			if (take_new_ref)
+				vns_user_get_ref(new_ns);
+			return -ENOMEM;
+		}
+		entry->cred = cred;
+		entry->ns = new_ns;
+	}
+	spin_lock_irqsave(&vns_user_cred_refs_lock, flags);
+	hash_for_each_possible(vns_user_cred_refs, iter, node,
+			       (unsigned long)cred) {
+		if (iter->cred == cred) {
+			old = iter;
+			old_ns = iter->ns;
+			hash_del(&iter->node);
+			break;
+		}
+	}
+	if (entry) {
+		if (take_new_ref)
+			vns_user_get_ref(new_ns);
+		hash_add(vns_user_cred_refs, &entry->node,
+			 (unsigned long)cred);
+		entry = NULL;
+	}
+	spin_unlock_irqrestore(&vns_user_cred_refs_lock, flags);
+	kfree(entry);
+	kfree(old);
+	if (drop_old_ref && old_ns)
+		vns_put_user_ns(old_ns);
+	return 0;
+}
+
+int vns_user_ns_cred_get(const struct cred *cred)
+{
+	struct vns_user_cred_ref *entry;
+	unsigned long flags;
+	struct user_namespace *ns = cred ? cred->user_ns : NULL;
+
+	if (vns_native_userns_core_is_available() ||
+	    !vns_user_ns_is_vendored(ns))
+		return 0;
+	spin_lock_irqsave(&vns_user_cred_refs_lock, flags);
+	hash_for_each_possible(vns_user_cred_refs, entry, node,
+			       (unsigned long)cred) {
+		if (entry->cred == cred) {
+			bool same_ns = entry->ns == ns;
+
+			spin_unlock_irqrestore(&vns_user_cred_refs_lock, flags);
+			return same_ns ? 0 : -EUCLEAN;
+		}
+	}
+	spin_unlock_irqrestore(&vns_user_cred_refs_lock, flags);
+	return vns_user_ns_cred_replace((struct cred *)cred, ns, true, false);
+}
+
+int vns_user_ns_cred_adopt(struct cred *cred, struct user_namespace *ns,
+			   bool drop_old_ref)
+{
+	return vns_user_ns_cred_replace(cred, ns, false, drop_old_ref);
+}
+
+struct user_namespace *vns_user_ns_cred_detach(const struct cred *cred)
+{
+	struct vns_user_cred_ref *entry;
+	unsigned long flags;
+	struct user_namespace *ns = NULL;
+
+	spin_lock_irqsave(&vns_user_cred_refs_lock, flags);
+	hash_for_each_possible(vns_user_cred_refs, entry, node,
+			       (unsigned long)cred) {
+		if (entry->cred == cred) {
+			hash_del(&entry->node);
+			ns = entry->ns;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_user_cred_refs_lock, flags);
+	if (ns)
+		kfree(entry);
+	return ns;
+}
+
+bool vns_user_ns_creation_begin(void)
+{
+	bool allowed;
+
+	mutex_lock(&vns_user_ns_lifecycle_lock);
+	allowed = !vns_user_ns_stopping ||
+		  (vns_semundo_clone_flags() & CLONE_NEWUSER);
+	if (allowed)
+		atomic_inc(&vns_user_ns_creating);
+	mutex_unlock(&vns_user_ns_lifecycle_lock);
+	return allowed;
+}
+
+void vns_user_ns_creation_end(void)
+{
+	atomic_dec(&vns_user_ns_creating);
+}
+
+void vns_user_ns_stop_begin(void)
+{
+	mutex_lock(&vns_user_ns_lifecycle_lock);
+	vns_user_ns_stopping = true;
+	mutex_unlock(&vns_user_ns_lifecycle_lock);
+}
+
+void vns_user_ns_stop_abort(void)
+{
+	mutex_lock(&vns_user_ns_lifecycle_lock);
+	vns_user_ns_stopping = false;
+	mutex_unlock(&vns_user_ns_lifecycle_lock);
+}
 
 static struct ucounts *inc_user_namespaces(struct user_namespace *ns, kuid_t uid)
 {
@@ -112,7 +328,11 @@ struct cred *new)
 	kuid_t owner = new->euid;
 	kgid_t group = new->egid;
 	struct ucounts *ucounts;
+	bool module_pinned = false;
 	int ret, i;
+
+	if (!vns_user_ns_creation_begin())
+		return -EBUSY;
 
 	ret = -ENOSPC;
 	if (parent_ns->level > 32)
@@ -153,6 +373,11 @@ struct cred *new)
 	ns = kmem_cache_zalloc(vns_user_ns_cachep, GFP_KERNEL) /* [BUILD-COMPAT] */;
 	if (!ns)
 		goto fail_dec;
+	if (!try_module_get(THIS_MODULE)) {
+		ret = -ENODEV;
+		goto fail_free;
+	}
+	module_pinned = true;
 
 	ns->parent_could_setfcap = cap_raised(new->cap_effective, CAP_SETFCAP);
 	ret = vns_alloc_inum(&ns->ns) /* [BUILD-COMPAT] */;
@@ -167,7 +392,7 @@ struct cred *new)
 	ns->level = parent_ns->level + 1;
 	ns->owner = owner;
 	ns->group = group;
-	INIT_WORK(&ns->work, free_user_ns);
+	INIT_WORK(&ns->work, vns_free_user_ns_work);
 	for (i = 0; i < UCOUNT_COUNTS; i++) {
 		ns->ucount_max[i] = INT_MAX;
 	}
@@ -196,9 +421,21 @@ struct cred *new)
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
 		goto fail_keyring;
+	ret = vns_user_ns_track(ns);
+	if (ret)
+		goto fail_sysctls;
+	ret = vns_user_ns_cred_adopt(new, ns, false);
+	if (ret) {
+		vns_user_ns_untrack(ns);
+		goto fail_sysctls;
+	}
 
+	atomic_inc(&vns_user_ns_live);
 	set_cred_user_ns(new, ns);
+	vns_user_ns_creation_end();
 	return 0;
+fail_sysctls:
+	retire_userns_sysctls(ns);
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
@@ -206,9 +443,12 @@ fail_keyring:
 	vns_free_inum(&ns->ns) /* [BUILD-COMPAT] */;
 fail_free:
 	kmem_cache_free(vns_user_ns_cachep, ns) /* [BUILD-COMPAT] */;
+	if (module_pinned)
+		module_put(THIS_MODULE);
 fail_dec:
 	dec_user_namespaces(ucounts);
 fail:
+	vns_user_ns_creation_end();
 	return ret;
 }
 
@@ -233,10 +473,11 @@ unsigned long unshare_flags, struct cred **new_cred)
 	return err;
 }
 
-static void free_user_ns(struct work_struct *work)
+static unsigned int free_user_ns(struct work_struct *work)
 {
 	struct user_namespace *parent, *ns =
 		container_of(work, struct user_namespace, work);
+	unsigned int freed = 0;
 
 	do {
 		struct ucounts *ucounts = ns->ucounts;
@@ -256,16 +497,65 @@ static void free_user_ns(struct work_struct *work)
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		vns_free_inum(&ns->ns) /* [BUILD-COMPAT] */;
+		if (WARN_ON_ONCE(!vns_user_ns_untrack(ns)))
+			LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+				    "freeing untracked vendored user namespace %p",
+				    ns);
+		freed++;
 		kmem_cache_free(vns_user_ns_cachep, ns) /* [BUILD-COMPAT] */;
+		atomic_dec(&vns_user_ns_live);
 		dec_user_namespaces(ucounts);
 		ns = parent;
+		if (!vns_user_ns_is_vendored(parent)) {
+			vns_put_user_ns(parent);
+			break;
+		}
 	} while (vns_user_put_ref(parent));
+	return freed;
+}
+
+static void vns_free_user_ns_work(struct work_struct *work)
+{
+	unsigned int freed = free_user_ns(work);
+
+	while (freed > 1) {
+		module_put(THIS_MODULE);
+		freed--;
+	}
+	if (freed) {
+		module_put(THIS_MODULE);
+		freed--;
+	}
+	atomic_dec(&vns_user_ns_pending_work);
+	/* The worker's own pin is released only after every object pin. */
+	module_put(THIS_MODULE);
 }
 
 void vns___put_user_ns( /* [RENAME] */
 struct user_namespace *ns)
 {
-	schedule_work(&ns->work);
+	struct workqueue_struct *wq = READ_ONCE(vns_user_ns_wq);
+
+	if (WARN_ON_ONCE(!wq)) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "user namespace final put without the vendored workqueue; leaking namespace %p",
+			    ns);
+		return;
+	}
+	if (!try_module_get(THIS_MODULE)) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "user namespace final put could not pin module; leaking namespace %p",
+			    ns);
+		return;
+	}
+	atomic_inc(&vns_user_ns_pending_work);
+	if (!queue_work(wq, &ns->work)) {
+		atomic_dec(&vns_user_ns_pending_work);
+		module_put(THIS_MODULE);
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "could not queue user namespace teardown for %p; leaking namespace",
+			    ns);
+	}
 }
 
 /*
@@ -276,21 +566,30 @@ struct user_namespace *ns)
  * pair when CONFIG_USER_NS=y, or plain no-ops (returning init_user_ns,
  * never freeing anything) when =n. Since vendor_kernel creates and
  * refcounts its own struct user_namespace objects independently of the
- * target's CONFIG_USER_NS, these shims always perform the real semantics
- * and route to vns___put_user_ns() above on the final put. See
- * vendor_kernel.h for the full rationale.
+ * target's CONFIG_USER_NS setting. Vendored objects always use this file's
+ * refcount/cache/workqueue path; native objects use native refcounting only
+ * when the matching runtime USER_NS core exists.
  */
 struct user_namespace *vns_get_user_ns(struct user_namespace *ns) /* [BUILD-COMPAT] */
 {
-	if (ns)
+	if (ns && (vns_user_ns_is_vendored(ns) ||
+		   vns_native_userns_core_is_available()))
 		vns_user_get_ref(ns);
 	return ns;
 }
 
 void vns_put_user_ns(struct user_namespace *ns) /* [BUILD-COMPAT] */
 {
-	if (ns && vns_user_put_ref(ns))
-		vns___put_user_ns(ns);
+	if (!ns)
+		return;
+	if (vns_user_ns_is_vendored(ns)) {
+		if (vns_user_put_ref(ns))
+			vns___put_user_ns(ns);
+		return;
+	}
+	if (vns_native_userns_core_is_available() &&
+	    vns_user_put_ref(ns))
+		vns_native___put_user_ns(ns);
 }
 
 /**
@@ -1408,7 +1707,9 @@ static void userns_put(struct ns_common *ns)
 static int userns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct user_namespace *user_ns = to_user_ns(ns);
+	struct user_namespace *new_user_ns;
 	struct cred *cred;
+	int err;
 
 	/* Don't allow gaining capabilities by reentering
 	 * the same user namespace.
@@ -1430,8 +1731,18 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	if (!cred)
 		return -EINVAL;
 
-	vns_put_user_ns(cred->user_ns); /* [BUILD-COMPAT] */
-	set_cred_user_ns(cred, vns_get_user_ns(user_ns)); /* [BUILD-COMPAT] */
+	new_user_ns = vns_get_user_ns(user_ns); /* [BUILD-COMPAT] */
+	if (vns_native_userns_core_is_available()) {
+		vns_put_user_ns(cred->user_ns); /* [BUILD-COMPAT] */
+		err = 0;
+	} else {
+		err = vns_user_ns_cred_adopt(cred, new_user_ns, true);
+	}
+	if (err) {
+		vns_put_user_ns(new_user_ns); /* [BUILD-COMPAT] */
+		return err;
+	}
+	set_cred_user_ns(cred, new_user_ns); /* [BUILD-COMPAT] */
 
 	if (set_cred_ucounts(cred) < 0)
 		return -EINVAL;
@@ -1473,12 +1784,82 @@ const struct proc_ns_operations vns_userns_operations = { /* [RENAME] */
 	.get_parent	= vns_ns_get_owner,
 };
 
-void vns_user_ns_init(void) /* [RENAME] */
+int vns_user_ns_init(void) /* [RENAME] */
 {
+	mutex_lock(&vns_user_ns_lifecycle_lock);
+	vns_user_ns_stopping = true;
+	mutex_unlock(&vns_user_ns_lifecycle_lock);
+
 	/* [BUILD-COMPAT] module-owned cache: see vendor/README.md's
 	 * "Slab-cache consistency with the real kernel" for why this no
 	 * longer resolves the real kernel's private user_ns_cachep. */
 	if (!vns_user_ns_cachep)
 		vns_user_ns_cachep = kmem_cache_create("vns_user_namespace",
 			sizeof(struct user_namespace), 0, SLAB_ACCOUNT, NULL);
+	if (!vns_user_ns_cachep)
+		return -ENOMEM;
+	if (!READ_ONCE(vns_user_ns_wq))
+		WRITE_ONCE(vns_user_ns_wq,
+			   alloc_ordered_workqueue("lkm4ctr_userns", WQ_MEM_RECLAIM));
+	if (!READ_ONCE(vns_user_ns_wq)) {
+		kmem_cache_destroy(vns_user_ns_cachep);
+		vns_user_ns_cachep = NULL;
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+void vns_user_ns_flush_work(void)
+{
+	struct workqueue_struct *wq = READ_ONCE(vns_user_ns_wq);
+
+	if (!wq)
+		return;
+	do {
+		flush_workqueue(wq);
+	} while (atomic_read(&vns_user_ns_pending_work) > 0);
+}
+
+int vns_user_ns_prepare_exit(void)
+{
+	return atomic_read(&vns_user_ns_creating) ||
+	       atomic_read(&vns_user_ns_live) ||
+	       atomic_read(&vns_user_ns_pending_work) ? -EBUSY : 0;
+}
+
+int vns_user_ns_live_count(void)
+{
+	return atomic_read(&vns_user_ns_live);
+}
+
+int vns_user_ns_creating_count(void)
+{
+	return atomic_read(&vns_user_ns_creating);
+}
+
+int vns_user_ns_pending_work_count(void)
+{
+	return atomic_read(&vns_user_ns_pending_work);
+}
+
+void vns_user_ns_exit(void)
+{
+	struct workqueue_struct *wq = READ_ONCE(vns_user_ns_wq);
+
+	if (!wq)
+		return;
+	vns_user_ns_flush_work();
+	WRITE_ONCE(vns_user_ns_wq, NULL);
+	destroy_workqueue(wq);
+	if (!atomic_read(&vns_user_ns_live)) {
+		struct kmem_cache *cache = READ_ONCE(vns_user_ns_cachep);
+
+		WRITE_ONCE(vns_user_ns_cachep, NULL);
+		if (cache)
+			kmem_cache_destroy(cache);
+	} else {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "retaining user namespace cache with %d live object(s)",
+			    atomic_read(&vns_user_ns_live));
+	}
 }

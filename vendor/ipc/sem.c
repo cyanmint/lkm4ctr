@@ -89,8 +89,10 @@
 #include <linux/syscalls.h>
 #include <linux/audit.h>
 #include <linux/capability.h>
+#include <linux/atomic.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
+#include <linux/module.h>
 #include <linux/rwsem.h>
 #include <linux/nsproxy.h>
 #include <linux/ipc_namespace.h>
@@ -116,7 +118,7 @@
 #define __do_semtimedop vns___do_semtimedop
 #define ksys_semtimedop vns_ksys_semtimedop
 #define compat_ksys_semtimedop vns_compat_ksys_semtimedop
-#define copy_semundo vns_copy_semundo
+
 #define sem_init vns_sem_init
 #define free_ipcs vns_free_ipcs
 #include "util.h"
@@ -195,7 +197,25 @@ struct sem_undo_list {
 	struct list_head	list_proc;
 };
 
-#if !defined(CONFIG_SYSVIPC)
+static atomic_t vns_sem_undo_live = ATOMIC_INIT(0);
+static atomic_t vns_sem_exit_work_pending = ATOMIC_INIT(0);
+
+int vns_sem_prepare_exit(void)
+{
+	return atomic_read(&vns_sem_undo_live) ||
+	       atomic_read(&vns_sem_exit_work_pending) ? -EBUSY : 0;
+}
+
+int vns_sem_undo_live_count(void)
+{
+	return atomic_read(&vns_sem_undo_live);
+}
+
+int vns_sem_exit_work_pending_count(void)
+{
+	return atomic_read(&vns_sem_exit_work_pending);
+}
+
 #define VNS_SYSV_TASK_HASH_BITS 8
 
 struct vns_sysvsem_state {
@@ -207,8 +227,19 @@ struct vns_sysvsem_state {
 	struct work_struct	exit_work;
 };
 
+struct vns_sysvsem_clone_context {
+	struct task_struct	*parent;
+	struct sem_undo_list	*undo_list;
+	struct vns_sysvsem_state *child_state;
+	unsigned long		clone_flags;
+	unsigned long		vns_flags;
+	struct hlist_node	node;
+};
+
 static DEFINE_HASHTABLE(vns_sysvsem_state_hash, VNS_SYSV_TASK_HASH_BITS);
 static DEFINE_SPINLOCK(vns_sysvsem_state_lock);
+static DEFINE_HASHTABLE(vns_sysvsem_clone_hash, VNS_SYSV_TASK_HASH_BITS);
+static DEFINE_SPINLOCK(vns_sysvsem_clone_lock);
 
 static void vns_sysvsem_exit_work(struct work_struct *work);
 
@@ -303,9 +334,6 @@ static struct vns_sysvsem_state *vns_task_undo_state_detach(struct task_struct *
 	spin_unlock_irqrestore(&vns_sysvsem_state_lock, flags);
 	return state;
 }
-#endif
-
-
 #define sem_ids(ns)	((ns)->ids[IPC_SEM_IDS])
 
 static int newary(struct ipc_namespace *, struct ipc_params *);
@@ -1981,30 +2009,180 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
 {
 	struct sem_undo_list *undo_list;
 
-#if defined(CONFIG_SYSVIPC)
-	undo_list = current->sysvsem.undo_list;
-#else
 	undo_list = vns_task_undo_list(current);
-#endif
 	if (!undo_list) {
 		undo_list = kzalloc(sizeof(*undo_list), GFP_KERNEL_ACCOUNT);
 		if (undo_list == NULL)
 			return -ENOMEM;
+		if (!try_module_get(THIS_MODULE)) {
+			kfree(undo_list);
+			return -ENODEV;
+		}
+		atomic_inc(&vns_sem_undo_live);
 		spin_lock_init(&undo_list->lock);
 		refcount_set(&undo_list->refcnt, 1);
 		INIT_LIST_HEAD(&undo_list->list_proc);
 
-#if defined(CONFIG_SYSVIPC)
-		current->sysvsem.undo_list = undo_list;
-#else
 		if (vns_task_undo_list_set(current, undo_list, GFP_KERNEL_ACCOUNT)) {
+			atomic_dec(&vns_sem_undo_live);
 			kfree(undo_list);
+			module_put(THIS_MODULE);
 			return -ENOMEM;
 		}
-#endif
 	}
 	*undo_listp = undo_list;
 	return 0;
+}
+
+static struct vns_sysvsem_clone_context *
+vns_sysvsem_clone_context_detach(struct task_struct *parent)
+{
+	struct vns_sysvsem_clone_context *ctx;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_sysvsem_clone_lock, flags);
+	hash_for_each_possible(vns_sysvsem_clone_hash, ctx, node,
+			       (unsigned long)parent) {
+		if (ctx->parent == parent) {
+			hash_del(&ctx->node);
+			spin_unlock_irqrestore(&vns_sysvsem_clone_lock, flags);
+			return ctx;
+		}
+	}
+	spin_unlock_irqrestore(&vns_sysvsem_clone_lock, flags);
+	return NULL;
+}
+
+int vns_semundo_clone_begin(unsigned long clone_flags)
+{
+	struct vns_sysvsem_clone_context *ctx, *entry;
+	unsigned long flags;
+	int err;
+	bool share_semundo = clone_flags & CLONE_SYSVSEM;
+	unsigned long vns_flags = clone_flags & VNS_CLONE_FLAGS;
+
+	if (!share_semundo && !vns_flags)
+		return 0;
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	ctx->clone_flags = clone_flags;
+	ctx->vns_flags = vns_flags;
+	if (share_semundo) {
+		ctx->child_state = kzalloc(sizeof(*ctx->child_state), GFP_KERNEL);
+		if (!ctx->child_state) {
+			kfree(ctx);
+			return -ENOMEM;
+		}
+		INIT_WORK(&ctx->child_state->exit_work, vns_sysvsem_exit_work);
+		err = get_undo_list(&ctx->undo_list);
+		if (err) {
+			kfree(ctx->child_state);
+			kfree(ctx);
+			return err;
+		}
+		refcount_inc(&ctx->undo_list->refcnt);
+	}
+	ctx->parent = current;
+
+	spin_lock_irqsave(&vns_sysvsem_clone_lock, flags);
+	hash_for_each_possible(vns_sysvsem_clone_hash, entry, node,
+			       (unsigned long)current) {
+		if (entry->parent == current) {
+			spin_unlock_irqrestore(&vns_sysvsem_clone_lock, flags);
+			if (ctx->undo_list)
+				refcount_dec(&ctx->undo_list->refcnt);
+			kfree(ctx->child_state);
+			kfree(ctx);
+			return -EBUSY;
+		}
+	}
+	hash_add(vns_sysvsem_clone_hash, &ctx->node, (unsigned long)current);
+	spin_unlock_irqrestore(&vns_sysvsem_clone_lock, flags);
+	return 0;
+}
+
+unsigned long vns_semundo_clone_flags(void)
+{
+	struct vns_sysvsem_clone_context *ctx;
+	unsigned long flags;
+	unsigned long clone_flags = 0;
+
+	spin_lock_irqsave(&vns_sysvsem_clone_lock, flags);
+	hash_for_each_possible(vns_sysvsem_clone_hash, ctx, node,
+			       (unsigned long)current) {
+		if (ctx->parent == current) {
+			clone_flags = ctx->clone_flags;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_sysvsem_clone_lock, flags);
+	return clone_flags;
+}
+
+bool vns_semundo_clone_namespace_admitted(void)
+{
+	return (vns_semundo_clone_flags() & VNS_CLONE_FLAGS) != 0;
+}
+
+void vns_semundo_clone_abort(void)
+{
+	struct vns_sysvsem_clone_context *ctx;
+
+	ctx = vns_sysvsem_clone_context_detach(current);
+	if (!ctx)
+		return;
+	if (!ctx->undo_list) {
+		kfree(ctx->child_state);
+		kfree(ctx);
+		return;
+	}
+	if (WARN_ON_ONCE(refcount_read(&ctx->undo_list->refcnt) <= 1)) {
+		/* Preserve the list/module pin rather than risk freeing a live list. */
+		kfree(ctx->child_state);
+		kfree(ctx);
+		return;
+	}
+	refcount_dec(&ctx->undo_list->refcnt);
+	kfree(ctx->child_state);
+	kfree(ctx);
+}
+
+unsigned long vns_semundo_clone_wake(struct task_struct *child)
+{
+	struct vns_sysvsem_clone_context *ctx;
+	struct vns_sysvsem_state *state;
+	unsigned long flags;
+	unsigned long vns_flags;
+
+	ctx = vns_sysvsem_clone_context_detach(current);
+	if (!ctx)
+		return 0;
+	vns_flags = ctx->vns_flags;
+	state = ctx->child_state;
+	if (!state) {
+		kfree(ctx);
+		return vns_flags;
+	}
+	state->task = child;
+	state->undo_list = ctx->undo_list;
+	get_task_struct(child);
+
+	spin_lock_irqsave(&vns_sysvsem_state_lock, flags);
+	if (vns_sysvsem_state_lookup_locked(child)) {
+		spin_unlock_irqrestore(&vns_sysvsem_state_lock, flags);
+		put_task_struct(child);
+		kfree(state);
+		kfree(ctx);
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "refusing to replace existing SEM_UNDO state for child %p; retaining its shared-list reference",
+			    child);
+		return vns_flags;
+	}
+	hash_add(vns_sysvsem_state_hash, &state->node, (unsigned long)child);
+	spin_unlock_irqrestore(&vns_sysvsem_state_lock, flags);
+	kfree(ctx);
+	return vns_flags;
 }
 
 static struct sem_undo *__lookup_undo(struct sem_undo_list *ulp, int semid)
@@ -2429,40 +2607,6 @@ long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
 
 #endif
 
-/* If CLONE_SYSVSEM is set, establish sharing of SEM_UNDO state between
- * parent and child tasks.
- */
-
-int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
-{
-	struct sem_undo_list *undo_list;
-	int error;
-
-	if (clone_flags & CLONE_SYSVSEM) {
-		error = get_undo_list(&undo_list);
-		if (error)
-			return error;
-		refcount_inc(&undo_list->refcnt);
-#if defined(CONFIG_SYSVIPC)
-		tsk->sysvsem.undo_list = undo_list;
-#else
-		error = vns_task_undo_list_set(tsk, undo_list, GFP_KERNEL);
-		if (error) {
-			if (refcount_dec_and_test(&undo_list->refcnt))
-				kfree(undo_list);
-			return error;
-		}
-#endif
-	} else
-#if defined(CONFIG_SYSVIPC)
-		tsk->sysvsem.undo_list = NULL;
-#else
-		vns_task_undo_list_set(tsk, NULL, GFP_KERNEL);
-#endif
-
-	return 0;
-}
-
 /*
  * add semadj values to semaphores, free undo structures.
  * undo structures are not freed when semaphore arrays are destroyed
@@ -2475,12 +2619,12 @@ int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
  * The current implementation does not do so. The POSIX standard
  * and SVID should be consulted to determine what behavior is mandated.
  */
-static void vns_exit_sem_undo_list(struct ipc_namespace *ns,
+static bool vns_exit_sem_undo_list(struct ipc_namespace *ns,
 				   struct sem_undo_list *ulp,
 				   struct pid *pid)
 {
 	if (!refcount_dec_and_test(&ulp->refcnt))
-		return;
+		return false;
 
 	for (;;) {
 		struct sem_array *sma;
@@ -2581,6 +2725,7 @@ static void vns_exit_sem_undo_list(struct ipc_namespace *ns,
 		kvfree_rcu(un, rcu);
 	}
 	kfree(ulp);
+	return true;
 }
 
 void exit_sem(struct task_struct *tsk)
@@ -2588,38 +2733,43 @@ void exit_sem(struct task_struct *tsk)
 	struct sem_undo_list *ulp;
 	struct ipc_namespace *ns;
 	struct pid *pid;
+	bool module_pinned;
 
-#if defined(CONFIG_SYSVIPC)
-	ulp = tsk->sysvsem.undo_list;
-	if (!ulp)
-		return;
-	tsk->sysvsem.undo_list = NULL;
-#else
 	ulp = vns_task_undo_list(tsk);
 	if (!ulp)
 		return;
 	vns_task_undo_list_set(tsk, NULL, GFP_KERNEL);
-#endif
 	ns = vns_get_ipc_ns(vns_task_ipc_ns(tsk));
 	pid = get_pid(task_tgid(tsk));
-	vns_exit_sem_undo_list(ns, ulp, pid);
+	module_pinned = vns_exit_sem_undo_list(ns, ulp, pid);
 	put_pid(pid);
 	vns_put_ipc_ns(ns);
+	if (module_pinned) {
+		atomic_dec(&vns_sem_undo_live);
+		module_put(THIS_MODULE);
+	}
 }
 
-#if !defined(CONFIG_SYSVIPC)
 static void vns_sysvsem_exit_work(struct work_struct *work)
 {
 	struct vns_sysvsem_state *state =
 		container_of(work, struct vns_sysvsem_state, exit_work);
+	bool module_pinned;
 
-	if (state->undo_list)
+	module_pinned = state->undo_list &&
 		vns_exit_sem_undo_list(state->exit_ns, state->undo_list,
 				       state->exit_pid);
 	put_pid(state->exit_pid);
 	vns_put_ipc_ns(state->exit_ns);
 	put_task_struct(state->task);
 	kfree(state);
+	atomic_dec(&vns_sem_exit_work_pending);
+	if (module_pinned) {
+		atomic_dec(&vns_sem_undo_live);
+		module_put(THIS_MODULE);
+	}
+	/* Keep this worker's text pinned even if it released the last undo list. */
+	module_put(THIS_MODULE);
 }
 
 void vns_prepare_exit_sem(struct task_struct *tsk)
@@ -2635,13 +2785,19 @@ void vns_prepare_exit_sem(struct task_struct *tsk)
 	}
 	state->exit_ns = vns_get_ipc_ns(vns_task_ipc_ns(tsk));
 	state->exit_pid = get_pid(task_tgid(tsk));
-	schedule_work(&state->exit_work);
+	if (WARN_ON_ONCE(!try_module_get(THIS_MODULE))) {
+		put_pid(state->exit_pid);
+		state->exit_pid = NULL;
+		vns_put_ipc_ns(state->exit_ns);
+		state->exit_ns = NULL;
+		return;
+	}
+	atomic_inc(&vns_sem_exit_work_pending);
+	if (!schedule_work(&state->exit_work)) {
+		atomic_dec(&vns_sem_exit_work_pending);
+		module_put(THIS_MODULE);
+	}
 }
-#else
-void vns_prepare_exit_sem(struct task_struct *tsk)
-{
-}
-#endif
 
 #ifdef CONFIG_PROC_FS
 static int sysvipc_sem_proc_show(struct seq_file *s, void *it)

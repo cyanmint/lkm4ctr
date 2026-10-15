@@ -29,9 +29,23 @@
 #include <linux/user_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/sched/task.h>
+#include <linux/hashtable.h>
+#include <linux/module.h>
 
 #include "util.h"
 #include "../vendor_kernel.h"
+
+#define VNS_IPC_NS_HASH_BITS 8
+
+struct vns_ipc_ns_entry {
+	struct ipc_namespace *ns;
+	struct hlist_node node;
+};
+
+static DEFINE_HASHTABLE(vns_ipc_ns_set, VNS_IPC_NS_HASH_BITS);
+static DEFINE_SPINLOCK(vns_ipc_ns_set_lock);
+static atomic_t vns_ipc_ns_live = ATOMIC_INIT(0);
+static atomic_t vns_ipc_free_work_pending = ATOMIC_INIT(0);
 
 static struct ucounts *inc_ipc_namespaces(struct user_namespace *ns)
 {
@@ -43,11 +57,89 @@ static void dec_ipc_namespaces(struct ucounts *ucounts)
 	dec_ucount(ucounts, UCOUNT_IPC_NAMESPACES);
 }
 
+static int vns_ipc_ns_track(struct ipc_namespace *ns,
+			    struct vns_ipc_ns_entry *entry)
+{
+	struct vns_ipc_ns_entry *iter;
+	unsigned long flags;
+
+	if (ns == &vns_default_ipc_ns)
+		return 0;
+	entry->ns = ns;
+	spin_lock_irqsave(&vns_ipc_ns_set_lock, flags);
+	hash_for_each_possible(vns_ipc_ns_set, iter, node, (unsigned long)ns) {
+		if (iter->ns == ns) {
+			spin_unlock_irqrestore(&vns_ipc_ns_set_lock, flags);
+			return -EEXIST;
+		}
+	}
+	hash_add(vns_ipc_ns_set, &entry->node, (unsigned long)ns);
+	atomic_inc(&vns_ipc_ns_live);
+	spin_unlock_irqrestore(&vns_ipc_ns_set_lock, flags);
+	return 0;
+}
+
+static bool vns_ipc_ns_untrack(struct ipc_namespace *ns)
+{
+	struct vns_ipc_ns_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	if (ns == &vns_default_ipc_ns)
+		return false;
+	spin_lock_irqsave(&vns_ipc_ns_set_lock, flags);
+	hash_for_each_possible(vns_ipc_ns_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			hash_del(&entry->node);
+			atomic_dec(&vns_ipc_ns_live);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_ipc_ns_set_lock, flags);
+	if (found)
+		kfree(entry);
+	return found;
+}
+
+bool vns_ipc_ns_is_vendored(struct ipc_namespace *ns)
+{
+	struct vns_ipc_ns_entry *entry;
+	unsigned long flags;
+	bool found = false;
+
+	if (!ns)
+		return false;
+	if (ns == &vns_default_ipc_ns)
+		return true;
+	spin_lock_irqsave(&vns_ipc_ns_set_lock, flags);
+	hash_for_each_possible(vns_ipc_ns_set, entry, node, (unsigned long)ns) {
+		if (entry->ns == ns) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_ipc_ns_set_lock, flags);
+	return found;
+}
+
+int vns_ipc_ns_live_count(void)
+{
+	return atomic_read(&vns_ipc_ns_live);
+}
+
+int vns_ipc_ns_free_work_pending_count(void)
+{
+	return atomic_read(&vns_ipc_free_work_pending);
+}
+
 static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 					   struct ipc_namespace *old_ns)
 {
 	struct ipc_namespace *ns;
+	struct vns_ipc_ns_entry *entry;
 	struct ucounts *ucounts;
+	bool module_pinned = false;
 	int err;
 
 	err = -ENOSPC;
@@ -59,6 +151,15 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 	ns = kzalloc(sizeof(struct ipc_namespace), GFP_KERNEL_ACCOUNT);
 	if (ns == NULL)
 		goto fail_dec;
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		goto fail_free;
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(entry);
+		err = -ENODEV;
+		goto fail_free;
+	}
+	module_pinned = true;
 
 	/* [BUILD-COMPAT] proc_alloc_inum is resolved lazily in vendor_kernel. */
 	err = vns_alloc_inum(&ns->ns);
@@ -89,8 +190,28 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 
 	sem_init_ns(ns);
 	shm_init_ns(ns);
+	err = vns_ipc_ns_track(ns, entry);
+	if (err)
+		goto fail_complete;
+	module_pinned = false;
 
 	return ns;
+
+fail_complete:
+	mq_put_mnt(ns);
+	sem_exit_ns(ns);
+	msg_exit_ns(ns);
+	shm_exit_ns(ns);
+	retire_mq_sysctls(ns);
+	retire_ipc_sysctls(ns);
+	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
+	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
+fail_free:
+	kfree(entry);
+	kfree(ns);
+	if (module_pinned)
+		module_put(THIS_MODULE);
+	goto fail_dec;
 
 fail_ipc:
 	retire_ipc_sysctls(ns);
@@ -100,8 +221,11 @@ fail_mq:
 fail_put:
 	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
-fail_free:
+fail_free_existing:
+	kfree(entry);
 	kfree(ns);
+	if (module_pinned)
+		module_put(THIS_MODULE);
 fail_dec:
 	dec_ipc_namespaces(ucounts);
 fail:
@@ -138,7 +262,7 @@ unsigned long flags,
 	 * syscall lookups, so every nsproxy built from here on always
 	 * carries a valid, non-NULL ipc_ns.
 	 */
-	if (!ns)
+	if (!vns_ipc_ns_is_vendored(ns))
 		ns = vns_ipc_active_default();
 	if (!(flags & CLONE_NEWIPC))
 		return vns_get_ipc_ns(ns);
@@ -147,8 +271,9 @@ unsigned long flags,
 
 struct ipc_namespace *vns_get_ipc_ns(struct ipc_namespace *ns)
 {
-	if (ns)
-		vns_ipc_get_ref(ns);
+	if (!vns_ipc_ns_is_vendored(ns))
+		ns = vns_ipc_active_default();
+	vns_ipc_get_ref(ns);
 	return ns;
 }
 
@@ -160,7 +285,9 @@ struct ipc_namespace *vns_get_ipc_ns(struct ipc_namespace *ns)
  */
 struct ipc_namespace *vns_get_ipc_ns_not_zero(struct ipc_namespace *ns)
 {
-	if (ns && vns_ipc_get_ref_not_zero(ns))
+	if (!vns_ipc_ns_is_vendored(ns))
+		ns = vns_ipc_active_default();
+	if (vns_ipc_get_ref_not_zero(ns))
 		return ns;
 	return NULL;
 }
@@ -198,6 +325,8 @@ void vns_free_ipcs(struct ipc_namespace *ns, struct ipc_ids *ids, /* [RENAME] */
 
 static void vns_free_ipc_ns(struct ipc_namespace *ns) /* [RENAME] */
 {
+	bool tracked;
+
 	/* mq_put_mnt() waits for a grace period as kern_unmount()
 	 * uses synchronize_rcu().
 	 */
@@ -231,7 +360,10 @@ static void vns_free_ipc_ns(struct ipc_namespace *ns) /* [RENAME] */
 	dec_ipc_namespaces(ns->ucounts);
 	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
+	tracked = vns_ipc_ns_untrack(ns);
 	kfree(ns);
+	if (tracked)
+		module_put(THIS_MODULE);
 }
 
 static LLIST_HEAD(free_ipc_list);
@@ -242,12 +374,29 @@ static void free_ipc(struct work_struct *unused)
 
 	llist_for_each_entry_safe(n, t, node, mnt_llist)
 		vns_free_ipc_ns(n);
+	atomic_dec(&vns_ipc_free_work_pending);
+	/* This reference protects the callback after each namespace pin drops. */
+	module_put(THIS_MODULE);
 }
 
 /*
  * The work queue is used to avoid the cost of synchronize_rcu in kern_unmount.
  */
 static DECLARE_WORK(free_ipc_work, free_ipc);
+
+void vns_ipc_namespace_flush_work(void)
+{
+	/* Namespace-proxy teardown can enqueue this work while it is drained. */
+	do {
+		flush_work(&free_ipc_work);
+	} while (atomic_read(&vns_ipc_free_work_pending));
+}
+
+int vns_ipc_namespace_prepare_exit(void)
+{
+	return atomic_read(&vns_ipc_ns_live) ||
+	       atomic_read(&vns_ipc_free_work_pending) ? -EBUSY : 0;
+}
 
 /*
  * put_ipc_ns - drop a reference to an ipc namespace.
@@ -267,12 +416,25 @@ static DECLARE_WORK(free_ipc_work, free_ipc);
  */
 void vns_put_ipc_ns(struct ipc_namespace *ns) /* [RENAME] */
 {
+	if (!vns_ipc_ns_is_vendored(ns))
+		return;
 	if (vns_ipc_put_ref_lock(ns, &mq_lock)) {
 		mq_clear_sbinfo(ns);
 		spin_unlock(&mq_lock);
 
-		if (llist_add(&ns->mnt_llist, &free_ipc_list))
-			schedule_work(&free_ipc_work);
+		if (llist_add(&ns->mnt_llist, &free_ipc_list)) {
+			if (!try_module_get(THIS_MODULE)) {
+				LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+					    "could not pin IPC namespace free worker; retaining namespace %p",
+					    ns);
+				return;
+			}
+			atomic_inc(&vns_ipc_free_work_pending);
+			if (!schedule_work(&free_ipc_work)) {
+				atomic_dec(&vns_ipc_free_work_pending);
+				module_put(THIS_MODULE);
+			}
+		}
 	}
 }
 

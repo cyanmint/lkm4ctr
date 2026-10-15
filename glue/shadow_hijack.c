@@ -85,6 +85,7 @@
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/atomic.h>
+#include <linux/spinlock.h>
 
 #include "shadow_hook.h"
 #include "lkm4ctr_log.h"
@@ -127,6 +128,31 @@ static DEFINE_MUTEX(shadow_hook_registry_lock);
  * shadow_hook_inflight_count() in glue/shadow_hook.h.
  */
 static atomic_t shadow_hook_inflight = ATOMIC_INIT(0);
+static DEFINE_SPINLOCK(shadow_hook_quiesce_lock);
+static bool shadow_hook_quiescing;
+
+/*
+ * Serialize the quiesce gate with acquiring the module reference and
+ * accounting an in-flight redirect. Once shadow_hook_quiesce(true) returns,
+ * every redirect that started before the gate is visible in the in-flight
+ * count, and no non-exempt redirect can start afterward.
+ */
+static bool shadow_hook_redirect_enter(struct shadow_hook *hook)
+{
+	unsigned long flags;
+	bool entered = false;
+
+	spin_lock_irqsave(&shadow_hook_quiesce_lock, flags);
+	if (shadow_hook_quiescing && !hook->quiesce_exempt)
+		goto out;
+	if (!hook->retprobe_installed || !try_module_get(hook->owner))
+		goto out;
+	atomic_inc(&shadow_hook_inflight);
+	entered = true;
+out:
+	spin_unlock_irqrestore(&shadow_hook_quiesce_lock, flags);
+	return entered;
+}
 
 int shadow_hook_inflight_count(void)
 {
@@ -498,12 +524,11 @@ static int shadow_hook_retprobe_ret(struct kretprobe_instance *ri, struct pt_reg
 }
 
 /*
- * shadow_hook_retprobe_install() - best-effort; a failure here only means
- * this particular hook loses rmmod protection (shadow_hook_thunk()/
- * shadow_hook_pre_handler() check hook->retprobe_installed before taking a
- * reference, so we never acquire a module reference we could fail to
- * release). CONFIG_KRETPROBES is implied by CONFIG_KPROBES on every arch
- * this module targets, so this is not expected to fail in practice.
+ * shadow_hook_retprobe_install() - install the return probe before enabling
+ * the forward redirect. Failure is fatal for this hook: redirects without a
+ * matching return handler could not safely release their module reference.
+ * CONFIG_KRETPROBES is implied by CONFIG_KPROBES on every arch this module
+ * targets, so this is not expected to fail in practice.
  *
  * Idempotent by design, same as shadow_hook_install(): a hook that is
  * force-unloaded and reloaded at runtime via
@@ -512,12 +537,12 @@ static int shadow_hook_retprobe_ret(struct kretprobe_instance *ri, struct pt_reg
  * blindly re-register -- doing so would double-register an already-live
  * kretprobe (and the memset() below would corrupt it mid-flight).
  */
-static void shadow_hook_retprobe_install(struct shadow_hook *hook)
+static int shadow_hook_retprobe_install(struct shadow_hook *hook)
 {
 	int err;
 
 	if (hook->retprobe_installed)
-		return;
+		return 0;
 
 	memset(&hook->retprobe, 0, sizeof(hook->retprobe));
 	hook->retprobe.kp.addr = (kprobe_opcode_t *)hook->function;
@@ -526,11 +551,12 @@ static void shadow_hook_retprobe_install(struct shadow_hook *hook)
 	err = register_kretprobe(&hook->retprobe);
 	if (err) {
 		LKM4CTR_WARN("shadow_hijack",
-			     "register_kretprobe() failed for %s: %d; rmmod will not wait for in-flight calls to this hook",
+			     "register_kretprobe() failed for %s: %d; refusing to install an unpinned hook",
 			     hook->resolved_name, err);
-		return;
+		return err;
 	}
 	hook->retprobe_installed = true;
+	return 0;
 }
 
 /*
@@ -559,21 +585,18 @@ static void shadow_hook_retprobe_remove(struct shadow_hook *hook)
  * through to genuine kernel behaviour instead of redirecting into
  * hook->function, so no *new* redirected call can start (and therefore no
  * new module reference can be acquired) while a safe-unload is in
- * progress. This is deliberately a plain bool rather than something
- * requiring hook-specific state: it is checked once per redirect attempt,
- * ahead of the (per-hook) try_module_get() call, and reset back to false if
- * a safe-unload attempt aborts (e.g. on timeout) so hooks keep working
- * normally.
+ * progress. The redirect check, module reference acquisition, and in-flight
+ * increment are serialized with updates to this flag. Lifecycle hooks may
+ * opt into continuing during quiesce when teardown must reject new object
+ * creation but still permit final release callbacks.
  */
-static bool shadow_hook_quiescing;
-
 void shadow_hook_quiesce(bool quiesce)
 {
-	/* Ordinary store: this is a best-effort, eventually-consistent
-	 * request flag, not a synchronisation primitive in its own right --
-	 * module_refcount() is what safe-unload actually waits on.
-	 */
+	unsigned long flags;
+
+	spin_lock_irqsave(&shadow_hook_quiesce_lock, flags);
 	WRITE_ONCE(shadow_hook_quiescing, quiesce);
+	spin_unlock_irqrestore(&shadow_hook_quiesce_lock, flags);
 }
 EXPORT_SYMBOL_GPL(shadow_hook_quiesce);
 
@@ -659,11 +682,9 @@ static bool shadow_hook_ftrace_api_ready(void)
  * is the owning lkm4ctr.ko module performing the pass-through call. See
  * the file header for why.
  *
- * try_module_get(hook->owner) immediately before redirecting acquires the
- * module reference that hook->retprobe's return handler releases once
- * hook->function actually finishes -- see the "rmmod safety" note on
- * struct shadow_hook. If it fails (module already on its way out, or this
- * particular hook's retprobe never installed), fall through to genuine
+ * shadow_hook_redirect_enter() serializes the quiesce check, try_module_get(),
+ * and in-flight accounting. A successful redirect holds the module reference
+ * until the return probe runs; if entry is rejected, fall through to genuine
  * kernel behaviour instead of redirecting.
  */
 #ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
@@ -677,13 +698,8 @@ static void notrace shadow_hook_thunk(unsigned long ip, unsigned long parent_ip,
 		return;
 	if (within_module(parent_ip, hook->owner))
 		return;
-	if (shadow_hook_is_quiescing())
+	if (!shadow_hook_redirect_enter(hook))
 		return;
-	if (hook->retprobe_installed) {
-		if (!try_module_get(hook->owner))
-			return;
-		atomic_inc(&shadow_hook_inflight);
-	}
 	shadow_hook_redirect(regs, hook->function);
 }
 #else
@@ -694,13 +710,8 @@ static void notrace shadow_hook_thunk(unsigned long ip, unsigned long parent_ip,
 
 	if (within_module(parent_ip, hook->owner))
 		return;
-	if (shadow_hook_is_quiescing())
+	if (!shadow_hook_redirect_enter(hook))
 		return;
-	if (hook->retprobe_installed) {
-		if (!try_module_get(hook->owner))
-			return;
-		atomic_inc(&shadow_hook_inflight);
-	}
 	shadow_hook_redirect(regs, hook->function);
 }
 #endif
@@ -735,6 +746,7 @@ static void notrace shadow_hook_thunk(unsigned long ip, unsigned long parent_ip,
 int __nocfi shadow_hook_install(struct shadow_hook *hook)
 {
 	const char * const *name;
+	bool new_retprobe;
 	int err;
 
 	/*
@@ -764,6 +776,10 @@ int __nocfi shadow_hook_install(struct shadow_hook *hook)
 		return -ENOENT;
 
 	*((unsigned long *)hook->original) = hook->address;
+	new_retprobe = !hook->retprobe_installed;
+	err = shadow_hook_retprobe_install(hook);
+	if (err)
+		return err;
 
 	hook->ops.func = shadow_hook_thunk;
 	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
@@ -774,6 +790,8 @@ int __nocfi shadow_hook_install(struct shadow_hook *hook)
 	if (err) {
 		pr_debug("shadow_hook: ftrace_set_filter_ip(%s) failed: %d\n",
 			 hook->resolved_name, err);
+		if (new_retprobe)
+			shadow_hook_retprobe_remove(hook);
 		return err;
 	}
 
@@ -782,11 +800,12 @@ int __nocfi shadow_hook_install(struct shadow_hook *hook)
 		pr_debug("shadow_hook: register_ftrace_function(%s) failed: %d\n",
 			 hook->resolved_name, err);
 		shadow_ftrace_set_filter_ip_fn(&hook->ops, hook->address, 1, 0);
+		if (new_retprobe)
+			shadow_hook_retprobe_remove(hook);
 		return err;
 	}
 
 	hook->installed = true;
-	shadow_hook_retprobe_install(hook);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(shadow_hook_install);
@@ -887,25 +906,16 @@ static int shadow_hook_pre_handler(struct kprobe *p, struct pt_regs *regs)
 	 * already points at hook->function) and the replaced instruction must
 	 * not be single-stepped.
 	 *
-	 * try_module_get(hook->owner) immediately before redirecting acquires
-	 * the module reference that hook->retprobe's return handler releases
-	 * once hook->function actually finishes -- see the "rmmod safety"
-	 * note on struct shadow_hook. If it fails (module already on its way
-	 * out, or this particular hook's retprobe never installed), fall
-	 * through to genuine kernel behaviour (return 0) instead of
-	 * redirecting.
+	 * shadow_hook_redirect_enter() serializes the quiesce check,
+	 * try_module_get(), and in-flight accounting. A successful redirect holds
+	 * the module reference until the return probe runs; if entry is rejected,
+	 * fall through to genuine kernel behaviour (return 0) instead of redirecting.
 	 */
 	if (within_module(shadow_hook_caller_pc(regs), hook->owner))
 		return 0;
 
-	if (shadow_hook_is_quiescing())
+	if (!shadow_hook_redirect_enter(hook))
 		return 0;
-
-	if (hook->retprobe_installed) {
-		if (!try_module_get(hook->owner))
-			return 0;
-		atomic_inc(&shadow_hook_inflight);
-	}
 
 	shadow_hook_redirect(regs, hook->function);
 	return 1;
@@ -914,6 +924,7 @@ static int shadow_hook_pre_handler(struct kprobe *p, struct pt_regs *regs)
 int shadow_hook_install(struct shadow_hook *hook)
 {
 	const char * const *name;
+	bool new_retprobe;
 	int err;
 
 	/* Idempotent by design -- see the ftrace-backend variant's comment above. */
@@ -934,6 +945,10 @@ int shadow_hook_install(struct shadow_hook *hook)
 		return -ENOENT;
 
 	*((unsigned long *)hook->original) = hook->address;
+	new_retprobe = !hook->retprobe_installed;
+	err = shadow_hook_retprobe_install(hook);
+	if (err)
+		return err;
 
 	memset(&hook->kp, 0, sizeof(hook->kp));
 	hook->kp.addr = (kprobe_opcode_t *)hook->address;
@@ -943,11 +958,12 @@ int shadow_hook_install(struct shadow_hook *hook)
 	if (err) {
 		pr_debug("shadow_hook: register_kprobe(%s) failed: %d\n",
 			 hook->resolved_name, err);
+		if (new_retprobe)
+			shadow_hook_retprobe_remove(hook);
 		return err;
 	}
 
 	hook->installed = true;
-	shadow_hook_retprobe_install(hook);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(shadow_hook_install);

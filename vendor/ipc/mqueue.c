@@ -36,6 +36,7 @@
  */
 #include <linux/capability.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/mount.h>
@@ -222,13 +223,20 @@ struct mqueue_inode_info {
 };
 
 static struct file_system_type mqueue_fs_type;
+static struct file_system_type mqueue_kern_fs_type;
 static const struct inode_operations mqueue_dir_inode_operations;
 static const struct file_operations mqueue_file_operations;
+static struct file_operations mqueue_dir_file_operations;
 static const struct super_operations mqueue_super_ops;
 static const struct fs_context_operations mqueue_fs_context_ops;
 static void remove_notification(struct mqueue_inode_info *info);
 
 static struct kmem_cache *mqueue_inode_cachep;
+static DEFINE_MUTEX(mqueue_lifecycle_lock);
+static bool mqueue_lifecycle_stopping;
+static unsigned int mqueue_active_contexts;
+static atomic_t mqueue_public_superblocks = ATOMIC_INIT(0);
+static atomic_t mqueue_open_files = ATOMIC_INIT(0);
 
 static inline struct mqueue_inode_info *MQUEUE_I(struct inode *inode)
 {
@@ -487,7 +495,7 @@ static struct inode *mqueue_get_inode(struct super_block *sb,
 		/* Some things misbehave if size == 0 on a directory */
 		inode->i_size = 2 * DIRENT_SIZE;
 		inode->i_op = &mqueue_dir_inode_operations;
-		inode->i_fop = &simple_dir_operations;
+		inode->i_fop = &mqueue_dir_file_operations;
 	}
 
 	return inode;
@@ -515,6 +523,8 @@ static int mqueue_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root)
 		return -ENOMEM;
+	if (sb->s_type == &mqueue_fs_type)
+		atomic_inc(&mqueue_public_superblocks);
 	return 0;
 }
 
@@ -539,6 +549,13 @@ static void mqueue_fs_context_free(struct fs_context *fc)
 
 	vns_put_ipc_ns(ctx->ipc_ns);
 	kfree(ctx);
+	mutex_lock(&mqueue_lifecycle_lock);
+	if (WARN_ON(!mqueue_active_contexts)) {
+		mutex_unlock(&mqueue_lifecycle_lock);
+		return;
+	}
+	mqueue_active_contexts--;
+	mutex_unlock(&mqueue_lifecycle_lock);
 }
 
 static int mqueue_init_fs_context(struct fs_context *fc)
@@ -548,6 +565,15 @@ static int mqueue_init_fs_context(struct fs_context *fc)
 	ctx = kzalloc(sizeof(struct mqueue_fs_context), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
+
+	mutex_lock(&mqueue_lifecycle_lock);
+	if (mqueue_lifecycle_stopping) {
+		mutex_unlock(&mqueue_lifecycle_lock);
+		kfree(ctx);
+		return -ESHUTDOWN;
+	}
+	mqueue_active_contexts++;
+	mutex_unlock(&mqueue_lifecycle_lock);
 
 	ctx->ipc_ns = vns_get_ipc_ns(vns_current_ipc_ns());
 	vns_put_user_ns(fc->user_ns); /* [BUILD-COMPAT] */
@@ -567,7 +593,7 @@ static struct vfsmount *mq_create_mount(struct ipc_namespace *ns)
 	struct fs_context *fc;
 	struct vfsmount *mnt;
 
-	fc = fs_context_for_mount(&mqueue_fs_type, SB_KERNMOUNT);
+	fc = fs_context_for_mount(&mqueue_kern_fs_type, SB_KERNMOUNT);
 	if (IS_ERR(fc))
 		return ERR_CAST(fc);
 
@@ -1706,12 +1732,63 @@ static const struct inode_operations mqueue_dir_inode_operations = {
 	.unlink = mqueue_unlink,
 };
 
+static int mqueue_open_file(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	(void)file;
+	atomic_inc(&mqueue_open_files);
+	return 0;
+}
+
+static int mqueue_release_file(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	(void)file;
+	atomic_dec(&mqueue_open_files);
+	return 0;
+}
+
+static int mqueue_dir_open_file(struct inode *inode, struct file *file)
+{
+	int ret = 0;
+
+	if (simple_dir_operations.open)
+		ret = simple_dir_operations.open(inode, file);
+	if (!ret)
+		atomic_inc(&mqueue_open_files);
+	return ret;
+}
+
+static int mqueue_dir_release_file(struct inode *inode, struct file *file)
+{
+	int ret = 0;
+
+	if (simple_dir_operations.release)
+		ret = simple_dir_operations.release(inode, file);
+	atomic_dec(&mqueue_open_files);
+	return ret;
+}
+
 static const struct file_operations mqueue_file_operations = {
+	/* Open queue files must keep their module callbacks resident. */
+	.owner = THIS_MODULE,
+	.open = mqueue_open_file,
+	.release = mqueue_release_file,
 	.flush = mqueue_flush_file,
 	.poll = mqueue_poll_file,
 	.read = mqueue_read_file,
 	.llseek = default_llseek,
 };
+
+static void mqueue_kill_sb(struct super_block *sb)
+{
+	bool public_superblock = sb->s_type == &mqueue_fs_type && sb->s_root;
+
+	kill_litter_super(sb);
+	/* Keep teardown busy until inode eviction and RCU callback scheduling finish. */
+	if (public_superblock)
+		atomic_dec(&mqueue_public_superblocks);
+}
 
 static const struct super_operations mqueue_super_ops = {
 	.alloc_inode = mqueue_alloc_inode,
@@ -1725,25 +1802,55 @@ static const struct fs_context_operations mqueue_fs_context_ops = {
 	.get_tree	= mqueue_get_tree,
 };
 
-static struct file_system_type mqueue_fs_type = {
-	.name			= "mqueue",
+/*
+ * Keep the internal per-ipc-namespace mount ownerless: it is created by this
+ * module itself and is explicitly torn down during module exit. User-visible
+ * mounts use mqueue_fs_type below, whose owner pins this module while any
+ * userspace mqueue superblock is alive.
+ */
+static struct file_system_type mqueue_kern_fs_type = {
+	.name			= "mqueue_kern",
 	.init_fs_context	= mqueue_init_fs_context,
 	.kill_sb		= kill_litter_super,
 	.fs_flags		= FS_USERNS_MOUNT,
 };
 
-/*
- * Whether register_filesystem(&mqueue_fs_type) below actually linked this
- * struct into the kernel's global file_systems list. mq_create_mount()
- * itself never depends on this: it calls fs_context_for_mount(&mqueue_fs_type,
- * SB_KERNMOUNT) with the local struct pointer directly, bypassing the
- * name-based file_systems lookup entirely, so vendor_kernel's own internal
- * ipc_namespace bookkeeping (mq_init_ns()) always works regardless of this
- * flag. It only gates whether unregister_filesystem() is safe/meaningful to
- * call later (see vns_mqueue_fs_exit()) and lets init_mqueue_fs() tell a
- * genuine registration failure apart from an expected name collision.
- */
+/* User-visible mounts pin THIS_MODULE until their superblocks are gone. */
+static struct file_system_type mqueue_fs_type = {
+	.name			= "mqueue",
+	.owner			= THIS_MODULE,
+	.init_fs_context	= mqueue_init_fs_context,
+	.kill_sb		= mqueue_kill_sb,
+	.fs_flags		= FS_USERNS_MOUNT,
+};
+
+/* The public mqueue registration can collide with a real kernel mqueue type. */
 static bool mqueue_fs_type_registered;
+
+int vns_mqueue_public_fs_registered(void)
+{
+	return READ_ONCE(mqueue_fs_type_registered);
+}
+
+int vns_mqueue_fs_prepare_exit(void)
+{
+	int ret = 0;
+
+	mutex_lock(&mqueue_lifecycle_lock);
+	if (mqueue_lifecycle_stopping) {
+		ret = -EBUSY;
+	} else {
+		mqueue_lifecycle_stopping = true;
+		if (mqueue_active_contexts ||
+		    atomic_read(&mqueue_public_superblocks) ||
+		    atomic_read(&mqueue_open_files)) {
+			mqueue_lifecycle_stopping = false;
+			ret = -EBUSY;
+		}
+	}
+	mutex_unlock(&mqueue_lifecycle_lock);
+	return ret;
+}
 
 int mq_init_ns(struct ipc_namespace *ns)
 {
@@ -1779,11 +1886,28 @@ static int init_mqueue_fs(void)
 {
 	int error;
 
+	mutex_lock(&mqueue_lifecycle_lock);
+	if (WARN_ON(mqueue_active_contexts)) {
+		mutex_unlock(&mqueue_lifecycle_lock);
+		return -EBUSY;
+	}
+	mqueue_lifecycle_stopping = false;
+	mutex_unlock(&mqueue_lifecycle_lock);
+
+	mqueue_dir_file_operations = simple_dir_operations;
+	mqueue_dir_file_operations.owner = THIS_MODULE;
+	mqueue_dir_file_operations.open = mqueue_dir_open_file;
+	mqueue_dir_file_operations.release = mqueue_dir_release_file;
+
 	mqueue_inode_cachep = kmem_cache_create("mqueue_inode_cache",
 				sizeof(struct mqueue_inode_info), 0,
 				SLAB_HWCACHE_ALIGN|SLAB_ACCOUNT, init_once);
-	if (mqueue_inode_cachep == NULL)
+	if (mqueue_inode_cachep == NULL) {
+		mutex_lock(&mqueue_lifecycle_lock);
+		mqueue_lifecycle_stopping = true;
+		mutex_unlock(&mqueue_lifecycle_lock);
 		return -ENOMEM;
+	}
 
 	if (!setup_mq_sysctls(&init_ipc_ns)) {
 		LKM4CTR_WARN("vendor_kernel", "mqueue sysctl registration failed");
@@ -1829,7 +1953,11 @@ out_filesystem:
 out_sysctl:
 	retire_mq_sysctls(&init_ipc_ns);
 out_kmem:
+	mutex_lock(&mqueue_lifecycle_lock);
+	mqueue_lifecycle_stopping = true;
+	mutex_unlock(&mqueue_lifecycle_lock);
 	kmem_cache_destroy(mqueue_inode_cachep);
+	mqueue_inode_cachep = NULL;
 	return error;
 }
 
@@ -1838,8 +1966,11 @@ int vns_mqueue_fs_init(void)
 	return init_mqueue_fs();
 }
 
-void vns_mqueue_fs_exit(bool cache_teardown_unsafe)
+void vns_mqueue_fs_exit(void)
 {
+	mutex_lock(&mqueue_lifecycle_lock);
+	mqueue_lifecycle_stopping = true;
+	mutex_unlock(&mqueue_lifecycle_lock);
 	if (init_ipc_ns.mq_mnt) {
 		kern_unmount(init_ipc_ns.mq_mnt);
 		init_ipc_ns.mq_mnt = NULL;
@@ -1866,33 +1997,6 @@ void vns_mqueue_fs_exit(bool cache_teardown_unsafe)
 		 * same way.
 		 */
 		rcu_barrier();
-		if (cache_teardown_unsafe) {
-			/*
-			 * @cache_teardown_unsafe is set when the caller's own
-			 * proactive "/dev/mqueue" mount (glue/vendor_kernel_ipc_mount.c's
-			 * vns_mqueue_dev_ensure()/vns_mqueue_dev_teardown()) was
-			 * attached into the real mount namespace and could only be
-			 * *detached* (path_umount()), not synchronously torn down:
-			 * unlike this function's own kern_unmount(init_ipc_ns.mq_mnt)
-			 * above (an MNT_INTERNAL kernel-mount, freed synchronously by
-			 * mntput_no_expire()), a namespace-attached mount's final
-			 * mntput() always defers the actual superblock/inode teardown
-			 * (cleanup_mnt() -> deactivate_super()) to task_work run when
-			 * the unmounting task next returns to userspace -- which can
-			 * be well after this function returns (e.g. only once the
-			 * insmod/rmmod syscall itself returns). rcu_barrier() above
-			 * cannot wait that out, so mqueue_inode_cachep may still hold
-			 * that mount's live root inode here. Destroying the cache
-			 * anyway would hit the exact same "Objects remaining" BUG (and
-			 * a subsequent use-after-free once the deferred task_work
-			 * finally runs against the now-destroyed cache). Leaving the
-			 * cache allocated is a small, bounded, one-time leak -- far
-			 * preferable to a guaranteed kernel panic.
-			 */
-			LKM4CTR_WARN("vendor_kernel",
-				     "mqueue: leaving mqueue_inode_cache allocated: a proactively-mounted /dev/mqueue's teardown is deferred past this call and destroying the cache now would panic on its still-live inode");
-			return;
-		}
 		kmem_cache_destroy(mqueue_inode_cachep);
 		mqueue_inode_cachep = NULL;
 	}
