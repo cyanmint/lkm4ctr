@@ -16,6 +16,7 @@
 #include <asm/ptrace.h>
 
 #include "../vendor/vendor_kernel.h"
+#include "lkm4ctr_log.h"
 #include "shadow_hook.h"
 
 /*
