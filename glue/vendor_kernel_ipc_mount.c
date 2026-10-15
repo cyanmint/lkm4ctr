@@ -94,8 +94,12 @@ static bool vns_mqueue_dev_work_stopping;
  * "mqueue" name, path_mount() resolves that built-in implementation instead.
  * Falls back to tmpfs only if the mqueue mount itself fails.
  */
-static int vns_mqueue_dev_do_mount(vns_mq_path_mount_fn path_mount_fn,
-				    struct path *path)
+/*
+ * [BUILD-COMPAT] __nocfi: path_mount_fn is resolved by name at runtime, so
+ * its target is not known to the compiler's CFI check.
+ */
+static __nocfi int vns_mqueue_dev_do_mount(vns_mq_path_mount_fn path_mount_fn,
+					   struct path *path)
 {
 	int ret;
 
@@ -107,7 +111,11 @@ static int vns_mqueue_dev_do_mount(vns_mq_path_mount_fn path_mount_fn,
 	return ret;
 }
 
-static void vns_mqueue_dev_mount(void)
+/*
+ * [BUILD-COMPAT] __nocfi: all VFS function pointers below are resolved by
+ * name at runtime. Keep the workqueue callback itself CFI-instrumented.
+ */
+static __nocfi void vns_mqueue_dev_mount(void)
 {
 	vns_mq_kern_path_fn kern_path_fn;
 	vns_mq_kern_path_create_fn kern_path_create_fn;

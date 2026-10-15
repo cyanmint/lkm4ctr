@@ -209,6 +209,13 @@ ccflags-y += -I$(src)/../glue
 #     direct calls into vendor_kernel_module.o, which stays in this list;
 #     sem_exit_ns()/msg_exit_ns()/shm_exit_ns() are ordinary direct calls
 #     into their own vendored .c files).
+#   - ../glue/vendor_kernel_ipc_mount.o: defines
+#     vns_mqueue_dev_mount_workfn(), a delayed-work callback called back by
+#     the kernel's process_scheduled_works(). CI observed a live CFI failure
+#     here because the whole-object CFI removal stripped the callback's KCFI
+#     type hash. Its only unsafe resolved VFS-pointer calls are confined to
+#     vns_mqueue_dev_mount()/vns_mqueue_dev_do_mount(), marked __nocfi
+#     individually so the callback retains normal CFI instrumentation.
 #   - kernel/utsname.o,
 #     kernel/user_namespace.o,
 #     kernel/cgroup/namespace.o,
@@ -323,7 +330,6 @@ VNS_CFI_UNSAFE_OBJS := \
 	ipc/msgutil.o \
 	ipc/compat.o \
 	../glue/vendor_kernel_ipc_syscalls.o \
-	../glue/vendor_kernel_ipc_mount.o \
 	../glue/vendor_kernel_ipc_compat.o \
 	../glue/vendor_kernel_module.o \
 	../glue/vendor_kernel_syscalls.o \
