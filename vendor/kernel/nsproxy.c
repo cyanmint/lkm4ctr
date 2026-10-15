@@ -87,6 +87,7 @@ static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 static atomic_t vns_free_nsproxy_exit_hits = ATOMIC_INIT(0);
+static atomic_t vns_exit_fs_intercepts = ATOMIC_INIT(0);
 #endif
 static atomic_t vns_exit_task_namespaces_intercepts = ATOMIC_INIT(0);
 
@@ -886,9 +887,9 @@ void vns_nsproxy_cache_init(void) /* [BUILD-COMPAT] */
 }
 
 /*
- * [BUILD-COMPAT] vns_task_exit_cleanup() runs from the
- * exit_task_namespaces() replacement below, in the exiting task's normal
- * process context. vns_put_nsproxy()/vns_free_nsproxy() can reach
+ * vns_task_exit_cleanup() runs from the exit_task_namespaces() replacement
+ * below, or from the exit_fs() fallback on Linux 5.15, in the exiting task's
+ * normal process context. vns_put_nsproxy()/vns_free_nsproxy() can reach
  * put_mnt_ns() -> namespace_unlock() -> synchronize_rcu_expedited(); keep
  * that potentially long mount/RCU teardown off the task-exit path by
  * deferring it to a workqueue. Only the task_lock()-protected pointer swap
@@ -979,9 +980,10 @@ static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
 
 /*
  * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
- * Runs from the exit_task_namespaces() shadow hook for each exiting task.
- * The free_nsproxy() hook invokes only the PID-reaper cleanup above as a
- * fallback when the exit_task_namespaces() call site is not intercepted.
+ * Runs from the exit_task_namespaces() shadow hook, and from the earlier
+ * exit_fs() hook on Linux 5.15 where that callback is not reached. The
+ * free_nsproxy() hook invokes only the PID-reaper cleanup above as a final
+ * fallback when neither task-exit call site is intercepted.
  */
 void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 {
@@ -1015,6 +1017,51 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 	 */
 	vns_nsproxy_put_deferred(ns);
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+/*
+ * On the Android 13/14 5.15 stock Images, exit_task_namespaces() resolves
+ * and installs but its shadow callback is not reached by the do_exit path.
+ * exit_fs() is a distinct, returning call immediately before it in do_exit;
+ * run the normal-context cleanup here so the native exit_notify() cannot
+ * reach CONFIG_PID_NS=n's zap_pid_ns_processes() BUG with a vendored reaper.
+ */
+static void (*vns_real_exit_fs)(struct task_struct *);
+
+static const char * const vns_exit_fs_names[] = {
+	"exit_fs", NULL,
+};
+
+static void __nocfi vns_call_real_exit_fs(struct task_struct *tsk)
+{
+	vns_real_exit_fs(tsk);
+}
+
+static void vns_exit_fs_hook(struct task_struct *tsk)
+{
+	if (tsk->flags & PF_EXITING) {
+		int hit = atomic_inc_return(&vns_exit_fs_intercepts);
+
+		if (hit <= 8) {
+			struct pid_namespace *pid_ns = task_active_pid_ns(tsk);
+
+			LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+				     "[DEBUG-KMI-EXIT] exit_fs hook #%d pid=%d comm=%s tracked_nsproxy=%d child_reaper=%d",
+				     hit, task_pid_nr(tsk), tsk->comm,
+				     vns_nsproxy_set_contains(READ_ONCE(tsk->nsproxy)),
+				     pid_ns && READ_ONCE(pid_ns->child_reaper) == tsk);
+		}
+
+		vns_task_exit_cleanup(tsk);
+	}
+
+	vns_call_real_exit_fs(tsk);
+}
+
+static struct shadow_hook vns_exit_fs_shadow_hook =
+	SHADOW_HOOK(vns_exit_fs_names, vns_exit_fs_hook, &vns_real_exit_fs);
+#endif
 
 /*
  * As a final ownership boundary, route native free_nsproxy() calls for
@@ -1151,16 +1198,36 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 			    "[DEBUG-KMI-EXIT] exit_task_namespaces hook install failed: %d",
 			    ret);
 		shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
-	} else {
-		LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-			     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
+		return ret;
 	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+	ret = shadow_hook_install(&vns_exit_fs_shadow_hook);
+	if (ret) {
+		LKM4CTR_ERR(VENDOR_KERNEL_TAG,
+			    "[DEBUG-KMI-EXIT] exit_fs fallback hook install failed: %d",
+			    ret);
+		shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
+		shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
+		return ret;
+	}
+	LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+		     "[DEBUG-KMI-EXIT] free_nsproxy, exit_task_namespaces and 5.15 exit_fs hooks installed");
+#else
+	LKM4CTR_INFO(VENDOR_KERNEL_TAG,
+		     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
+#endif
 
 	return ret;
 }
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+	shadow_hook_remove(&vns_exit_fs_shadow_hook);
+#endif
 	shadow_hook_remove(&vns_exit_task_namespaces_shadow_hook);
 	shadow_hook_remove(&vns_free_nsproxy_shadow_hook);
 }

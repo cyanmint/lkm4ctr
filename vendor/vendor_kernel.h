@@ -350,8 +350,9 @@ long vns_sys_setns(int fd, int flags);
 void vns_nsproxy_cache_init(void);
 /*
  * vns_task_exit_cleanup() - called from the exit_task_namespaces() shadow
- * hook (kernel/nsproxy.c) for each exiting task, before native namespace
- * teardown and exit_notify(). It performs applicable PID/IPC cleanup. If
+ * hook (kernel/nsproxy.c), or from the Linux 5.15 exit_fs() fallback, for
+ * each exiting task before native namespace teardown and exit_notify(). It
+ * performs applicable PID/IPC cleanup. If
  * @tsk->nsproxy is one of vendor_kernel's tracked, module-owned objects
  * (vns_nsproxy_set in kernel/nsproxy.c), it swaps the task to the pinned
  * vns_init_nsproxy singleton and tears the vendored object down through
@@ -365,7 +366,7 @@ void vns_exit_hook_exit(void);
  * vns_nsproxy_deferred_flush() - waits for every nsproxy teardown deferred
  * by vns_task_exit_cleanup() (kernel/nsproxy.c) to finish. Must be called
  * from vendor_kernel_exit() strictly after vns_exit_hook_exit() has
- * unregistered the exit_task_namespaces()/free_nsproxy() hooks (so no
+ * unregistered the exit_task_namespaces()/exit_fs()/free_nsproxy() hooks (so no
  * further work can be queued),
  * and before the module image can be unloaded, or a still-pending
  * workqueue callback would execute code that has already been unmapped.
