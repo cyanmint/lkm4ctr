@@ -692,6 +692,7 @@ lkm4ctr_init_2() {
 		echo "=== LKM4CTR_QEMU_TEST: module test disabled; skipping module and container-runtime tests ==="
 		echo "=== LKM4CTR_QEMU_TEST: DONE ==="
 		source /do-umounts.sh
+		/busybox poweroff -f
 		return 0
 	fi
 
@@ -744,6 +745,7 @@ lkm4ctr_init_2() {
 	# unmounts whatever /do-mounts.sh mounted above, so the following
 	# remount,ro is clean.
 	source /do-umounts.sh
+	/busybox poweroff -f
 }
 
 lkm4ctr_init_tail(){
