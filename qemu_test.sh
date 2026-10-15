@@ -449,7 +449,7 @@ lkm4ctr_init_1() {
 			return 1
 		fi
 		/busybox rm -f /tmp/lkm4ctr-nsfs-ready
-		/busybox unshare -i /busybox sh -c 'exec 3</proc/self/ns/ipc || exit 20; echo ready >/tmp/lkm4ctr-nsfs-ready; exec /busybox sleep 60' &
+		/busybox unshare -i /busybox sh -c 'exec 3</proc/self/ns/ipc || exit 20; echo ready >/tmp/lkm4ctr-nsfs-ready; /busybox sleep 60' &
 		nsfs_holder_pid=$!
 		nsfs_wait=0
 		while [ "$nsfs_wait" -lt 10 ] && [ ! -s /tmp/lkm4ctr-nsfs-ready ]; do
