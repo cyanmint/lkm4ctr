@@ -257,11 +257,9 @@ lkm4ctr_init_1() {
 				/busybox poweroff -f
 				return 1
 			fi
-			if /busybox rmmod lkm4ctr; then
-				echo "RMMOD_TEST_FAILED: rmmod ignored active module-owned mqueue mounts"
-				/busybox poweroff -f
-				return 1
-			fi
+			# BusyBox rmmod may return zero even when delete_module() reports
+			# EBUSY; verify the kernel's module table, not the applet status.
+			/busybox rmmod lkm4ctr
 			if ! /busybox grep -q '^lkm4ctr ' /proc/modules; then
 				echo "RMMOD_TEST_FAILED: module disappeared despite active mqueue mounts"
 				/busybox poweroff -f
@@ -371,11 +369,7 @@ lkm4ctr_init_1() {
 				/busybox poweroff -f
 				return 1
 			fi
-			if /busybox rmmod lkm4ctr; then
-				echo "RMMOD_TEST_FAILED: rmmod ignored a live vendored nsproxy without an NSFS descriptor"
-				/busybox poweroff -f
-				return 1
-			fi
+			/busybox rmmod lkm4ctr
 			if ! /busybox grep -q '^lkm4ctr ' /proc/modules; then
 				echo "RMMOD_TEST_FAILED: module disappeared despite a live vendored nsproxy"
 				/busybox poweroff -f
@@ -497,8 +491,9 @@ lkm4ctr_init_1() {
 				/busybox poweroff -f
 				return 1
 			fi
-			if /busybox rmmod lkm4ctr; then
-				echo "RMMOD_TEST_FAILED: rmmod ignored an active vendored NSFS inode"
+			/busybox rmmod lkm4ctr
+			if ! /busybox grep -q '^lkm4ctr ' /proc/modules; then
+				echo "RMMOD_TEST_FAILED: module disappeared despite an active vendored NSFS inode"
 				/busybox poweroff -f
 				return 1
 			fi
