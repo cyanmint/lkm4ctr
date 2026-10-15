@@ -434,6 +434,9 @@ jobs:
             if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
               echo "KERNEL_ERROR: $name (see $log)"
               failures=$((failures + 1))
+            elif [ "$module_test" -eq 1 ] && ! grep -Fq '=== LKM4CTR_QEMU_TEST: FULL MODULE + CONTAINER TESTS DONE ===' "$log"; then
+              echo "INCOMPLETE: $name did not complete the module and container-runtime tests"
+              failures=$((failures + 1))
             elif ! grep -q '=== LKM4CTR_QEMU_TEST: DONE ===' "$log"; then
               echo "INCOMPLETE: $name did not reach the full-test completion marker (see $log)"
               failures=$((failures + 1))

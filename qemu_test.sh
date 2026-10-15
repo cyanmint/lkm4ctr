@@ -264,10 +264,12 @@ lkm4ctr_init_2() {
 	fi
 	docker exec -iu 0 alpine ps -e || exit 1
 	docker stop alpine || exit 1
+	echo "=== LKM4CTR_QEMU_TEST: docker run (Ubuntu container process sanity) ==="
 	docker run --privileged --rm --network host --name ubuntu -i docker.io/arm64v8/ubuntu:latest ps -e || exit 1
 	pkill -2 dockerd || exit 1
 	sleep 15
 
+	echo "=== LKM4CTR_QEMU_TEST: FULL MODULE + CONTAINER TESTS DONE ==="
 	echo "=== LKM4CTR_QEMU_TEST: DONE ==="
 	# unmounts whatever /do-mounts.sh mounted above, so the following
 	# remount,ro is clean.
