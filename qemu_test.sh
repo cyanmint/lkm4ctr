@@ -339,6 +339,7 @@ lkm4ctr_init_1() {
 			/busybox poweroff -f
 			return 1
 		fi
+		/busybox mkdir -p /tmp
 		/busybox rm -f /tmp/lkm4ctr-nsproxy-ready
 		/busybox unshare -i /busybox sh -c 'echo ready >/tmp/lkm4ctr-nsproxy-ready; exec /busybox sleep 60' &
 		nsproxy_holder_pid=$!
