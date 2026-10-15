@@ -102,6 +102,8 @@
 
 #include <linux/uaccess.h>
 #include "../vendor_kernel.h"
+#include "../include/uapi/vendor_kernel.h"
+#include "../../glue/lkm4ctr_log.h"
 
 #undef SYSCALL_METADATA
 #define SYSCALL_METADATA(sname, nb, ...)
