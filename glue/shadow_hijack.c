@@ -401,40 +401,46 @@ EXPORT_SYMBOL_GPL(shadow_hook_registry_set_active);
 /*
  * shadow_hook_resolve - find the runtime address of a kernel symbol.
  *
- * Uses the register_kprobe()/unregister_kprobe() trick so we don't depend on
- * the exported-ness of kallsyms_lookup_name() (largely unexported since Linux
- * 5.7). register_kprobe() internally resolves kp.addr from kp.symbol_name
- * using the kernel's own symbol table walker; we immediately unregister the
- * (never armed for our purposes) kprobe and reuse the resolved address.
+ * Uses a short-lived register_kretprobe()/unregister_kretprobe() probe so we
+ * don't depend on the exported-ness of kallsyms_lookup_name() (largely
+ * unexported since Linux 5.7). The exported kretprobe API resolves
+ * kp.addr from kp.symbol_name using the kernel's own symbol table walker;
+ * we immediately unregister the probe and reuse the resolved address.
  * Returns 0 if not found.
  *
- * Note: this only works if register_kprobe()/unregister_kprobe() themselves
- * are available -- i.e. CONFIG_KPROBES=y in the target kernel. Since these
- * are the very primitives this resolver is built on, an "Unknown symbol
- * register_kprobe"/"unregister_kprobe" error at insmod cannot be worked
- * around by resolving them the same way (a bootstrapping/chicken-and-egg
- * problem). CONFIG_KPROBES is effectively mandatory for any real Android
- * GKI kernel (ftrace/perfetto tracing infrastructure depends on it), so
- * this indicates the target kernel's own config lacks CONFIG_KPROBES
- * (e.g. a minimal test kernel), not a normal GKI KMI symbol-list-trimming
- * issue -- there is no supported fix for that case short of enabling
- * CONFIG_KPROBES in the target kernel build.
+ * This resolver requires the exported register_kretprobe API. Android GKI
+ * KMIs may omit register_kprobe from their module ABI even when the kprobe
+ * implementation is present; hook installation resolves those internal
+ * entry points through this resolver when needed.
  */
+static int shadow_hook_resolve_retprobe_ret(struct kretprobe_instance *ri,
+					    struct pt_regs *regs)
+{
+	(void)ri;
+	(void)regs;
+	return 0;
+}
+
 unsigned long shadow_hook_resolve(const char *name)
 {
-	struct kprobe kp;
+	struct kretprobe rp;
 	unsigned long addr;
 	int ret;
 
-	memset(&kp, 0, sizeof(kp));
-	kp.symbol_name = name;
+	memset(&rp, 0, sizeof(rp));
+	rp.kp.symbol_name = name;
+	rp.handler = shadow_hook_resolve_retprobe_ret;
+	rp.maxactive = 1;
 
-	ret = register_kprobe(&kp);
-	if (ret < 0)
-		return 0;
-
-	addr = (unsigned long)kp.addr;
-	unregister_kprobe(&kp);
+	ret = register_kretprobe(&rp);
+	addr = (unsigned long)rp.kp.addr;
+	if (ret >= 0)
+		unregister_kretprobe(&rp);
+	/*
+	 * register_kretprobe() resolves symbol_name into kp.addr before
+	 * register_kprobe() rejects non-probeable targets. Preserve that address
+	 * on failure: this resolver only needs the symbol address, not a live probe.
+	 */
 	return addr;
 }
 EXPORT_SYMBOL_GPL(shadow_hook_resolve);
@@ -858,6 +864,36 @@ EXPORT_SYMBOL_GPL(shadow_hook_remove);
 
 #else /* !(CONFIG_FUNCTION_TRACER && CONFIG_DYNAMIC_FTRACE) */
 
+typedef int (*shadow_register_kprobe_t)(struct kprobe *);
+typedef void (*shadow_unregister_kprobe_t)(struct kprobe *);
+
+static shadow_register_kprobe_t shadow_register_kprobe_fn;
+static shadow_unregister_kprobe_t shadow_unregister_kprobe_fn;
+
+static bool shadow_hook_kprobe_api_ready(void)
+{
+	if (!shadow_register_kprobe_fn)
+		shadow_register_kprobe_fn = (shadow_register_kprobe_t)
+			shadow_hook_resolve("register_kprobe");
+	if (!shadow_unregister_kprobe_fn)
+		shadow_unregister_kprobe_fn = (shadow_unregister_kprobe_t)
+			shadow_hook_resolve("unregister_kprobe");
+	return shadow_register_kprobe_fn && shadow_unregister_kprobe_fn;
+}
+
+static int __nocfi shadow_hook_register_kprobe(struct kprobe *kp)
+{
+	if (!shadow_hook_kprobe_api_ready())
+		return -ENOENT;
+	return shadow_register_kprobe_fn(kp);
+}
+
+static void __nocfi shadow_hook_unregister_kprobe(struct kprobe *kp)
+{
+	if (shadow_hook_kprobe_api_ready())
+		shadow_unregister_kprobe_fn(kp);
+}
+
 /*
  * --- kprobe pre_handler backend -----------------------------------------
  *
@@ -954,7 +990,7 @@ int shadow_hook_install(struct shadow_hook *hook)
 	hook->kp.addr = (kprobe_opcode_t *)hook->address;
 	hook->kp.pre_handler = shadow_hook_pre_handler;
 
-	err = register_kprobe(&hook->kp);
+	err = shadow_hook_register_kprobe(&hook->kp);
 	if (err) {
 		pr_debug("shadow_hook: register_kprobe(%s) failed: %d\n",
 			 hook->resolved_name, err);
@@ -979,7 +1015,7 @@ void shadow_hook_remove(struct shadow_hook *hook)
 	if (!hook->installed)
 		return;
 
-	unregister_kprobe(&hook->kp);
+	shadow_hook_unregister_kprobe(&hook->kp);
 	hook->installed = false;
 }
 EXPORT_SYMBOL_GPL(shadow_hook_remove);

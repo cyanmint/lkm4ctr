@@ -182,7 +182,7 @@ struct cgroup_namespace *vns_init_cgroup_ns_ptr;
 struct ipc_namespace *vns_init_ipc_ns_ptr;
 
 /* [BUILD-COMPAT] The real kernel's init_user_ns, captured (never resolved
- * via kallsyms/kprobe -- it is a data symbol, see
+ * via kallsyms/kretprobe -- it is a data symbol, see
  * glue/vendor_kernel_data_syms.h's init_user_ns macro comment) from
  * vns_current_user_ns() (vendor_kernel.h) at the very start of
  * vendor_kernel_init(). NULL until then. overflowgid/overflowuid have no
@@ -224,7 +224,7 @@ struct user_namespace *vns_current_user_ns(void)
  *
  * That resolution was fundamentally unreliable: these are non-exported
  * `struct kmem_cache *` *data* symbols, and shadow_hook_resolve() finds
- * symbols through register_kprobe(), which relies on kallsyms -- kallsyms
+ * symbols through register_kretprobe(), which relies on kallsyms -- kallsyms
  * only carries function symbols unless CONFIG_KALLSYMS_ALL is set (almost
  * never true on production/GKI kernels). uts_ns_cache/pid_ns_cachep/
  * user_ns_cachep additionally do not exist in vmlinux at all whenever
@@ -339,8 +339,8 @@ void vns_compat_resolve(void)
 	 * vendor_kernel_init(), glue/vendor_kernel_module.c).
 	 *
 	 * init_cgroup_ns is a pure *data* symbol, not a function: like the
-	 * cachep pointers above, shadow_hook_resolve()/register_kprobe() can
-	 * only ever resolve it when the running kernel has
+	 * cachep pointers above, the temporary-kretprobe resolver used by
+	 * shadow_hook_resolve() can only resolve it when the running kernel has
 	 * CONFIG_KALLSYMS_ALL set, which is essentially never true on
 	 * production/GKI kernels. So this resolve failing is the expected,
 	 * common case rather than a genuine problem -- use INFO rather than
@@ -373,7 +373,7 @@ void vns_compat_resolve(void)
 	 * [BUILD-COMPAT] uts_ns_cache/nsproxy_cachep/pid_ns_cachep/
 	 * user_ns_cachep are NOT resolved here anymore. They are private
 	 * `struct kmem_cache *` *data* symbols: shadow_hook_resolve() finds
-	 * them through register_kprobe(), which in turn relies on kallsyms,
+	 * them through register_kretprobe(), which in turn relies on kallsyms,
 	 * and kallsyms only carries function symbols unless the running
 	 * kernel was built with CONFIG_KALLSYMS_ALL (essentially never true
 	 * on production/GKI kernels) -- so this resolution was guaranteed to
@@ -930,7 +930,7 @@ void __nocfi vns_kill_litter_super(struct super_block *sb)
  * kill_litter_super()/generic_shutdown_super() above: once this module is
  * loaded it *also* exports a global symbol named "down_write_killable"
  * (this very definition), and kallsyms_lookup_name() (which
- * register_kprobe()/shadow_hook_resolve() rely on to resolve a
+ * register_kretprobe()/shadow_hook_resolve() rely on to resolve a
  * symbol_name) searches loaded modules' own symbol tables in addition to
  * vmlinux's -- attempting to resolve "down_write_killable" by name here
  * risks the lookup matching this very definition instead of the real

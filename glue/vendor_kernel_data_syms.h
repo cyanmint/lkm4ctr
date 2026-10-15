@@ -5,7 +5,7 @@
  * (not vendored).
  *
  * Unlike ordinary kernel functions, these cannot be resolved via
- * shadow_hook_resolve()'s register_kprobe() trick (kprobes only attach to
+ * shadow_hook_resolve()'s temporary-kretprobe resolver (kprobes only attach to
  * code/executable addresses; see glue/shadow_hook.h), and
  * CONFIG_TRIM_UNUSED_KSYMS has been observed to drop their module symbol
  * table entries entirely on some GKI KMIs (insmod "Unknown symbol

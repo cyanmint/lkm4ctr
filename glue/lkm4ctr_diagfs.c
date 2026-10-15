@@ -186,7 +186,7 @@
  * like the remaining plain helpers below -- wired up into a
  * locally-owned struct inode_operations rather than referencing the
  * kernel's own simple_dir_inode_operations struct directly: that struct is
- * plain data, which register_kprobe()'s resolution trick fundamentally
+ * plain data, which the kretprobe-based symbol resolver fundamentally
  * cannot recover (kprobes require a probe-able instruction/text address),
  * and it is also a GKI "Protected symbol" on some KMIs (EACCES at insmod
  * even when present), blocking direct reference regardless of export/trim
@@ -229,8 +229,8 @@
 
 /*
  * lkm4ctr_diagfs_resolve() - resolve a kernel symbol's runtime address (0 if
- * not found), via the same register_kprobe()/unregister_kprobe() trick used
- * by shadow_hijack.c's shadow_hook_resolve() -- but implemented as its own,
+ * not found), via the same register_kretprobe()/unregister_kretprobe() trick
+ * used by shadow_hijack.c's shadow_hook_resolve() -- but implemented as its own,
  * private copy rather than a call into shadow_hijack.c.
  *
  * diagfs is the controller filesystem: it must keep mounting, rendering
@@ -249,21 +249,34 @@
  * Linux 6.18 calls stable-ABI get_tree_nodev(). The local drop_inode callback
  * preserves generic_delete_inode()'s historical return-1 behavior.
  */
+static int lkm4ctr_diagfs_resolve_retprobe_ret(struct kretprobe_instance *ri,
+					       struct pt_regs *regs)
+{
+	(void)ri;
+	(void)regs;
+	return 0;
+}
+
 static unsigned long lkm4ctr_diagfs_resolve(const char *name)
 {
-	struct kprobe kp;
+	struct kretprobe rp;
 	unsigned long addr;
 	int ret;
 
-	memset(&kp, 0, sizeof(kp));
-	kp.symbol_name = name;
+	memset(&rp, 0, sizeof(rp));
+	rp.kp.symbol_name = name;
+	rp.handler = lkm4ctr_diagfs_resolve_retprobe_ret;
+	rp.maxactive = 1;
 
-	ret = register_kprobe(&kp);
-	if (ret < 0)
-		return 0;
-
-	addr = (unsigned long)kp.addr;
-	unregister_kprobe(&kp);
+	ret = register_kretprobe(&rp);
+	addr = (unsigned long)rp.kp.addr;
+	if (ret >= 0)
+		unregister_kretprobe(&rp);
+	/*
+	 * A failed probe installation can still resolve kp.addr before
+	 * register_kprobe() rejects a non-probeable target. This caller needs the
+	 * address, not an installed probe.
+	 */
 	return addr;
 }
 

@@ -33,7 +33,7 @@
  *
  * Symbols are resolved without relying on the (largely unexported since
  * Linux 5.7, commit 0bd476e6c671) kallsyms_lookup_name(): the implementation
- * uses the well-known register_kprobe() trick instead. See shadow_hijack.c
+ * uses a short-lived register_kretprobe() instead. See shadow_hijack.c
  * for the details.
  *
  * Where the implementation lives (this changed!)
@@ -199,7 +199,7 @@ struct shadow_hook {
  * contracts.
  *
  * shadow_hook_resolve()      - resolve a kernel symbol's runtime address (0 if
- *                              not found), via the register_kprobe() trick.
+ *                              not found), via a temporary kretprobe.
  * shadow_hook_install()      - resolve @hook->names and start redirecting; on
  *                              success *(void **)hook->original holds the real
  *                              function. Returns 0, -ENOENT if no candidate
