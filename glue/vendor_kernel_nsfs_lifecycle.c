@@ -172,6 +172,10 @@ static int vendor_kernel_hook_nsfs_get_path(struct path *path,
 	}
 
 	ret = real_nsfs_get_path(path, ns);
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC path helper returned ret=%d dentry=%p",
+			     ret, path ? path->dentry : NULL);
 	if (ret) {
 		kfree(candidate);
 		module_put(THIS_MODULE);
@@ -181,6 +185,10 @@ static int vendor_kernel_hook_nsfs_get_path(struct path *path,
 
 	vns_nsfs_pin_inode(path && path->dentry ? d_inode(path->dentry) : NULL,
 			   candidate);
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC path helper pins=%d",
+			     atomic_read(&vns_nsfs_inode_pin_count));
 	mutex_unlock(&vns_nsfs_lifecycle_lock);
 	return 0;
 }
@@ -217,6 +225,10 @@ static int vendor_kernel_hook_path_from_stashed(struct dentry **stashed,
 	}
 
 	ret = real_path_from_stashed(stashed, mnt, data, path);
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC stashed helper returned ret=%d dentry=%p",
+			     ret, path ? path->dentry : NULL);
 	if (ret) {
 		kfree(candidate);
 		module_put(THIS_MODULE);
@@ -226,6 +238,10 @@ static int vendor_kernel_hook_path_from_stashed(struct dentry **stashed,
 
 	vns_nsfs_pin_inode(path && path->dentry ? d_inode(path->dentry) : NULL,
 			   candidate);
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC stashed helper pins=%d",
+			     atomic_read(&vns_nsfs_inode_pin_count));
 	mutex_unlock(&vns_nsfs_lifecycle_lock);
 	return 0;
 }
