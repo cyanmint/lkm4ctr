@@ -40,6 +40,7 @@ static DEFINE_HASHTABLE(vns_nsfs_inode_pins, VNS_NSFS_PIN_HASH_BITS);
 static DEFINE_SPINLOCK(vns_nsfs_inode_pins_lock);
 static DEFINE_MUTEX(vns_nsfs_lifecycle_lock);
 static atomic_t vns_nsfs_inode_pin_count = ATOMIC_INIT(0);
+static atomic_t vns_nsfs_ipc_debug_count = ATOMIC_INIT(0);
 static bool vns_nsfs_hooks_active;
 static bool vns_nsfs_stopping;
 
@@ -56,6 +57,12 @@ static bool vns_nsfs_module_owns_ops(const struct ns_common *ns)
 {
 	return ns && ns->ops &&
 	       within_module((unsigned long)ns->ops, THIS_MODULE);
+}
+
+static bool vns_nsfs_debug_ipc(const struct ns_common *ns)
+{
+	return ns && ns->ops == &vns_ipcns_operations &&
+	       atomic_inc_return(&vns_nsfs_ipc_debug_count) <= 8;
 }
 
 /*
@@ -142,8 +149,13 @@ static int vendor_kernel_hook_nsfs_get_path(struct path *path,
 					    struct ns_common *ns)
 {
 	struct vns_nsfs_inode_pin *candidate = NULL;
+	bool debug_ipc = vns_nsfs_debug_ipc(ns);
 	int ret;
 
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC path helper entry ns=%p ops=%p owned=%d",
+			     ns, ns->ops, vns_nsfs_module_owns_ops(ns));
 	if (!vns_nsfs_module_owns_ops(ns))
 		return real_nsfs_get_path(path, ns);
 	mutex_lock(&vns_nsfs_lifecycle_lock);
@@ -180,8 +192,14 @@ static int vendor_kernel_hook_path_from_stashed(struct dentry **stashed,
 {
 	struct ns_common *ns = data;
 	struct vns_nsfs_inode_pin *candidate = NULL;
+	bool debug_ipc = vns_nsfs_debug_ipc(ns);
 	int ret;
 
+	if (debug_ipc)
+		LKM4CTR_INFO("vendor_kernel_nsfs",
+			     "debug IPC stashed helper entry ns=%p ops=%p owned=%d mnt=%p magic=%lx",
+			     ns, ns->ops, vns_nsfs_module_owns_ops(ns), mnt,
+			     mnt && mnt->mnt_sb ? mnt->mnt_sb->s_magic : 0UL);
 	if (!mnt || !mnt->mnt_sb || mnt->mnt_sb->s_magic != NSFS_MAGIC ||
 	    !vns_nsfs_module_owns_ops(ns))
 		return real_path_from_stashed(stashed, mnt, data, path);
