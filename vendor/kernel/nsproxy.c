@@ -87,7 +87,7 @@ static DEFINE_SPINLOCK(vns_nsproxy_set_lock);
 static atomic_t vns_nsproxy_live = ATOMIC_INIT(0);
 static bool vns_namespace_stop_gate;
 static atomic_t vns_free_nsproxy_intercepts = ATOMIC_INIT(0);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 static atomic_t vns_free_nsproxy_exit_hits = ATOMIC_INIT(0);
 static atomic_t vns_exit_fs_intercepts = ATOMIC_INIT(0);
@@ -1040,7 +1040,7 @@ static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
 /*
  * vns_task_exit_cleanup() - see the declaration comment in vendor_kernel.h.
  * Runs from the exit_task_namespaces() shadow hook, and from the earlier
- * exit_fs() hook on Linux 5.15 where that callback is not reached. The
+ * exit_fs() hook on Linux 5.10-5.15 where that callback is not reached. The
  * free_nsproxy() hook invokes only the PID-reaper cleanup above as a final
  * fallback when neither task-exit call site is intercepted.
  */
@@ -1075,14 +1075,15 @@ void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 	vns_nsproxy_put_deferred(ns);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 /*
- * On the Android 13/14 5.15 stock Images, exit_task_namespaces() resolves
- * and installs but its shadow callback is not reached by the do_exit path.
- * exit_fs() is a distinct, returning call immediately before it in do_exit;
- * run the normal-context cleanup here so the native exit_notify() cannot
- * reach CONFIG_PID_NS=n's zap_pid_ns_processes() BUG with a vendored reaper.
+ * On affected Android 13 5.10 and Android 13/14 5.15 stock Images,
+ * exit_task_namespaces() resolves and installs but its shadow callback is
+ * not reached by the do_exit path. exit_fs() is a distinct, returning call
+ * immediately before it in do_exit; run the normal-context cleanup here so
+ * native exit_notify() cannot reach CONFIG_PID_NS=n's zap_pid_ns_processes()
+ * BUG with a vendored reaper.
  */
 static void (*vns_real_exit_fs)(struct task_struct *);
 
@@ -1134,7 +1135,7 @@ static const char * const vns_free_nsproxy_names[] = {
 
 static void vns_free_nsproxy_hook(struct nsproxy *ns)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 	if (current->flags & PF_EXITING) {
 		struct pid_namespace *pid_ns = task_active_pid_ns(current);
@@ -1246,7 +1247,7 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 	 */
 	vns_free_nsproxy_shadow_hook.quiesce_exempt = true;
 	vns_exit_task_namespaces_shadow_hook.quiesce_exempt = true;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 	vns_exit_fs_shadow_hook.quiesce_exempt = true;
 #endif
@@ -1268,7 +1269,7 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 		return ret;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 	ret = shadow_hook_install(&vns_exit_fs_shadow_hook);
 	if (ret) {
@@ -1280,7 +1281,7 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 		return ret;
 	}
 	LKM4CTR_INFO(VENDOR_KERNEL_TAG,
-		     "[DEBUG-KMI-EXIT] free_nsproxy, exit_task_namespaces and 5.15 exit_fs hooks installed");
+		     "[DEBUG-KMI-EXIT] free_nsproxy, exit_task_namespaces and 5.10-5.15 exit_fs hooks installed");
 #else
 	LKM4CTR_INFO(VENDOR_KERNEL_TAG,
 		     "[DEBUG-KMI-EXIT] free_nsproxy and exit_task_namespaces hooks installed");
@@ -1291,7 +1292,7 @@ int vns_exit_hook_init(void) /* [BUILD-COMPAT] */
 
 void vns_exit_hook_exit(void) /* [BUILD-COMPAT] */
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && \
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
 	LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
 	shadow_hook_remove(&vns_exit_fs_shadow_hook);
 #endif
