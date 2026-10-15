@@ -449,7 +449,7 @@ lkm4ctr_init_1() {
 			return 1
 		fi
 		/busybox rm -f /tmp/lkm4ctr-nsfs-ready
-		/busybox unshare -i /busybox sh -c 'exec 3</proc/self/ns/ipc || exit 20; /busybox mkdir -p /tmp/lkm4ctr-nsfs-bind; /busybox touch /tmp/lkm4ctr-nsfs-bind/ipc; /busybox mount -o bind /proc/self/ns/ipc /tmp/lkm4ctr-nsfs-bind/ipc || exit 21; echo $$ >/tmp/lkm4ctr-nsfs-ready; exec /busybox sleep 60' &
+		/busybox unshare -i /busybox sh -c 'exec 3</proc/self/ns/ipc || exit 20; /busybox sleep 60 & nsfs_sleep_pid=$!; trap "/busybox kill $nsfs_sleep_pid 2>/dev/null || true; exit 0" TERM; echo $$ >/tmp/lkm4ctr-nsfs-ready; wait "$nsfs_sleep_pid"' &
 		nsfs_launcher_pid=$!
 		nsfs_wait=0
 		while [ "$nsfs_wait" -lt 10 ] && [ ! -s /tmp/lkm4ctr-nsfs-ready ]; do
@@ -457,7 +457,7 @@ lkm4ctr_init_1() {
 			nsfs_wait=$((nsfs_wait + 1))
 		done
 		if [ ! -s /tmp/lkm4ctr-nsfs-ready ]; then
-			echo "RMMOD_TEST_FAILED: could not bind-mount /proc/self/ns/ipc for NSFS lifetime test"
+			echo "RMMOD_TEST_FAILED: could not open /proc/self/ns/ipc for NSFS lifetime test"
 			/busybox kill "$nsfs_launcher_pid" 2>/dev/null || true
 			/busybox poweroff -f
 			return 1
@@ -471,15 +471,15 @@ lkm4ctr_init_1() {
 				return 1
 				;;
 		esac
-		if ! /busybox grep -q ' /tmp/lkm4ctr-nsfs-bind/ipc ' /proc/self/mountinfo; then
-			echo "RMMOD_TEST_FAILED: NSFS holder bind mount was not visible to the test process"
+		if [ ! -e "/proc/$nsfs_holder_pid/fd/3" ]; then
+			echo "RMMOD_TEST_FAILED: NSFS holder did not retain its open namespace fd"
 			/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
 			/busybox poweroff -f
 			return 1
 		fi
 		/busybox sleep 1
-		nsfs_pins_bound=$(/busybox awk '$1 == "nsfs_inode_pins:" { print $2 }' /mnt/lkm4ctr-nsfs-diag/v/resources)
-		case "$nsfs_pins_bound" in
+		nsfs_pins_open=$(/busybox awk '$1 == "nsfs_inode_pins:" { print $2 }' /mnt/lkm4ctr-nsfs-diag/v/resources)
+		case "$nsfs_pins_open" in
 			''|*[!0-9]*)
 				echo "RMMOD_TEST_FAILED: diagfs returned an invalid NSFS inode pin count"
 				/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
@@ -487,7 +487,7 @@ lkm4ctr_init_1() {
 				return 1
 				;;
 		esac
-		if [ "$nsfs_pins_bound" -gt 0 ]; then
+		if [ "$nsfs_pins_open" -gt 0 ]; then
 			/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
 			/busybox wait "$nsfs_launcher_pid" 2>/dev/null || true
 			if [ -w /proc/sys/vm/drop_caches ]; then
@@ -502,7 +502,7 @@ lkm4ctr_init_1() {
 					;;
 			esac
 			if [ "$nsfs_pins_after_task_exit" -eq 0 ]; then
-				echo "RMMOD_TEST_FAILED: bind-mounted NSFS inode did not retain its pin after namespace task exit"
+				echo "RMMOD_TEST_FAILED: open NSFS descriptor did not retain its pin after namespace task exit"
 				/busybox poweroff -f
 				return 1
 			fi
@@ -532,24 +532,18 @@ lkm4ctr_init_1() {
 				/busybox poweroff -f
 				return 1
 			fi
-			echo "=== LKM4CTR_QEMU_TEST: direct rmmod and diagfs stop refused NSFS bind mount after task exit ==="
+			echo "=== LKM4CTR_QEMU_TEST: direct rmmod and diagfs stop refused an open NSFS descriptor ==="
 		else
-			/busybox umount /tmp/lkm4ctr-nsfs-bind/ipc || true
 			/busybox kill "$nsfs_holder_pid" 2>/dev/null || true
 			/busybox wait "$nsfs_launcher_pid" 2>/dev/null || true
 			if [ "$native_ipc_nsfs" -ne 1 ]; then
-				echo "RMMOD_TEST_FAILED: bind-mounting /proc/self/ns/ipc created no NSFS pin and native support was absent before insmod"
+				echo "RMMOD_TEST_FAILED: opening /proc/self/ns/ipc created no NSFS pin and native support was absent before insmod"
 				/busybox poweroff -f
 				return 1
 			fi
 			echo "=== LKM4CTR_QEMU_TEST: NSFS lifetime assertion skipped; pre-insmod unshare -i proved native IPC namespace support ==="
 		fi
-		if [ "$nsfs_pins_bound" -gt 0 ]; then
-			if ! /busybox umount /tmp/lkm4ctr-nsfs-bind/ipc; then
-				echo "RMMOD_TEST_FAILED: could not unmount the persistent NSFS bind mount"
-				/busybox poweroff -f
-				return 1
-			fi
+		if [ "$nsfs_pins_open" -gt 0 ]; then
 			if [ -w /proc/sys/vm/drop_caches ]; then
 				echo 2 > /proc/sys/vm/drop_caches
 			fi
