@@ -8,6 +8,7 @@
 
 int vendor_kernel_init(void);
 int vendor_kernel_exit(void);
+void vns_user_ns_exit(void);
 int lkm4ctr_hotreload_init(void);
 void lkm4ctr_hotreload_exit(void);
 

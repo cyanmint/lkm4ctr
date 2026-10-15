@@ -1673,7 +1673,7 @@ static int lkm4ctr_safe_unload_fn(void *unused)
 
 	refcount = lkm4ctr_module_refcount_fn(THIS_MODULE);
 	LKM4CTR_INFO(LKM4CTR_SAFE_UNLOAD_TAG,
-		     "drained after %lums (module_refcount()=%d), launching rmmod%s",
+		     "drained after %lums (module_refcount()=%d), launching rmmod",
 		     waited_ms, refcount);
 	ret = lkm4ctr_run_rmmod();
 	if (ret) {
