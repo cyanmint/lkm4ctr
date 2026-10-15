@@ -34,6 +34,8 @@
 
 #include "util.h"
 #include "../vendor_kernel.h"
+#include "../include/uapi/vendor_kernel.h"
+#include "../../glue/lkm4ctr_log.h"
 
 #define VNS_IPC_NS_HASH_BITS 8
 
@@ -221,7 +223,6 @@ fail_mq:
 fail_put:
 	vns_put_user_ns(ns->user_ns); /* [BUILD-COMPAT] */
 	vns_free_inum(&ns->ns); /* [BUILD-COMPAT] */
-fail_free_existing:
 	kfree(entry);
 	kfree(ns);
 	if (module_pinned)

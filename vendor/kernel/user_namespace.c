@@ -50,6 +50,8 @@
 #include <linux/hashtable.h>
 #include <linux/spinlock.h>
 #include "../vendor_kernel.h"
+#include "../include/uapi/vendor_kernel.h"
+#include "../../glue/lkm4ctr_log.h"
 
 #define VNS_USER_NS_HASH_BITS 8
 
