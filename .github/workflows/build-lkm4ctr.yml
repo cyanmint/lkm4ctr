@@ -439,7 +439,7 @@ jobs:
                 ! grep -Fq '=== LKM4CTR_QEMU_TEST: direct insmod/rmmod safety test DONE ===' "$rmmod_log" || \
                 ! grep -Eq '=== LKM4CTR_QEMU_TEST: (rmmod safely refused while mqueue refs are active|built-in mqueue collision confirmed before insmod; module mount guard not applicable) ===' "$rmmod_log" || \
                 ! grep -Eq '=== LKM4CTR_QEMU_TEST: (live vendored nsproxy pins module until task exit|live nsproxy assertion skipped; pre-insmod unshare -i proved native IPC namespace support) ===' "$rmmod_log" || \
-                ! grep -Eq '=== LKM4CTR_QEMU_TEST: (direct rmmod and diagfs stop refused NSFS bind mount after task exit|NSFS lifetime assertion skipped; pre-insmod unshare -i proved native IPC namespace support) ===' "$rmmod_log" || \
+                ! grep -Eq '=== LKM4CTR_QEMU_TEST: (direct rmmod and diagfs stop refused an open NSFS descriptor|NSFS lifetime assertion skipped; pre-insmod unshare -i proved native IPC namespace support) ===' "$rmmod_log" || \
                 { [ "$KMI" = "android14-6.1" ] && grep -Fq 'NSFS lifetime assertion skipped;' "$rmmod_log"; }; then
                 echo "RMMOD_TEST_FAILED: $name (see $rmmod_log)"
                 failures=$((failures + 1))
