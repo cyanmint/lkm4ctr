@@ -77,6 +77,55 @@ lkm4ctr_rmmod_test_enabled() {
 	return 1
 }
 
+lkm4ctr_post_use_rmmod_test() {
+	echo "=== LKM4CTR_QEMU_TEST: post-use rmmod test starting ==="
+	if ! /busybox grep -q ' /proc ' /proc/self/mountinfo 2>/dev/null; then
+		if ! /busybox mount -t proc proc /proc; then
+			echo "RMMOD_TEST_FAILED: could not remount procfs for post-use unload verification"
+			return 1
+		fi
+	fi
+	if ! /busybox grep -q '^lkm4ctr ' /proc/modules; then
+		echo "RMMOD_TEST_FAILED: lkm4ctr is not loaded after the full module/container workload"
+		return 1
+	fi
+	if /busybox grep -q ' /lkm4ctr_diagfs ' /proc/self/mountinfo; then
+		if ! /busybox umount /lkm4ctr_diagfs; then
+			echo "RMMOD_TEST_FAILED: could not unmount checker diagfs before post-use rmmod"
+			return 1
+		fi
+	fi
+	if /busybox grep -q ' /dev/mqueue ' /proc/self/mountinfo; then
+		if ! /busybox umount /dev/mqueue; then
+			echo "RMMOD_TEST_FAILED: could not unmount /dev/mqueue before post-use rmmod"
+			return 1
+		fi
+	fi
+	module_refs=missing
+	ref_wait=0
+	while [ "$ref_wait" -lt 30 ]; do
+		module_refs=$(/busybox awk '$1 == "lkm4ctr" { print $3 }' /proc/modules)
+		[ "$module_refs" = "0" ] && break
+		/busybox sleep 1
+		ref_wait=$((ref_wait + 1))
+	done
+	if [ "$module_refs" != "0" ]; then
+		echo "RMMOD_TEST_FAILED: module references did not drain after workload cleanup: ${module_refs:-missing}"
+		/busybox cat /proc/modules
+		return 1
+	fi
+	if ! /busybox rmmod lkm4ctr; then
+		echo "RMMOD_TEST_FAILED: rmmod after full module/container workload"
+		/busybox cat /proc/modules
+		return 1
+	fi
+	if /busybox grep -q '^lkm4ctr ' /proc/modules; then
+		echo "RMMOD_TEST_FAILED: module remains listed after post-use rmmod"
+		return 1
+	fi
+	echo "=== LKM4CTR_QEMU_TEST: post-use rmmod after module and container tests succeeded ==="
+}
+
 lkm4ctr_run_checker_mode() {
 	CHECKER="$1"
 	MODULE="$2"
@@ -165,12 +214,9 @@ lkm4ctr_init_1() {
 		echo "missing or unreadable lkm4ctr_test_module boot argument"
 		return 1
 	fi
-	lkm4ctr_rmmod_test_enabled
-	rmmod_test_status=$?
-	if [ "$rmmod_test_status" -gt 1 ]; then
-		echo "missing or unreadable lkm4ctr_test_rmmod boot argument"
-		return 1
-	fi
+	# The unload regression now runs in stage 2, after the module and
+	# container-runtime workload has used this same loaded module.
+	rmmod_test_status=1
 	if [ "$rmmod_test_status" -eq 0 ]; then
 		echo "=== LKM4CTR_QEMU_TEST: direct insmod/rmmod safety test ==="
 		if [ "$module_test_status" -ne 0 ] || [ ! -s /lkm4ctr.ko ]; then
@@ -673,6 +719,12 @@ lkm4ctr_init_2() {
 		echo "missing or unreadable lkm4ctr_test_module boot argument"
 		exit 1
 	fi
+	lkm4ctr_rmmod_test_enabled
+	rmmod_test_status=$?
+	if [ "$rmmod_test_status" -gt 1 ]; then
+		echo "missing or unreadable lkm4ctr_test_rmmod boot argument"
+		exit 1
+	fi
 
 	busybox mdev -s
 	ifconfig lo up
@@ -741,10 +793,13 @@ lkm4ctr_init_2() {
 	sleep 15
 
 	echo "=== LKM4CTR_QEMU_TEST: FULL MODULE + CONTAINER TESTS DONE ==="
-	echo "=== LKM4CTR_QEMU_TEST: DONE ==="
 	# unmounts whatever /do-mounts.sh mounted above, so the following
 	# remount,ro is clean.
 	source /do-umounts.sh
+	if [ "$rmmod_test_status" -eq 0 ]; then
+		lkm4ctr_post_use_rmmod_test || exit 1
+	fi
+	echo "=== LKM4CTR_QEMU_TEST: DONE ==="
 	/busybox poweroff -f
 }
 
