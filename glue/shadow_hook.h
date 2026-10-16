@@ -74,8 +74,10 @@
 #define _SHADOW_HOOK_H
 
 #include <linux/kernel.h>
+#include <linux/atomic.h>
 #include <linux/kprobes.h>
 #include <linux/ftrace.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/string.h>
@@ -147,8 +149,9 @@
  * device gets from struct file_operations::owner while a file is open.
  *
  * @retprobe is only ever unregistered by
- * shadow_hook_teardown_all_retprobes() at true module exit, once the
- * kernel has already guaranteed module_refcount() is zero: unregistering
+ * shadow_hook_teardown_all_retprobes() during final module-exit teardown,
+ * once the kernel has already guaranteed module_refcount() is zero:
+ * unregistering
  * a kretprobe nulls out every already in-flight kretprobe_instance's back
  * pointer to it (see kernel/kprobes.c unregister_kretprobes()), which
  * would otherwise permanently orphan that in-flight call's
@@ -174,6 +177,10 @@ struct shadow_hook {
 	bool			retprobe_installed;
 	/* Keep lifecycle hooks redirecting while ordinary hooks are quiesced. */
 	bool			quiesce_exempt;
+	/* Lifetime tracking also covers hooks installed outside a hook group. */
+	struct list_head	lifetime_node;
+	bool			lifetime_tracked;
+	atomic_t		inflight;
 };
 
 /*
@@ -191,7 +198,8 @@ struct shadow_hook {
 		.function = (_function),				\
 		.original = (_original_storage),			\
 		.owner    = THIS_MODULE,				\
-	}
+		.inflight = ATOMIC_INIT(0),			\
+		}
 
 /*
  * The hook implementation lives in shadow_hijack.c
@@ -235,8 +243,10 @@ bool shadow_hook_is_quiescing(void);
  * plumbing of its own. See shadow_hijack.c for the implementation.
  */
 size_t shadow_hook_registry_snprintf(const char *tag, char *buf, size_t buflen);
+size_t shadow_hook_inflight_snprintf(char *buf, size_t buflen);
 bool shadow_hook_registry_tag_active(const char *tag);
 int shadow_hook_registry_set_active(const char *tag, bool enable);
+void shadow_hook_teardown_all_retprobes(void);
 
 /*
  * shadow_hook_inflight_count() - number of shadow_hook-redirected calls

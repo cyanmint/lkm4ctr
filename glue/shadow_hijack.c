@@ -117,6 +117,7 @@ struct shadow_hook_registry_group {
 };
 
 static LIST_HEAD(shadow_hook_registry_groups);
+static LIST_HEAD(shadow_hook_lifetime_hooks);
 static DEFINE_MUTEX(shadow_hook_registry_lock);
 
 /*
@@ -147,6 +148,7 @@ static bool shadow_hook_redirect_enter(struct shadow_hook *hook)
 		goto out;
 	if (!hook->retprobe_installed || !try_module_get(hook->owner))
 		goto out;
+	atomic_inc(&hook->inflight);
 	atomic_inc(&shadow_hook_inflight);
 	entered = true;
 out:
@@ -159,6 +161,38 @@ int shadow_hook_inflight_count(void)
 	return atomic_read(&shadow_hook_inflight);
 }
 EXPORT_SYMBOL_GPL(shadow_hook_inflight_count);
+
+size_t shadow_hook_inflight_snprintf(char *buf, size_t buflen)
+{
+	struct shadow_hook *hook;
+	size_t pos = 0;
+
+	mutex_lock(&shadow_hook_registry_lock);
+	list_for_each_entry(hook, &shadow_hook_lifetime_hooks, lifetime_node) {
+		int count = atomic_read(&hook->inflight);
+		const char *name;
+
+		if (!count)
+			continue;
+		name = hook->resolved_name ? hook->resolved_name :
+			(hook->names && hook->names[0] ? hook->names[0] : "?");
+		pos += scnprintf(buf + pos, pos < buflen ? buflen - pos : 0,
+				 "%s: %d in-flight call(s)\n", name, count);
+	}
+	mutex_unlock(&shadow_hook_registry_lock);
+	return pos;
+}
+
+static void shadow_hook_lifetime_track(struct shadow_hook *hook)
+{
+	mutex_lock(&shadow_hook_registry_lock);
+	if (!hook->lifetime_tracked) {
+		INIT_LIST_HEAD(&hook->lifetime_node);
+		list_add_tail(&hook->lifetime_node, &shadow_hook_lifetime_hooks);
+		hook->lifetime_tracked = true;
+	}
+	mutex_unlock(&shadow_hook_registry_lock);
+}
 
 /* Caller must hold shadow_hook_registry_lock. */
 static struct shadow_hook_registry_group *
@@ -524,6 +558,7 @@ static int shadow_hook_retprobe_ret(struct kretprobe_instance *ri, struct pt_reg
 		return 0;
 
 	hook = container_of(rp, struct shadow_hook, retprobe);
+	atomic_dec(&hook->inflight);
 	atomic_dec(&shadow_hook_inflight);
 	module_put(hook->owner);
 	return 0;
@@ -562,6 +597,7 @@ static int shadow_hook_retprobe_install(struct shadow_hook *hook)
 		return err;
 	}
 	hook->retprobe_installed = true;
+	shadow_hook_lifetime_track(hook);
 	return 0;
 }
 
@@ -1085,31 +1121,26 @@ void shadow_hook_remove_all(struct shadow_hook **hooks)
 EXPORT_SYMBOL_GPL(shadow_hook_remove_all);
 
 /*
- * shadow_hook_teardown_all_retprobes() - unregister every hook's retprobe,
- * across every group ever registered via shadow_hook_install_all(),
- * whether or not that group's forward hooks are currently installed.
+ * shadow_hook_teardown_all_retprobes() - unregister every successfully
+ * installed hook's retprobe, including individual lifecycle hooks that were
+ * not registered through shadow_hook_install_all(), whether or not their
+ * forward hooks are currently installed.
  *
- * Only safe to call once the kernel itself has already guaranteed
- * module_refcount() is zero, i.e. from shadow_hijack_exit() -- the very
- * last submodule _exit() called from lkm4ctr_exit() -- since module_exit()
- * is only ever reached after the kernel's own delete_module() path has
- * confirmed no reference (including every try_module_get(hook->owner)
- * this file's redirect points take) remains outstanding. At that point
+ * Only safe to call from final module-exit teardown, after the kernel's
+ * delete_module() path has confirmed module_refcount() is zero and no
+ * try_module_get(hook->owner) from this file's redirect points remains
+ * outstanding. At that point
  * there cannot be any call still executing inside any hook->function, so
  * unregister_kretprobe()'s in-flight-instance-orphaning behaviour (see
  * shadow_hook_remove()'s comment) is a non-issue here.
  */
-static void shadow_hook_teardown_all_retprobes(void)
+void shadow_hook_teardown_all_retprobes(void)
 {
-	struct shadow_hook_registry_group *g;
+	struct shadow_hook *hook;
 
 	mutex_lock(&shadow_hook_registry_lock);
-	list_for_each_entry(g, &shadow_hook_registry_groups, list) {
-		int i;
-
-		for (i = 0; g->hooks[i]; i++)
-			shadow_hook_retprobe_remove(g->hooks[i]);
-	}
+	list_for_each_entry(hook, &shadow_hook_lifetime_hooks, lifetime_node)
+		shadow_hook_retprobe_remove(hook);
 	mutex_unlock(&shadow_hook_registry_lock);
 }
 

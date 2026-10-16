@@ -778,6 +778,7 @@ bool vns_is_file_shm_hugepages(struct file *file);
 
 int vendor_kernel_init(void);
 int vendor_kernel_exit(void);
+int vendor_kernel_module_exit(void);
 size_t vendor_kernel_diag_snprintf(char *buf, size_t buflen);
 
 #endif /* _VENDOR_KERNEL_H */

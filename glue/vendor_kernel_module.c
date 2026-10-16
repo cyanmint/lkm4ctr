@@ -457,7 +457,7 @@ int vendor_kernel_init(void)
 	return 0;
 }
 
-int vendor_kernel_exit(void)
+static int __vendor_kernel_exit(bool module_exit)
 {
 	unsigned int waited_ms = 0;
 	bool was_quiescing;
@@ -478,14 +478,19 @@ int vendor_kernel_exit(void)
 	vns_nsproxy_deferred_flush();
 	if (vns_nsproxy_live_count() > 0) {
 		LKM4CTR_WARN("vendor_kernel",
-			     "refusing stop while %d vendored nsproxy object(s) remain live",
+			     "%s while %d vendored nsproxy object(s) remain live",
+			     module_exit ? "module exit continuing" :
+			     "refusing stop",
 			     vns_nsproxy_live_count());
-		vns_nsproxy_stop_abort();
-		vns_user_ns_stop_abort();
-		return -EBUSY;
+		if (!module_exit) {
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return -EBUSY;
+		}
 	}
 	vns_nsfs_lifecycle_begin_exit();
-	while (shadow_hook_inflight_count() > 0 && waited_ms < 30000) {
+	while (!module_exit && shadow_hook_inflight_count() > 0 &&
+	       waited_ms < 30000) {
 		msleep(10);
 		waited_ms += 10;
 	}
@@ -496,24 +501,36 @@ int vendor_kernel_exit(void)
 		err = vns_ipc_namespace_prepare_exit();
 	if (shadow_hook_inflight_count() > 0 || vns_nsproxy_live_count() > 0 ||
 	    err) {
-		LKM4CTR_WARN("vendor_kernel",
-			     "refusing stop before quiesce: %d hook call(s), %d vendored nsproxy object(s), %d user namespace object(s), %d IPC namespace object(s) remain or teardown work is pending",
-			     shadow_hook_inflight_count(), vns_nsproxy_live_count(),
-			     vns_user_ns_live_count(), vns_ipc_ns_live_count());
-		vns_nsfs_lifecycle_abort_exit();
-		vns_nsproxy_stop_abort();
-		vns_user_ns_stop_abort();
-		return err ? err : -EBUSY;
+		if (module_exit) {
+			LKM4CTR_WARN("vendor_kernel",
+				     "module exit continuing with %d hook call(s), %d vendored nsproxy object(s), %d user namespace object(s), %d IPC namespace object(s) reported",
+				     shadow_hook_inflight_count(),
+				     vns_nsproxy_live_count(),
+				     vns_user_ns_live_count(),
+				     vns_ipc_ns_live_count());
+		} else {
+			LKM4CTR_WARN("vendor_kernel",
+				     "refusing stop before quiesce: %d hook call(s), %d vendored nsproxy object(s), %d user namespace object(s), %d IPC namespace object(s) remain or teardown work is pending",
+				     shadow_hook_inflight_count(),
+				     vns_nsproxy_live_count(),
+				     vns_user_ns_live_count(),
+				     vns_ipc_ns_live_count());
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err ? err : -EBUSY;
+		}
 	}
 
 	was_quiescing = shadow_hook_is_quiescing();
 	shadow_hook_quiesce(true);
 	vns_mqueue_dev_cancel();
-	while (shadow_hook_inflight_count() > 0 && waited_ms < 30000) {
+	while (!module_exit && shadow_hook_inflight_count() > 0 &&
+	       waited_ms < 30000) {
 		msleep(10);
 		waited_ms += 10;
 	}
-	if (shadow_hook_inflight_count() > 0) {
+	if (!module_exit && shadow_hook_inflight_count() > 0) {
 		LKM4CTR_WARN("vendor_kernel",
 			     "refusing stop with %d in-flight hook call(s)",
 			     shadow_hook_inflight_count());
@@ -528,13 +545,18 @@ int vendor_kernel_exit(void)
 
 	err = vns_nsfs_lifecycle_prepare_exit();
 	if (err) {
-		vns_mqueue_dev_ensure();
-		if (!was_quiescing)
-			shadow_hook_quiesce(false);
-		vns_nsfs_lifecycle_abort_exit();
-		vns_nsproxy_stop_abort();
-		vns_user_ns_stop_abort();
-		return err;
+		if (!module_exit) {
+			vns_mqueue_dev_ensure();
+			if (!was_quiescing)
+				shadow_hook_quiesce(false);
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err;
+		}
+		LKM4CTR_WARN("vendor_kernel",
+			     "module exit continuing despite nsfs lifecycle prepare error %d",
+			     err);
 	}
 
 	err = vns_sem_prepare_exit();
@@ -542,27 +564,35 @@ int vendor_kernel_exit(void)
 		err = vns_shm_prepare_exit(vns_ipc_active_default());
 	if (err) {
 		LKM4CTR_WARN("vendor_kernel",
-			     "refusing stop while SysV semaphore undo state, shared-memory segments/mappings, or task-exit work remain");
-		vns_mqueue_dev_ensure();
-		if (!was_quiescing)
-			shadow_hook_quiesce(false);
-		vns_nsfs_lifecycle_abort_exit();
-		vns_nsproxy_stop_abort();
-		vns_user_ns_stop_abort();
-		return err;
+			     "%s while SysV semaphore undo state, shared-memory segments/mappings, or task-exit work remain (error %d)",
+			     module_exit ? "module exit continuing" :
+			     "refusing stop", err);
+		if (!module_exit) {
+			vns_mqueue_dev_ensure();
+			if (!was_quiescing)
+				shadow_hook_quiesce(false);
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err;
+		}
 	}
 
 	err = vns_mqueue_fs_prepare_exit();
 	if (err) {
 		LKM4CTR_WARN("vendor_kernel",
-			     "refusing stop while mqueue filesystem contexts, mounts, or open files remain");
-		vns_mqueue_dev_ensure();
-		if (!was_quiescing)
-			shadow_hook_quiesce(false);
-		vns_nsfs_lifecycle_abort_exit();
-		vns_nsproxy_stop_abort();
-		vns_user_ns_stop_abort();
-		return err;
+			     "%s while mqueue filesystem contexts, mounts, or open files remain (error %d)",
+			     module_exit ? "module exit continuing" :
+			     "refusing stop", err);
+		if (!module_exit) {
+			vns_mqueue_dev_ensure();
+			if (!was_quiescing)
+				shadow_hook_quiesce(false);
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err;
+		}
 	}
 
 	vendor_kernel_enabled = false;
@@ -573,13 +603,32 @@ int vendor_kernel_exit(void)
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
 	vns_exit_hook_exit();
 	vns_nsfs_lifecycle_exit();
-	/*
-	 * Quiesce-exempt lifecycle hooks may have entered after the preflight
-	 * snapshot. Hook removal closes admission; drain those already redirected
-	 * before flushing their deferred puts or clearing the TGID registry.
-	 */
-	while (shadow_hook_inflight_count() > 0)
-		msleep(10);
+	if (module_exit) {
+		/*
+		 * module_exit cannot veto rmmod. The kernel has already accepted
+		 * zero module references, so unregister every return hook rather
+		 * than leave callbacks into unloaded module text if the diagnostic
+		 * in-flight counter is stale.
+		 */
+		shadow_hook_teardown_all_retprobes();
+	} else {
+		/*
+		 * Quiesce-exempt lifecycle hooks may have entered after the
+		 * preflight snapshot. Hook removal closes admission; drain those
+		 * already redirected before flushing deferred puts or clearing
+		 * the TGID registry.
+		 */
+		while (shadow_hook_inflight_count() > 0)
+			msleep(10);
+	}
+	if (module_exit && shadow_hook_inflight_count() > 0) {
+		char hooks[512] = { 0 };
+
+		shadow_hook_inflight_snprintf(hooks, sizeof(hooks));
+		LKM4CTR_WARN("vendor_kernel",
+			     "in-flight hook counter remains %d after final hook unregister: %s",
+			     shadow_hook_inflight_count(), hooks);
+	}
 	vns_nsproxy_deferred_flush();
 	vns_registry_clear_all();
 	vns_nsproxy_deferred_flush();
@@ -587,7 +636,17 @@ int vendor_kernel_exit(void)
 	vns_ipc_namespace_flush_work();
 	vns_ipc_default_exit();
 	LKM4CTR_INFO("vendor_kernel", "unloaded");
-	if (!was_quiescing)
+	if (!module_exit && !was_quiescing)
 		shadow_hook_quiesce(false);
 	return 0;
+}
+
+int vendor_kernel_exit(void)
+{
+	return __vendor_kernel_exit(false);
+}
+
+int vendor_kernel_module_exit(void)
+{
+	return __vendor_kernel_exit(true);
 }

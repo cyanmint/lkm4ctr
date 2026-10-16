@@ -970,6 +970,8 @@ static void vns_nsproxy_deferred_put_fn(struct work_struct *work)
 	llist_for_each_entry_safe(entry, tmp, node, node) {
 		vns_put_nsproxy(entry->ns); /* [RENAME] */
 		kfree(entry);
+		/* Keep the module pinned until this worker has finished the entry. */
+		module_put(THIS_MODULE);
 	}
 }
 static DECLARE_WORK(vns_nsproxy_deferred_put_work, vns_nsproxy_deferred_put_fn);
@@ -996,8 +998,16 @@ static void vns_nsproxy_put_deferred(struct nsproxy *ns)
 			"vns_nsproxy_put_deferred: kmalloc failed, leaking nsproxy %p", ns);
 		return;
 	}
+	if (!try_module_get(THIS_MODULE)) {
+		kfree(entry);
+		/* The nsproxy reference remains held, so leaking is safe. */
+		LKM4CTR_WARN(VENDOR_KERNEL_TAG,
+			"vns_nsproxy_put_deferred: module is exiting, leaking nsproxy %p", ns);
+		return;
+	}
 	entry->ns = ns;
 	llist_add(&entry->node, &vns_nsproxy_deferred_list);
+	/* A false result means an existing/running work item will drain the list. */
 	schedule_work(&vns_nsproxy_deferred_put_work);
 }
 

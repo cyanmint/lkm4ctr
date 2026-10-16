@@ -7,7 +7,7 @@
 #include "shadow_hook.h"
 
 int vendor_kernel_init(void);
-int vendor_kernel_exit(void);
+int vendor_kernel_module_exit(void);
 void vns_user_ns_exit(void);
 int lkm4ctr_hotreload_init(void);
 void lkm4ctr_hotreload_exit(void);
@@ -71,7 +71,7 @@ static void __exit lkm4ctr_exit(void)
 
 	lkm4ctr_diagfs_exit();
 	lkm4ctr_hotreload_exit();
-	ret = vendor_kernel_exit();
+	ret = vendor_kernel_module_exit();
 	if (ret)
 		LKM4CTR_ERR(LKM4CTR_TAG,
 			    "vendor_kernel teardown returned %d during module exit; active-object module pins should have prevented this state",
