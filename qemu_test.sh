@@ -117,6 +117,13 @@ lkm4ctr_post_use_rmmod_test() {
 			/busybox cat /lkm4ctr-rmmod-diag/v/references
 			/busybox cat /lkm4ctr-rmmod-diag/v/resources
 			/busybox cat /lkm4ctr-rmmod-diag/v/namespaces
+			echo "=== LKM4CTR_QEMU_TEST: processes at post-use unload failure ==="
+			/busybox ps
+			for proc in /proc/[0-9]*; do
+				[ -r "$proc/comm" ] || continue
+				printf 'pid=%s comm=' "${proc##*/}"
+				/busybox cat "$proc/comm"
+			done
 			/busybox umount /lkm4ctr-rmmod-diag || true
 		fi
 		/busybox cat /proc/mounts
