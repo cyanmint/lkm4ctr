@@ -61,6 +61,7 @@
 #include <linux/spinlock.h>
 #include <linux/smp.h>
 #include <linux/sched/task.h>
+#include <linux/sched/signal.h>
 #include <linux/llist.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
@@ -1047,8 +1048,22 @@ static void vns_task_exit_pidns_cleanup(struct task_struct *tsk)
 void vns_task_exit_cleanup(struct task_struct *tsk) /* [BUILD-COMPAT] */
 {
 	struct nsproxy *ns;
+	struct nsproxy *registry_ns;
 
 	vns_task_exit_pidns_cleanup(tsk);
+
+	/*
+	 * setns() keeps an extra nsproxy reference in the diagfs registry,
+	 * keyed by TGID. Release that reference when the last thread exits;
+	 * otherwise dead process groups pin their namespaces and this module
+	 * indefinitely. do_exit() decrements signal->live after exit_signals()
+	 * and before either exit_fs() or exit_task_namespaces().
+	 */
+	if (tsk->signal && atomic_read(&tsk->signal->live) == 0) {
+		registry_ns = vns_registry_take_nsproxy(task_tgid_nr(tsk));
+		if (registry_ns)
+			vns_nsproxy_put_deferred(registry_ns);
+	}
 
 	vns_prepare_exit_sem(tsk);
 	vns_prepare_exit_shm(tsk);

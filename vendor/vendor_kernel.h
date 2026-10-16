@@ -543,6 +543,8 @@ struct nsproxy *vns_current_nsproxy(void);
 struct ipc_namespace *vns_task_ipc_ns(struct task_struct *task);
 int vns_registry_set_nsproxy(pid_t tgid, struct nsproxy *nsproxy);
 void vns_registry_remove(pid_t tgid);
+/* Detach the TGID entry and transfer its owned nsproxy reference to caller. */
+struct nsproxy *vns_registry_take_nsproxy(pid_t tgid);
 void vns_registry_clone(pid_t parent_tgid, pid_t child_tgid);
 
 static inline struct ipc_namespace *vns_current_ipc_ns(void)

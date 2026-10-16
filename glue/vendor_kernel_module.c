@@ -114,7 +114,7 @@ int vns_registry_set_nsproxy(pid_t tgid, struct nsproxy *nsproxy)
 	return 0;
 }
 
-void vns_registry_remove(pid_t tgid)
+static struct vns_task *__vns_registry_detach(pid_t tgid)
 {
 	struct vns_task *t;
 	unsigned long flags;
@@ -127,11 +127,30 @@ void vns_registry_remove(pid_t tgid)
 			vendor_kernel_registry.task_count--;
 	}
 	spin_unlock_irqrestore(&vendor_kernel_registry.lock, flags);
+	return t;
+}
+
+void vns_registry_remove(pid_t tgid)
+{
+	struct vns_task *t = __vns_registry_detach(tgid);
+
 	if (!t)
 		return;
 	if (t->nsproxy)
 		vns_put_nsproxy(t->nsproxy);
 	kfree(t);
+}
+
+struct nsproxy *vns_registry_take_nsproxy(pid_t tgid)
+{
+	struct vns_task *t = __vns_registry_detach(tgid);
+	struct nsproxy *nsproxy;
+
+	if (!t)
+		return NULL;
+	nsproxy = t->nsproxy;
+	kfree(t);
+	return nsproxy;
 }
 
 void vns_registry_clone(pid_t parent_tgid, pid_t child_tgid)
@@ -455,6 +474,8 @@ int vendor_kernel_exit(void)
 	 */
 	vns_nsproxy_stop_begin();
 	vns_user_ns_stop_begin();
+	/* A task-exit callback may already have queued its final proxy put. */
+	vns_nsproxy_deferred_flush();
 	if (vns_nsproxy_live_count() > 0) {
 		LKM4CTR_WARN("vendor_kernel",
 			     "refusing stop while %d vendored nsproxy object(s) remain live",
@@ -468,6 +489,8 @@ int vendor_kernel_exit(void)
 		msleep(10);
 		waited_ms += 10;
 	}
+	/* Include deferred puts queued by hooks that drained above. */
+	vns_nsproxy_deferred_flush();
 	err = vns_user_ns_prepare_exit();
 	if (!err)
 		err = vns_ipc_namespace_prepare_exit();
@@ -550,6 +573,13 @@ int vendor_kernel_exit(void)
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
 	vns_exit_hook_exit();
 	vns_nsfs_lifecycle_exit();
+	/*
+	 * Quiesce-exempt lifecycle hooks may have entered after the preflight
+	 * snapshot. Hook removal closes admission; drain those already redirected
+	 * before flushing their deferred puts or clearing the TGID registry.
+	 */
+	while (shadow_hook_inflight_count() > 0)
+		msleep(10);
 	vns_nsproxy_deferred_flush();
 	vns_registry_clear_all();
 	vns_nsproxy_deferred_flush();
