@@ -38,8 +38,8 @@ hooks the shared path-acquisition helper and `nsfs_evict()`: before a successful
 path lookup can return a module-owned inode, it takes a module reference keyed
 by inode identity; eviction releases that reference only after the real
 `nsfs_evict()` has called the namespace's `put` callback. The path helper is
-`__ns_get_path()` through Android 6.6 and `path_from_stashed()` from Android
-6.12. Both hooks, including their in-flight return probes, are mandatory; if a
+`__ns_get_path()` through Android 6.6 and `path_from_stashed()` from Android 6.12.
+Both hooks, including their in-flight return probes, are mandatory; if a
 target kernel cannot resolve/install them, `vendor_kernel` initialization must
 fail closed. `/v/resources` reports the number of live or fail-safe-retained
 pins as `nsfs_inode_pins`. This complements, rather than replaces, the
@@ -49,6 +49,16 @@ released through the vendored refcount wrappers; teardown flushes it after
 deferred nsproxy and IPC-namespace releases. When native USER_NS is present,
 object-held module references also cover callbacks queued by native credential
 release on the system workqueue.
+
+When native PID namespace support is absent, the kernel's static level-0
+`init_pid_ns` has no `ns_common.ops` pointer (`CONFIG_PID_NS` guards its native
+initializer), although `nsfs_evict()` still dereferences that pointer. Before
+publishing the PID fallback symlink, the procfs hook installs
+`vns_pidns_operations` on that initial namespace only if the pointer is empty;
+unexpected non-empty state fails closed. This shared pointer holds an
+module-owned operations table only while the fallback is active. Existing
+procfs and NSFS inode pins protect callback lifetime; controlled stop removes
+the pointer only after those pins and in-flight hooks are drained.
 
 SysV IPC shutdown has its own fail-closed lifetime guards. Each live
 vendored SHM segment holds a module reference, both SHM file-operation tables
@@ -180,6 +190,14 @@ creating a real procfs symlink inode. The ordinary VFS path walk continues,
 so path permissions, LSM checks, symlink-follow checks, and nsfs behavior are
 not replaced by a syscall-level success result. If helper resolution fails,
 the missing component remains `ENOENT`.
+
+For PID fallback on `CONFIG_PID_NS=n`, `init_pid_ns.ns.ops` is NULL by the
+native kernel's configuration. The hook attaches the vendored PID namespace
+operations to that immortal initial namespace before instantiation; it does
+not overwrite another operations table or attach to unexpected namespace
+objects. The pointer is cleared during controlled stop after both procfs and
+NSFS inode pins have drained. Those inode pins protect active callbacks, so a
+normal `rmmod` can run the same teardown and clear the pointer.
 
 The procfs namespace inode itself keeps the selected `proc_ns_operations`
 pointer but has no module owner. Before instantiating a fallback inode, the

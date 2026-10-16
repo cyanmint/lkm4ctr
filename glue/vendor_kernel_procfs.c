@@ -35,6 +35,7 @@
 #include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/pid.h>
+#include <linux/pid_namespace.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -75,6 +76,8 @@ static DEFINE_HASHTABLE(vns_procfs_inode_pins,
 		VNS_PROCFS_INODE_PIN_HASH_BITS);
 static DEFINE_SPINLOCK(vns_procfs_inode_pins_lock);
 static atomic_t vns_procfs_inode_pin_count = ATOMIC_INIT(0);
+static DEFINE_SPINLOCK(vns_proc_init_pid_ns_ops_lock);
+static struct pid_namespace *vns_proc_init_pid_ns_ops_target;
 
 static struct dentry *(*vns_real_proc_ns_dir_lookup)(struct inode *dir,
 						     struct dentry *dentry,
@@ -205,6 +208,56 @@ static struct task_struct *vns_proc_ns_parent_task(struct dentry *parent)
 	return NULL;
 }
 
+/*
+ * CONFIG_PID_NS=n kernels still expose task_active_pid_ns(), but their
+ * initial pid_namespace may have no ns_common ops because native procfs does
+ * not publish the pid namespace link. nsfs unconditionally dereferences
+ * ns->ops when it tears down a namespace inode, so make the immortal level-0
+ * object usable by our normal proc_ns_operations path before publishing the
+ * fallback symlink. The fallback procfs inode and any resulting NSFS inode
+ * hold the module references while callbacks can run; controlled stop clears
+ * this pointer after both inode-pin sets have drained.
+ */
+static bool vns_procfs_compat_enable_init_pidns_ops(struct task_struct *task)
+{
+	struct pid_namespace *active;
+	const struct proc_ns_operations *ops;
+	unsigned long flags;
+	bool enabled = false;
+
+	rcu_read_lock();
+	active = task_active_pid_ns(task);
+	if (!active) {
+		rcu_read_unlock();
+		return false;
+	}
+	ops = READ_ONCE(active->ns.ops);
+	if (ops == &vns_pidns_operations) {
+		rcu_read_unlock();
+		return true;
+	}
+	if (ops || READ_ONCE(active->level) != 0 ||
+	    READ_ONCE(active->parent) || !active->ns.inum ||
+	    !active->user_ns) {
+		rcu_read_unlock();
+		return false;
+	}
+	rcu_read_unlock();
+
+	spin_lock_irqsave(&vns_proc_init_pid_ns_ops_lock, flags);
+	ops = READ_ONCE(active->ns.ops);
+	if (!ops && !vns_proc_init_pid_ns_ops_target) {
+		WRITE_ONCE(active->ns.ops, &vns_pidns_operations);
+		vns_proc_init_pid_ns_ops_target = active;
+		enabled = true;
+	} else if (ops == &vns_pidns_operations &&
+		   vns_proc_init_pid_ns_ops_target == active) {
+		enabled = true;
+	}
+	spin_unlock_irqrestore(&vns_proc_init_pid_ns_ops_lock, flags);
+	return enabled;
+}
+
 void vns_procfs_compat_resolve(void)
 {
 	vendor_kernel_proc_evict_inode_hook.quiesce_exempt = true;
@@ -270,6 +323,13 @@ static struct dentry *vendor_kernel_hook_proc_ns_dir_lookup(
 		put_task_struct(task);
 		return res;
 	}
+	if (ns_ops == &vns_pidns_operations &&
+	    !vns_procfs_compat_enable_init_pidns_ops(task)) {
+		kfree(candidate);
+		module_put(THIS_MODULE);
+		put_task_struct(task);
+		return res;
+	}
 	res = vns_proc_ns_instantiate_real(dentry, task, ns_ops);
 	put_task_struct(task);
 	if (IS_ERR(res)) {
@@ -315,6 +375,31 @@ int vns_procfs_compat_prepare_exit(void)
 		     "refusing stop while %d procfs namespace inode(s) retain module-owned namespace operations",
 		     pins);
 	return -EBUSY;
+}
+
+int vns_procfs_compat_detach_init_pidns_ops(void)
+{
+	struct pid_namespace *pid_ns;
+	unsigned long flags;
+
+	if (!shadow_hook_is_quiescing() || shadow_hook_inflight_count() ||
+	    atomic_read(&vns_procfs_inode_pin_count) ||
+	    vns_nsfs_lifecycle_pin_count())
+		return -EBUSY;
+
+	spin_lock_irqsave(&vns_proc_init_pid_ns_ops_lock, flags);
+	pid_ns = vns_proc_init_pid_ns_ops_target;
+	if (pid_ns) {
+		if (READ_ONCE(pid_ns->ns.ops) != &vns_pidns_operations) {
+			spin_unlock_irqrestore(&vns_proc_init_pid_ns_ops_lock,
+					       flags);
+			return -EBUSY;
+		}
+		WRITE_ONCE(pid_ns->ns.ops, NULL);
+		vns_proc_init_pid_ns_ops_target = NULL;
+	}
+	spin_unlock_irqrestore(&vns_proc_init_pid_ns_ops_lock, flags);
+	return 0;
 }
 
 #if defined(CONFIG_ARM64)

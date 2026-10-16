@@ -611,6 +611,22 @@ static int __vendor_kernel_exit(bool module_exit)
 		}
 	}
 
+	err = vns_procfs_compat_detach_init_pidns_ops();
+	if (err) {
+		if (!module_exit) {
+			vns_mqueue_dev_ensure();
+			if (!was_quiescing)
+				shadow_hook_quiesce(false);
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err;
+		}
+		LKM4CTR_WARN("vendor_kernel",
+			     "module exit continuing despite init pid namespace operations still being attached (error %d)",
+			     err);
+	}
+
 	vendor_kernel_enabled = false;
 	vns_overlay_exit();
 	shadow_hook_remove_all(vendor_kernel_userns_hooks);

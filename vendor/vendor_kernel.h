@@ -128,6 +128,7 @@ extern void (*vns_proc_free_inum_fn)(unsigned int);
 void vns_procfs_compat_resolve(void);
 bool vns_procfs_compat_active(void);
 int vns_procfs_compat_prepare_exit(void);
+int vns_procfs_compat_detach_init_pidns_ops(void);
 extern struct mnt_namespace *(*vns_copy_mnt_ns_fn)(unsigned long, struct mnt_namespace *, struct user_namespace *, struct fs_struct *);
 extern void (*vns_put_mnt_ns_fn)(struct mnt_namespace *);
 extern struct net *(*vns_copy_net_ns_fn)(unsigned long, struct user_namespace *, struct net *);
