@@ -182,14 +182,30 @@ running kernel's configuration, so those names are absent when the native
 options are disabled.
 
 `glue/vendor_kernel_procfs.c` hooks `proc_ns_dir_lookup()`. After the native
-lookup returns `-ENOENT` for `ipc` or `pid`, it retries only when the parent
-dentry is the current task's `/proc/self/ns` or `/proc/thread-self/ns`
-directory and native support for that namespace is absent. It calls
-procfs's own `proc_ns_instantiate()` with the vendored namespace operations,
-creating a real procfs symlink inode. The ordinary VFS path walk continues,
-so path permissions, LSM checks, symlink-follow checks, and nsfs behavior are
-not replaced by a syscall-level success result. If helper resolution fails,
-the missing component remains `ENOENT`.
+lookup returns `-ENOENT` for `ipc` or `pid`, it retries only when native
+support for that namespace is absent and the parent is a confirmed procfs
+namespace directory. For `/proc/<pid>/ns`, an inode-keyed side table records
+the `struct pid *` that native procfs used when `proc_pident_instantiate()`
+created the `ns` directory. The hook brackets that native instantiation with
+referenced `get_task_pid()` snapshots and records the identity only when the
+PID association stayed unchanged; it does not inspect private `proc_inode`
+layout or reconstruct a PID from a pathname. `/proc/self/ns` and
+`/proc/thread-self/ns` retain a current-task alias fallback when no side-table
+record is available. The namespace lookup then obtains the task from the
+saved PID object and calls procfs's own `proc_ns_instantiate()` with the
+vendored namespace operations, creating a real procfs symlink inode. The
+ordinary VFS path walk continues, so path permissions, LSM checks,
+symlink-follow checks, and nsfs behavior are not replaced by a syscall-level
+success result. If an identity or required helper is unavailable, the
+affected lookup remains `ENOENT`.
+
+The PID side table is cleaned by the native procfs inode-eviction hook and is
+cleared after compatibility hooks are quiesced and drained. It holds PID
+references, not task pointers or module callbacks. If a `/proc/<pid>/ns`
+directory inode was already cached before the compatibility hooks were
+installed, no exact PID mapping exists for it; arbitrary-PID fallback stays
+fail-closed until procfs recreates that directory. The `/proc/self` and
+`/proc/thread-self` aliases remain independently supported in that case.
 
 For PID fallback on `CONFIG_PID_NS=n`, `init_pid_ns.ns.ops` is NULL by the
 native kernel's configuration. The hook attaches the vendored PID namespace
@@ -213,16 +229,17 @@ are available.
 Droidspaces' `access("/proc/self/ns/{ipc,pid}", F_OK)` probe and the
 checker's self-path diagnostics therefore exercise this real lookup path.
 The compatibility is deliberately limited: it does not add these names to
-directory enumeration, and it does not provide `/proc/<other-pid>/ns/{ipc,pid}`
-when the native entries are absent. The previous readlink/stat/open fallbacks
-for IPC/PID were removed because a syscall's `-ENOENT` cannot distinguish a
-missing entry from path, permission, or LSM denial. In particular, opening
-another task's namespace remains unavailable on a kernel without native
-support; no permission check is bypassed to emulate it.
+directory enumeration, and arbitrary-PID fallback requires a target identity
+captured when procfs creates that task's `ns` directory. The previous
+readlink/stat/open fallbacks for IPC/PID were removed because a syscall's
+`-ENOENT` cannot distinguish a missing entry from path, permission, or LSM
+denial. No permission check is bypassed to emulate namespace links.
 
-The procfs compatibility hook is best-effort/non-fatal (a resolution failure
-only logs a warning), so it does not block `vendor_kernel`'s core namespace
-functionality from loading.
+The procfs compatibility hooks are best-effort/non-fatal (a resolution
+failure only logs a warning), so they do not block `vendor_kernel`'s core
+namespace functionality from loading. Target-PID capture is installed
+independently of the optional lookup-hook group so inode identity tracking
+and eviction cleanup remain paired if that group is toggled at runtime.
 Only IPC and PID get this treatment: `UTS`/`USER` are likewise vendored
 unconditionally of their respective `CONFIG_*_NS` option, but no device has
 been observed lacking `CONFIG_UTS_NS`/`CONFIG_USER_NS` while also lacking

@@ -382,6 +382,16 @@ int vendor_kernel_init(void)
 	}
 	total_hooked = hooked;
 
+	/* Keep procfs PID identity capture and inode-eviction tracking live
+	 * independently of the optional lookup-hook group, so namespace-directory
+	 * entries created while compatibility is live are mapped and cleaned.
+	 */
+	hooked = vns_procfs_compat_lifecycle_init();
+	if (hooked)
+		LKM4CTR_WARN("vendor_kernel",
+			     "procfs namespace lifecycle hooks unavailable (%d); missing native namespace entries remain fail-closed",
+			     hooked);
+
 	/* Best-effort: without the procfs lookup hook, absent native IPC/PID
 	 * namespace components remain ENOENT; no syscall result is fabricated.
 	 */
@@ -631,6 +641,7 @@ static int __vendor_kernel_exit(bool module_exit)
 	vns_overlay_exit();
 	shadow_hook_remove_all(vendor_kernel_userns_hooks);
 	shadow_hook_remove_all(vendor_kernel_procfs_hooks);
+	vns_procfs_compat_lifecycle_exit();
 	shadow_hook_remove_all(vendor_kernel_ipc_hooks);
 	shadow_hook_remove_all(vendor_kernel_core_hooks);
 	vns_exit_hook_exit();
@@ -653,6 +664,7 @@ static int __vendor_kernel_exit(bool module_exit)
 		while (shadow_hook_inflight_count() > 0)
 			msleep(10);
 	}
+	vns_procfs_compat_clear_task_pid_map();
 	if (module_exit && shadow_hook_inflight_count() > 0) {
 		char hooks[512] = { 0 };
 

@@ -139,6 +139,20 @@ lkm4ctr_proc_ns_check_after_load() {
 			proc_ns_failed=1
 		fi
 	done
+	# Container runtimes also inspect namespace links through /proc/<pid>;
+	# exercise that path separately from the /proc/self alias check above.
+	/busybox sleep 30 &
+	proc_ns_target_pid=$!
+	for proc_ns_name in ipc pid; do
+		if [ -L "/proc/$proc_ns_target_pid/ns/$proc_ns_name" ]; then
+			echo "PROC_NS_PID_LINK_PASS: pid=$proc_ns_target_pid ns=$proc_ns_name"
+		else
+			echo "PROC_NS_PID_LINK_FAIL: pid=$proc_ns_target_pid ns=$proc_ns_name"
+			proc_ns_failed=1
+		fi
+	done
+	/busybox kill "$proc_ns_target_pid" 2>/dev/null || true
+	wait "$proc_ns_target_pid" 2>/dev/null || true
 	if lkm4ctr_proc_ns_fallback_required; then
 		if [ "$proc_ns_fallback_count" -eq 0 ]; then
 			echo "PROC_NS_FALLBACK_REQUIRED_FAILED: no IPC/PID path appeared after insmod"

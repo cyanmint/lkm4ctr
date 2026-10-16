@@ -6,15 +6,17 @@
  * procfs compiles its namespace directory entries into ns_entries[];
  * CONFIG_IPC_NS=n or CONFIG_PID_NS=n therefore makes the component lookup
  * return -ENOENT even though vendor_kernel has real namespace objects. The
- * proc_ns_dir_lookup hook retries only that missing component for the
- * current task's /proc/self/ns or /proc/thread-self/ns directory and calls
- * procfs's own proc_ns_instantiate(). This creates a normal procfs symlink;
- * subsequent VFS, LSM, ptrace, and nsfs handling is unchanged.
+ * The proc_ns_dir_lookup hook retries only that missing component for a
+ * procfs namespace directory whose exact PID identity was captured from
+ * procfs's native parent-directory instantiation (or a current-task alias)
+ * and calls procfs's own proc_ns_instantiate(). This creates a normal procfs
+ * symlink; subsequent VFS, LSM, ptrace, and nsfs handling is unchanged.
  * Since procfs inodes do not pin module-owned proc_ns_operations, each
  * fallback inode holds a module reference until proc_evict_inode() completes.
  * The created dentry is unhashed immediately so ordinary lookups do not
  * leave a cached inode pinning the module until unrelated dcache reclaim. If
- * either lifetime helper is unavailable, lookup remains fail-closed.
+ * a required helper or target-PID capture is unavailable, the affected
+ * lookup remains fail-closed.
  *
  * No readlink/stat/open syscall result is fabricated for IPC/PID paths.
  * Those syscall fallbacks cannot distinguish a missing procfs entry from
@@ -52,6 +54,11 @@
 typedef struct dentry *(*vns_proc_ns_instantiate_fn_t)(struct dentry *,
 						       struct task_struct *,
 						       const void *);
+typedef struct dentry *(*vns_proc_pident_instantiate_fn_t)(struct dentry *,
+							    struct task_struct *,
+							    const void *);
+typedef struct pid *(*vns_proc_get_task_pid_fn_t)(struct task_struct *,
+							 enum pid_type);
 typedef int (*vns_proc_kern_path_fn_t)(const char *, unsigned int,
 				       struct path *);
 typedef void (*vns_proc_path_put_fn_t)(const struct path *);
@@ -59,13 +66,22 @@ typedef void (*vns_proc_evict_inode_fn_t)(struct inode *);
 typedef void (*vns_proc_d_drop_fn_t)(struct dentry *);
 
 #define VNS_PROCFS_INODE_PIN_HASH_BITS 6
+#define VNS_PROCFS_TASK_PID_HASH_BITS 6
 
 struct vns_procfs_inode_pin {
 	struct hlist_node node;
 	struct inode *inode;
 };
 
+struct vns_procfs_task_pid {
+	struct hlist_node node;
+	struct inode *inode;
+	struct pid *pid;
+};
+
 static vns_proc_ns_instantiate_fn_t vns_proc_ns_instantiate_real;
+static vns_proc_pident_instantiate_fn_t vns_proc_pident_instantiate_real;
+static vns_proc_get_task_pid_fn_t vns_proc_get_task_pid_real;
 static vns_proc_kern_path_fn_t vns_proc_kern_path_real;
 static vns_proc_path_put_fn_t vns_proc_path_put_real;
 static vns_proc_evict_inode_fn_t vns_proc_evict_inode_real;
@@ -76,6 +92,9 @@ static DEFINE_HASHTABLE(vns_procfs_inode_pins,
 		VNS_PROCFS_INODE_PIN_HASH_BITS);
 static DEFINE_SPINLOCK(vns_procfs_inode_pins_lock);
 static atomic_t vns_procfs_inode_pin_count = ATOMIC_INIT(0);
+static DEFINE_HASHTABLE(vns_procfs_task_pids, VNS_PROCFS_TASK_PID_HASH_BITS);
+static DEFINE_SPINLOCK(vns_procfs_task_pids_lock);
+static atomic_t vns_procfs_task_pid_count = ATOMIC_INIT(0);
 static DEFINE_SPINLOCK(vns_proc_init_pid_ns_ops_lock);
 static struct pid_namespace *vns_proc_init_pid_ns_ops_target;
 
@@ -153,10 +172,115 @@ static void vns_procfs_unpin_inode(struct inode *inode)
 	module_put(THIS_MODULE);
 }
 
+static void vns_procfs_map_task_pid(struct inode *inode, struct pid *pid)
+{
+	struct vns_procfs_task_pid *candidate;
+	struct vns_procfs_task_pid *entry;
+	unsigned long flags;
+
+	candidate = kmalloc(sizeof(*candidate), GFP_KERNEL);
+	if (!candidate) {
+		put_pid(pid);
+		return;
+	}
+	candidate->inode = inode;
+	candidate->pid = pid;
+
+	spin_lock_irqsave(&vns_procfs_task_pids_lock, flags);
+	hash_for_each_possible(vns_procfs_task_pids, entry, node,
+			       (unsigned long)inode) {
+		if (entry->inode == inode) {
+			struct pid *old_pid = entry->pid;
+
+			entry->pid = candidate->pid;
+			candidate->pid = NULL;
+			spin_unlock_irqrestore(&vns_procfs_task_pids_lock, flags);
+			put_pid(old_pid);
+			kfree(candidate);
+			return;
+		}
+	}
+	hash_add(vns_procfs_task_pids, &candidate->node, (unsigned long)inode);
+	atomic_inc(&vns_procfs_task_pid_count);
+	spin_unlock_irqrestore(&vns_procfs_task_pids_lock, flags);
+}
+
+static struct task_struct *vns_procfs_task_for_inode(struct inode *inode)
+{
+	struct vns_procfs_task_pid *entry;
+	struct pid *pid = NULL;
+	struct task_struct *task;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_procfs_task_pids_lock, flags);
+	hash_for_each_possible(vns_procfs_task_pids, entry, node,
+			       (unsigned long)inode) {
+		if (entry->inode == inode) {
+			pid = get_pid(entry->pid);
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_procfs_task_pids_lock, flags);
+	if (!pid)
+		return NULL;
+
+	task = get_pid_task(pid, PIDTYPE_PID);
+	put_pid(pid);
+	return task;
+}
+
+static void vns_procfs_unmap_task_pid(struct inode *inode)
+{
+	struct vns_procfs_task_pid *entry;
+	struct vns_procfs_task_pid *found = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_procfs_task_pids_lock, flags);
+	hash_for_each_possible(vns_procfs_task_pids, entry, node,
+			       (unsigned long)inode) {
+		if (entry->inode == inode) {
+			hash_del(&entry->node);
+			found = entry;
+			atomic_dec(&vns_procfs_task_pid_count);
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_procfs_task_pids_lock, flags);
+
+	if (found) {
+		put_pid(found->pid);
+		kfree(found);
+	}
+}
+
+void vns_procfs_compat_clear_task_pid_map(void)
+{
+	HLIST_HEAD(removed);
+	struct vns_procfs_task_pid *entry;
+	struct hlist_node *tmp;
+	unsigned long flags;
+	int bucket;
+
+	spin_lock_irqsave(&vns_procfs_task_pids_lock, flags);
+	hash_for_each_safe(vns_procfs_task_pids, bucket, tmp, entry, node) {
+		hash_del(&entry->node);
+		hlist_add_head(&entry->node, &removed);
+		atomic_dec(&vns_procfs_task_pid_count);
+	}
+	spin_unlock_irqrestore(&vns_procfs_task_pids_lock, flags);
+
+	hlist_for_each_entry_safe(entry, tmp, &removed, node) {
+		hlist_del_init(&entry->node);
+		put_pid(entry->pid);
+		kfree(entry);
+	}
+}
+
 static void vendor_kernel_hook_proc_evict_inode(struct inode *inode)
 {
 	/* proc_evict_inode() clears proc-specific state before releasing our pin. */
 	vns_proc_evict_inode_real(inode);
+	vns_procfs_unmap_task_pid(inode);
 	vns_procfs_unpin_inode(inode);
 }
 
@@ -169,6 +293,61 @@ static struct shadow_hook vendor_kernel_proc_evict_inode_hook =
 	SHADOW_HOOK(vendor_kernel_proc_evict_inode_names,
 		    vendor_kernel_hook_proc_evict_inode,
 		    &vns_proc_evict_inode_real);
+
+static struct dentry *vendor_kernel_hook_proc_pident_instantiate(
+	struct dentry *dentry, struct task_struct *task, const void *ptr)
+{
+	struct pid *pid_before = NULL;
+	struct pid *pid_after = NULL;
+	struct inode *inode;
+	struct dentry *res;
+
+	if (!vns_proc_pident_instantiate_real)
+		return ERR_PTR(-ENOENT);
+	if (!dentry || !dentry->d_sb ||
+	    dentry->d_sb->s_magic != PROC_SUPER_MAGIC ||
+	    dentry->d_name.len != 2 || memcmp(dentry->d_name.name, "ns", 2) ||
+	    !vns_proc_get_task_pid_real)
+		return vns_proc_pident_instantiate_real(dentry, task, ptr);
+
+	/*
+	 * proc_pid_make_inode() stores get_task_pid(task, PIDTYPE_PID) in the
+	 * proc inode. Bracket the native instantiation and keep that identity
+	 * only if the task's PID association stayed unchanged throughout it;
+	 * de_thread() can exchange a task's PID, so a task pointer alone is not
+	 * an equivalent substitute for the PID reference procfs stores.
+	 */
+	pid_before = vns_proc_get_task_pid_real(task, PIDTYPE_PID);
+	res = vns_proc_pident_instantiate_real(dentry, task, ptr);
+	if (IS_ERR(res) || !pid_before)
+		goto out;
+	inode = d_inode(res ? res : dentry);
+	if (!inode || !S_ISDIR(inode->i_mode))
+		goto out;
+	pid_after = vns_proc_get_task_pid_real(task, PIDTYPE_PID);
+	if (pid_after != pid_before)
+		goto out;
+	put_pid(pid_after);
+	pid_after = NULL;
+	vns_procfs_map_task_pid(inode, pid_before);
+	pid_before = NULL;
+out:
+	if (pid_after)
+		put_pid(pid_after);
+	if (pid_before)
+		put_pid(pid_before);
+	return res;
+}
+
+static const char * const vendor_kernel_proc_pident_instantiate_names[] = {
+	"proc_pident_instantiate",
+	NULL,
+};
+
+static struct shadow_hook vendor_kernel_proc_pident_instantiate_hook =
+	SHADOW_HOOK(vendor_kernel_proc_pident_instantiate_names,
+		    vendor_kernel_hook_proc_pident_instantiate,
+		    &vns_proc_pident_instantiate_real);
 
 static struct task_struct *vns_proc_ns_parent_task(struct dentry *parent)
 {
@@ -264,6 +443,11 @@ void vns_procfs_compat_resolve(void)
 	vns_proc_native_ipc_ns = !!shadow_hook_resolve("copy_ipcs");
 	vns_proc_ns_instantiate_real = (vns_proc_ns_instantiate_fn_t)
 		shadow_hook_resolve("proc_ns_instantiate");
+	vns_proc_pident_instantiate_real =
+		(vns_proc_pident_instantiate_fn_t)
+		shadow_hook_resolve("proc_pident_instantiate");
+	vns_proc_get_task_pid_real = (vns_proc_get_task_pid_fn_t)
+		shadow_hook_resolve("get_task_pid");
 	vns_proc_kern_path_real = (vns_proc_kern_path_fn_t)
 		shadow_hook_resolve("kern_path");
 	vns_proc_path_put_real = (vns_proc_path_put_fn_t)
@@ -275,6 +459,37 @@ void vns_procfs_compat_resolve(void)
 	vns_proc_ns_entry_fallback_ready = vns_proc_ns_instantiate_real &&
 		vns_proc_kern_path_real && vns_proc_path_put_real &&
 		vns_proc_evict_inode_real && vns_proc_d_drop_real;
+}
+
+int vns_procfs_compat_lifecycle_init(void)
+{
+	int err;
+
+	if (vns_proc_native_ipc_ns && READ_ONCE(vns_pidns_runtime_supported))
+		return 0;
+	if (!vns_proc_ns_entry_fallback_ready)
+		return -ENOENT;
+
+	err = shadow_hook_install(&vendor_kernel_proc_evict_inode_hook);
+	if (err)
+		return err;
+	if (!vns_proc_pident_instantiate_real || !vns_proc_get_task_pid_real) {
+		LKM4CTR_WARN("vendor_kernel",
+			     "procfs target-PID capture is unavailable; /proc/self aliases remain supported, but arbitrary-PID fallback stays fail-closed");
+		return 0;
+	}
+	err = shadow_hook_install(&vendor_kernel_proc_pident_instantiate_hook);
+	if (err)
+		LKM4CTR_WARN("vendor_kernel",
+			     "procfs target-PID capture hook is unavailable (%d); /proc/self aliases remain supported, but arbitrary-PID fallback stays fail-closed",
+			     err);
+	return 0;
+}
+
+void vns_procfs_compat_lifecycle_exit(void)
+{
+	shadow_hook_remove(&vendor_kernel_proc_pident_instantiate_hook);
+	shadow_hook_remove(&vendor_kernel_proc_evict_inode_hook);
 }
 
 static struct dentry *vendor_kernel_hook_proc_ns_dir_lookup(
@@ -311,10 +526,13 @@ static struct dentry *vendor_kernel_hook_proc_ns_dir_lookup(
 	if (native)
 		return res;
 
-	/* Match the actual parent dentry to the current task's procfs alias. */
+	/* Preserve the exact PID object procfs used for this ns directory. */
 	if (!dentry->d_parent || d_inode(dentry->d_parent) != dir)
 		return res;
-	task = vns_proc_ns_parent_task(dentry->d_parent);
+	task = vns_procfs_task_for_inode(dir);
+	if (!task)
+		/* Keep the late-loaded self/thread-self compatibility path. */
+		task = vns_proc_ns_parent_task(dentry->d_parent);
 	if (!task)
 		return res;
 	candidate = kmalloc(sizeof(*candidate), GFP_KERNEL);
@@ -626,7 +844,6 @@ static struct shadow_hook vendor_kernel_open_hook =
 		    &real_sys_open);
 
 struct shadow_hook *vendor_kernel_procfs_hooks[] = {
-	&vendor_kernel_proc_evict_inode_hook,
 	&vendor_kernel_proc_ns_dir_lookup_hook,
 	&vendor_kernel_openat2_hook,
 	&vendor_kernel_openat_hook,
