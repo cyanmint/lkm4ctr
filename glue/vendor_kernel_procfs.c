@@ -54,9 +54,9 @@
 typedef struct dentry *(*vns_proc_ns_instantiate_fn_t)(struct dentry *,
 						       struct task_struct *,
 						       const void *);
-typedef struct dentry *(*vns_proc_pident_instantiate_fn_t)(struct dentry *,
-							    struct task_struct *,
-							    const void *);
+typedef struct inode *(*vns_proc_pid_make_inode_fn_t)(struct super_block *,
+						       struct task_struct *,
+						       umode_t);
 typedef struct pid *(*vns_proc_get_task_pid_fn_t)(struct task_struct *,
 							 enum pid_type);
 typedef int (*vns_proc_kern_path_fn_t)(const char *, unsigned int,
@@ -80,7 +80,7 @@ struct vns_procfs_task_pid {
 };
 
 static vns_proc_ns_instantiate_fn_t vns_proc_ns_instantiate_real;
-static vns_proc_pident_instantiate_fn_t vns_proc_pident_instantiate_real;
+static vns_proc_pid_make_inode_fn_t vns_proc_pid_make_inode_real;
 static vns_proc_get_task_pid_fn_t vns_proc_get_task_pid_real;
 static vns_proc_kern_path_fn_t vns_proc_kern_path_real;
 static vns_proc_path_put_fn_t vns_proc_path_put_real;
@@ -294,38 +294,34 @@ static struct shadow_hook vendor_kernel_proc_evict_inode_hook =
 		    vendor_kernel_hook_proc_evict_inode,
 		    &vns_proc_evict_inode_real);
 
-static struct dentry *vendor_kernel_hook_proc_pident_instantiate(
-	struct dentry *dentry, struct task_struct *task, const void *ptr)
+static struct inode *vendor_kernel_hook_proc_pid_make_inode(
+	struct super_block *sb, struct task_struct *task, umode_t mode)
 {
 	struct pid *pid_before = NULL;
 	struct pid *pid_after = NULL;
 	struct inode *inode;
-	struct dentry *res;
 
-	if (!vns_proc_pident_instantiate_real)
-		return ERR_PTR(-ENOENT);
-	if (!dentry || !dentry->d_sb ||
-	    dentry->d_sb->s_magic != PROC_SUPER_MAGIC ||
-	    dentry->d_name.len != 2 || memcmp(dentry->d_name.name, "ns", 2) ||
+	if (!vns_proc_pid_make_inode_real)
+		return NULL;
+	if (!sb || sb->s_magic != PROC_SUPER_MAGIC || !S_ISDIR(mode) ||
 	    !vns_proc_get_task_pid_real)
-		return vns_proc_pident_instantiate_real(dentry, task, ptr);
+		return vns_proc_pid_make_inode_real(sb, task, mode);
 
 	/*
-	 * proc_pid_make_inode() stores get_task_pid(task, PIDTYPE_PID) in the
-	 * proc inode. Bracket the native instantiation and keep that identity
-	 * only if the task's PID association stayed unchanged throughout it;
-	 * de_thread() can exchange a task's PID, so a task pointer alone is not
-	 * an equivalent substitute for the PID reference procfs stores.
+	 * proc_pid_make_inode() stores get_task_pid(task, PIDTYPE_PID) in every
+	 * process-specific proc inode. Capture directory inodes here rather than
+	 * hooking proc_pident_instantiate(): LTO may inline that helper into the
+	 * pathname lookup while retaining only its readdir callback copy, so the
+	 * latter hook can install successfully yet miss /proc/<pid>/ns lookup.
+	 * Bracket the native constructor and retain the identity only if the task's
+	 * PID association stayed unchanged; de_thread() can exchange a task's PID.
 	 */
 	pid_before = vns_proc_get_task_pid_real(task, PIDTYPE_PID);
-	res = vns_proc_pident_instantiate_real(dentry, task, ptr);
-	if (IS_ERR(res) || !pid_before)
-		goto out;
-	inode = d_inode(res ? res : dentry);
-	if (!inode || !S_ISDIR(inode->i_mode))
+	inode = vns_proc_pid_make_inode_real(sb, task, mode);
+	if (!inode || !pid_before)
 		goto out;
 	pid_after = vns_proc_get_task_pid_real(task, PIDTYPE_PID);
-	if (pid_after != pid_before)
+	if (!pid_after || pid_after != pid_before)
 		goto out;
 	put_pid(pid_after);
 	pid_after = NULL;
@@ -336,18 +332,18 @@ out:
 		put_pid(pid_after);
 	if (pid_before)
 		put_pid(pid_before);
-	return res;
+	return inode;
 }
 
-static const char * const vendor_kernel_proc_pident_instantiate_names[] = {
-	"proc_pident_instantiate",
+static const char * const vendor_kernel_proc_pid_make_inode_names[] = {
+	"proc_pid_make_inode",
 	NULL,
 };
 
-static struct shadow_hook vendor_kernel_proc_pident_instantiate_hook =
-	SHADOW_HOOK(vendor_kernel_proc_pident_instantiate_names,
-		    vendor_kernel_hook_proc_pident_instantiate,
-		    &vns_proc_pident_instantiate_real);
+static struct shadow_hook vendor_kernel_proc_pid_make_inode_hook =
+	SHADOW_HOOK(vendor_kernel_proc_pid_make_inode_names,
+		    vendor_kernel_hook_proc_pid_make_inode,
+		    &vns_proc_pid_make_inode_real);
 
 static struct task_struct *vns_proc_ns_parent_task(struct dentry *parent)
 {
@@ -443,9 +439,9 @@ void vns_procfs_compat_resolve(void)
 	vns_proc_native_ipc_ns = !!shadow_hook_resolve("copy_ipcs");
 	vns_proc_ns_instantiate_real = (vns_proc_ns_instantiate_fn_t)
 		shadow_hook_resolve("proc_ns_instantiate");
-	vns_proc_pident_instantiate_real =
-		(vns_proc_pident_instantiate_fn_t)
-		shadow_hook_resolve("proc_pident_instantiate");
+	vns_proc_pid_make_inode_real =
+		(vns_proc_pid_make_inode_fn_t)
+		shadow_hook_resolve("proc_pid_make_inode");
 	vns_proc_get_task_pid_real = (vns_proc_get_task_pid_fn_t)
 		shadow_hook_resolve("get_task_pid");
 	vns_proc_kern_path_real = (vns_proc_kern_path_fn_t)
@@ -473,12 +469,12 @@ int vns_procfs_compat_lifecycle_init(void)
 	err = shadow_hook_install(&vendor_kernel_proc_evict_inode_hook);
 	if (err)
 		return err;
-	if (!vns_proc_pident_instantiate_real || !vns_proc_get_task_pid_real) {
+	if (!vns_proc_pid_make_inode_real || !vns_proc_get_task_pid_real) {
 		LKM4CTR_WARN("vendor_kernel",
 			     "procfs target-PID capture is unavailable; /proc/self aliases remain supported, but arbitrary-PID fallback stays fail-closed");
 		return 0;
 	}
-	err = shadow_hook_install(&vendor_kernel_proc_pident_instantiate_hook);
+	err = shadow_hook_install(&vendor_kernel_proc_pid_make_inode_hook);
 	if (err)
 		LKM4CTR_WARN("vendor_kernel",
 			     "procfs target-PID capture hook is unavailable (%d); /proc/self aliases remain supported, but arbitrary-PID fallback stays fail-closed",
@@ -488,7 +484,7 @@ int vns_procfs_compat_lifecycle_init(void)
 
 void vns_procfs_compat_lifecycle_exit(void)
 {
-	shadow_hook_remove(&vendor_kernel_proc_pident_instantiate_hook);
+	shadow_hook_remove(&vendor_kernel_proc_pid_make_inode_hook);
 	shadow_hook_remove(&vendor_kernel_proc_evict_inode_hook);
 }
 

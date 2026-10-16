@@ -149,7 +149,20 @@ lkm4ctr_proc_ns_check_after_load() {
 		else
 			echo "PROC_NS_PID_LINK_FAIL: pid=$proc_ns_target_pid ns=$proc_ns_name"
 			proc_ns_failed=1
+			continue
 		fi
+		proc_ns_link_target=$(/busybox readlink \
+			"/proc/$proc_ns_target_pid/ns/$proc_ns_name" 2>/dev/null) ||
+			proc_ns_link_target=
+		case "$proc_ns_link_target" in
+			"$proc_ns_name:"*)
+				echo "PROC_NS_PID_READLINK_PASS: pid=$proc_ns_target_pid ns=$proc_ns_name target=$proc_ns_link_target"
+				;;
+			*)
+				echo "PROC_NS_PID_READLINK_FAIL: pid=$proc_ns_target_pid ns=$proc_ns_name target=${proc_ns_link_target:-unavailable}"
+				proc_ns_failed=1
+				;;
+		esac
 	done
 	/busybox kill "$proc_ns_target_pid" 2>/dev/null || true
 	wait "$proc_ns_target_pid" 2>/dev/null || true
@@ -254,7 +267,7 @@ lkm4ctr_run_checker_mode() {
 		return 1
 	fi
 	if ! lkm4ctr_proc_ns_check_after_load; then
-		echo "QEMU_TEST_FAILED: /proc/self/ns/{ipc,pid} unavailable after insmod"
+		echo "QEMU_TEST_FAILED: IPC/PID namespace links unavailable after insmod"
 		return 1
 	fi
 	echo "=== LKM4CTR_QEMU_TEST: mounting lkm4ctr diagfs ==="

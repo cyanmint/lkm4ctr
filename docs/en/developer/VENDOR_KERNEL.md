@@ -185,11 +185,15 @@ options are disabled.
 lookup returns `-ENOENT` for `ipc` or `pid`, it retries only when native
 support for that namespace is absent and the parent is a confirmed procfs
 namespace directory. For `/proc/<pid>/ns`, an inode-keyed side table records
-the `struct pid *` that native procfs used when `proc_pident_instantiate()`
-created the `ns` directory. The hook brackets that native instantiation with
-referenced `get_task_pid()` snapshots and records the identity only when the
-PID association stayed unchanged; it does not inspect private `proc_inode`
-layout or reconstruct a PID from a pathname. `/proc/self/ns` and
+the `struct pid *` that native procfs used when `proc_pid_make_inode()`
+created a process-specific directory inode. This constructor hook is used
+instead of `proc_pident_instantiate()`: LTO can inline the latter into the
+pathname-lookup path while retaining its readdir callback copy, causing an
+otherwise-installed hook to miss `/proc/<pid>/ns` lookups. The hook brackets
+native inode construction with referenced `get_task_pid()` snapshots and
+records the identity only when the PID association stayed unchanged; it does
+not inspect private `proc_inode` layout or reconstruct a PID from a pathname.
+`/proc/self/ns` and
 `/proc/thread-self/ns` retain a current-task alias fallback when no side-table
 record is available. The namespace lookup then obtains the task from the
 saved PID object and calls procfs's own `proc_ns_instantiate()` with the
