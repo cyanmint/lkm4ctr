@@ -43,6 +43,7 @@
 #include "../vendor/vendor_kernel.h"
 #include "shadow_hook.h"
 #include "lkm4ctr_compat.h"
+#include "lkm4ctr_log.h"
 
 #define VNS_PROC_NS_IPC_NAME	"ipc"
 #define VNS_PROC_NS_PID_NAME	"pid"
