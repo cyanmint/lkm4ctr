@@ -111,6 +111,15 @@ lkm4ctr_post_use_rmmod_test() {
 	done
 	if [ "$module_refs" != "0" ]; then
 		echo "RMMOD_TEST_FAILED: module references did not drain after workload cleanup: ${module_refs:-missing}"
+		if /busybox mkdir -p /lkm4ctr-rmmod-diag &&
+		   /busybox mount -t lkm4ctr diag /lkm4ctr-rmmod-diag; then
+			echo "=== LKM4CTR_QEMU_TEST: outstanding module-reference breakdown ==="
+			/busybox cat /lkm4ctr-rmmod-diag/v/references
+			/busybox cat /lkm4ctr-rmmod-diag/v/resources
+			/busybox cat /lkm4ctr-rmmod-diag/v/namespaces
+			/busybox umount /lkm4ctr-rmmod-diag || true
+		fi
+		/busybox cat /proc/mounts
 		/busybox cat /proc/modules
 		return 1
 	fi
