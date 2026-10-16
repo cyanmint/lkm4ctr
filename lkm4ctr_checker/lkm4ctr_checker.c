@@ -728,6 +728,57 @@ static bool shadow_checker_read_ns_id(pid_t pid, const char *type, char *out,
 	return true;
 }
 
+static void shadow_checker_proc_ns_access(const char *type)
+{
+	char path[64];
+
+	snprintf(path, sizeof(path), "/proc/self/ns/%s", type);
+	if (access(path, F_OK) == 0)
+		shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_access (IPC)" :
+				      "proc_ns_access (PID)", SHADOW_CHECKER_PASS,
+				      "access(%s, F_OK) succeeded", path);
+	else
+		shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_access (IPC)" :
+				      "proc_ns_access (PID)", SHADOW_CHECKER_FAIL,
+				      "access(%s, F_OK): %s", path,
+				      strerror(errno));
+}
+
+static void shadow_checker_proc_ns_nofollow(const char *type)
+{
+	char path[64];
+	struct stat st;
+	int fd, saved_errno;
+
+	snprintf(path, sizeof(path), "/proc/self/ns/%s", type);
+	fd = open(path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) {
+		shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_link (IPC)" :
+				      "proc_ns_link (PID)", SHADOW_CHECKER_FAIL,
+				      "open(%s, O_PATH|O_NOFOLLOW): %s", path,
+				      strerror(errno));
+		return;
+	}
+	if (fstat(fd, &st)) {
+		saved_errno = errno;
+		close(fd);
+		shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_link (IPC)" :
+				      "proc_ns_link (PID)", SHADOW_CHECKER_FAIL,
+				      "fstat(%s): %s", path, strerror(saved_errno));
+		return;
+	}
+	close(fd);
+	if (!S_ISLNK(st.st_mode)) {
+		shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_link (IPC)" :
+				      "proc_ns_link (PID)", SHADOW_CHECKER_FAIL,
+				      "%s did not open as a symlink with O_NOFOLLOW", path);
+		return;
+	}
+	shadow_checker_report(!strcmp(type, "ipc") ? "proc_ns_link (IPC)" :
+			      "proc_ns_link (PID)", SHADOW_CHECKER_PASS,
+			      "O_PATH|O_NOFOLLOW opened the procfs namespace symlink");
+}
+
 static void shadow_checker_generic_ns(const char *label, const char *ns_file,
 				       int clone_flag)
 {
@@ -2232,7 +2283,7 @@ int main(int argc, char **argv)
 	if (!g_quiet) {
 		printf("lkm4ctr_checker v%s - userspace container-isolation diagnostics\n",
 		       LKM4CTR_CHECKER_VERSION);
-		printf("PASS = real isolation observed, STUB = bookkeeping only (no real isolation), FAIL = syscall itself failed\n");
+		printf("PASS = test-specific behavior verified (isolation where applicable), STUB = bookkeeping only, FAIL = syscall itself failed\n");
 		printf("--------------------------------------------------------------------------------------------------------\n");
 	}
 
@@ -2246,6 +2297,10 @@ int main(int argc, char **argv)
 	shadow_checker_wait();
 	shadow_checker_user();
 	shadow_checker_user_idmap();
+	shadow_checker_proc_ns_access("ipc");
+	shadow_checker_proc_ns_access("pid");
+	shadow_checker_proc_ns_nofollow("ipc");
+	shadow_checker_proc_ns_nofollow("pid");
 	shadow_checker_generic_ns("ns_ipc (IPC)", "ipc", CLONE_NEWIPC);
 	shadow_checker_clone_newipc();
 	shadow_checker_generic_ns("ns_net (NET)", "net", CLONE_NEWNET);

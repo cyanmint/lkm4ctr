@@ -255,6 +255,7 @@ int vendor_kernel_init(void)
 
 	vns_resolve_symbols();
 	vns_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported kernel symbols */
+	vns_procfs_compat_resolve(); /* [BUILD-COMPAT] resolve native procfs symlink instantiation helpers */
 	vns_ipc_compat_resolve(); /* [BUILD-COMPAT] resolve non-exported ipc/mm/security/audit symbols */
 	vns_ipc_lookup_resolve(); /* [BUILD-COMPAT] resolve simple_lookup()/security_*_associate() (own CFI-safe translation unit) */
 	if (!vns_compat_ready())
@@ -381,22 +382,21 @@ int vendor_kernel_init(void)
 	}
 	total_hooked = hooked;
 
-	/*
-	 * Best-effort only: without these, /proc/<pid>/ns/ipc readlink(2)
-	 * simply stays -ENOENT on a kernel genuinely missing CONFIG_IPC_NS
-	 * (same as before this hook existed) instead of reflecting the real
-	 * vendored ipc_namespace vendor_kernel_hook_unshare() already
-	 * installs -- a missing observability nicety, not a functional
-	 * regression, so a failure to resolve readlink/readlinkat must not
-	 * abort the whole submodule's load.
+	/* Best-effort: without the procfs lookup hook, absent native IPC/PID
+	 * namespace components remain ENOENT; no syscall result is fabricated.
 	 */
 	hooked = shadow_hook_install_all(vendor_kernel_procfs_hooks, "vendor_kernel_procfs");
 	if (hooked < 0)
 		LKM4CTR_WARN("vendor_kernel",
-			     "failed to install /proc/<pid>/ns/ipc readlink fabrication hooks (%d); ipc namespace isolation is still fully functional, only the /proc/<pid>/ns/ipc symlink observability is affected",
+			     "failed to install procfs compatibility hooks (%d); missing native namespace entries will remain ENOENT",
 			     hooked);
 	else
 		total_hooked += hooked;
+	if (!vns_procfs_compat_active())
+		LKM4CTR_WARN("vendor_kernel",
+			     "native /proc/self/ns/{ipc,pid} dentry compatibility is "
+			     "unavailable; missing native namespace entries will "
+			     "remain ENOENT");
 
 	/*
 	 * The translation hooks are needed only when the running kernel lacks
@@ -541,6 +541,22 @@ static int __vendor_kernel_exit(bool module_exit)
 		vns_nsproxy_stop_abort();
 		vns_user_ns_stop_abort();
 		return -EBUSY;
+	}
+
+	err = vns_procfs_compat_prepare_exit();
+	if (err) {
+		if (!module_exit) {
+			vns_mqueue_dev_ensure();
+			if (!was_quiescing)
+				shadow_hook_quiesce(false);
+			vns_nsfs_lifecycle_abort_exit();
+			vns_nsproxy_stop_abort();
+			vns_user_ns_stop_abort();
+			return err;
+		}
+		LKM4CTR_WARN("vendor_kernel",
+			     "module exit continuing despite procfs namespace inode pins (error %d)",
+			     err);
 	}
 
 	err = vns_nsfs_lifecycle_prepare_exit();

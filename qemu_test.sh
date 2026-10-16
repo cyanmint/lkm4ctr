@@ -21,6 +21,10 @@ lkm4ctr_run_qemu_mode() {
 	if [ "${LKM4CTR_TEST_RMMOD:-0}" = "1" ]; then
 		RMMOD_ARG=" lkm4ctr_test_rmmod=1"
 	fi
+	PROC_NS_FALLBACK_ARG=""
+	if [ "${LKM4CTR_TEST_REQUIRE_PROC_NS_FALLBACK:-0}" = "1" ]; then
+		PROC_NS_FALLBACK_ARG=" lkm4ctr_test_proc_ns_fallback=1"
+	fi
 
 	mkdir -p qemu-logs
 
@@ -34,7 +38,7 @@ lkm4ctr_run_qemu_mode() {
 			-M virt -cpu max -m 2G -smp 2 -nographic -no-reboot \
 			-kernel "$KERNEL" \
 			-initrd "$RAMDISK" \
-			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG"
+			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG$PROC_NS_FALLBACK_ARG"
 	elif [ -n "$RAMDISK" ]; then
 		echo "=== booting kernel: $KERNEL (ramdisk=$RAMDISK, rdinit=$INIT) ==="
 		set -- \
@@ -44,7 +48,7 @@ lkm4ctr_run_qemu_mode() {
 			-device qemu-xhci,id=usb0 \
 			-drive file="$IMAGE1",if=none,format=raw,id=usb1 \
 			-device usb-storage,bus=usb0.0,drive=usb1,id=disk1 \
-			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG"
+			-append "console=ttyAMA0 rdinit=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG$PROC_NS_FALLBACK_ARG"
 	else
 		echo "=== booting kernel: $KERNEL (no ramdisk, init=$INIT) ==="
 		set -- \
@@ -52,7 +56,7 @@ lkm4ctr_run_qemu_mode() {
 			-kernel "$KERNEL" \
 			-drive file="$IMAGE1",if=none,id=image1,format=raw \
 			-device nvme,serial=11451401,drive=image1 \
-			-append "console=ttyAMA0 root=/dev/nvme0n1 init=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG"
+			-append "console=ttyAMA0 root=/dev/nvme0n1 init=$INIT earlycon panic=-1$MODULE_ARG$RMMOD_ARG$PROC_NS_FALLBACK_ARG"
 	fi
 
 	timeout --signal=KILL 120 qemu-system-aarch64 "$@" 2>&1
@@ -75,6 +79,75 @@ lkm4ctr_rmmod_test_enabled() {
 		*" lkm4ctr_test_rmmod=1 "*) return 0 ;;
 	esac
 	return 1
+}
+
+lkm4ctr_proc_ns_path_accessible() {
+	[ -e "/proc/self/ns/$1" ]
+}
+
+lkm4ctr_proc_ns_capture_baseline() {
+	if lkm4ctr_proc_ns_path_accessible ipc; then
+		proc_ns_ipc_pre=1
+	else
+		proc_ns_ipc_pre=0
+	fi
+	if lkm4ctr_proc_ns_path_accessible pid; then
+		proc_ns_pid_pre=1
+	else
+		proc_ns_pid_pre=0
+	fi
+	proc_ns_ipc_native=0
+	if /busybox unshare -i /busybox sh -c ':' >/dev/null 2>&1; then
+		proc_ns_ipc_native=1
+	fi
+	proc_ns_pid_native=0
+	if /busybox unshare -p -f /busybox sh -c ':' >/dev/null 2>&1; then
+		proc_ns_pid_native=1
+	fi
+	echo "PROC_NS_BASELINE: ipc=$proc_ns_ipc_pre pid=$proc_ns_pid_pre ipc_unshare=$proc_ns_ipc_native pid_unshare=$proc_ns_pid_native"
+}
+
+lkm4ctr_proc_ns_fallback_required() {
+	proc_ns_cmdline="$(cat /proc/cmdline 2>/dev/null)" || return 1
+	case " $proc_ns_cmdline " in
+		*" lkm4ctr_test_proc_ns_fallback=1 "*) return 0 ;;
+	esac
+	return 1
+}
+
+lkm4ctr_proc_ns_check_after_load() {
+	proc_ns_failed=0
+	proc_ns_fallback_count=0
+	for proc_ns_name in ipc pid; do
+		if lkm4ctr_proc_ns_path_accessible "$proc_ns_name"; then
+			echo "PROC_NS_ACCESS_PASS: phase=post-insmod ns=$proc_ns_name"
+			if [ "$proc_ns_name" = "ipc" ]; then
+				proc_ns_pre=$proc_ns_ipc_pre
+				proc_ns_native=$proc_ns_ipc_native
+			else
+				proc_ns_pre=$proc_ns_pid_pre
+				proc_ns_native=$proc_ns_pid_native
+			fi
+			if [ "$proc_ns_pre" -eq 0 ] && [ "$proc_ns_native" -eq 0 ]; then
+				echo "PROC_NS_FALLBACK_PASS: ns=$proc_ns_name"
+				proc_ns_fallback_count=$((proc_ns_fallback_count + 1))
+			else
+				echo "PROC_NS_PATH_PRESENT: ns=$proc_ns_name pre_path=$proc_ns_pre pre_unshare=$proc_ns_native"
+			fi
+		else
+			echo "PROC_NS_ACCESS_FAIL: phase=post-insmod ns=$proc_ns_name"
+			proc_ns_failed=1
+		fi
+	done
+	if lkm4ctr_proc_ns_fallback_required; then
+		if [ "$proc_ns_fallback_count" -eq 0 ]; then
+			echo "PROC_NS_FALLBACK_REQUIRED_FAILED: no IPC/PID path appeared after insmod"
+			proc_ns_failed=1
+		else
+			echo "PROC_NS_FALLBACK_REQUIRED_PASS"
+		fi
+	fi
+	return "$proc_ns_failed"
 }
 
 lkm4ctr_post_use_rmmod_test() {
@@ -151,6 +224,7 @@ lkm4ctr_run_checker_mode() {
 	# loaded QEMU VM, without hanging the whole boot test indefinitely if
 	# it never does.
 	SAFE_UNLOAD_TIMEOUT_SEC=30
+	lkm4ctr_proc_ns_capture_baseline
 	if [ "$MODULE" = "-" ]; then
 		echo "=== LKM4CTR_QEMU_TEST: checker (module test intentionally disabled) ==="
 		"$CHECKER" || true
@@ -163,6 +237,10 @@ lkm4ctr_run_checker_mode() {
 	echo "=== LKM4CTR_QEMU_TEST: inserting merged module ==="
 	if ! insmod "$MODULE"; then
 		echo "lkm4ctr.ko failed to load"
+		return 1
+	fi
+	if ! lkm4ctr_proc_ns_check_after_load; then
+		echo "QEMU_TEST_FAILED: /proc/self/ns/{ipc,pid} unavailable after insmod"
 		return 1
 	fi
 	echo "=== LKM4CTR_QEMU_TEST: mounting lkm4ctr diagfs ==="

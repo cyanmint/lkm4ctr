@@ -165,66 +165,46 @@ still must be built with the remaining options for full namespace coverage:
 
 
 Of these, `CONFIG_IPC_NS=n` (and, on kernels that still gate it,
-`CONFIG_PID_NS=n`) are the exceptions that no longer need a diagnostic
-caveat: `unshare(CLONE_NEWIPC)`/SysV IPC/mqueue syscalls and
-`unshare(CLONE_NEWPID)`/pid virtualization have always performed genuine
-vendored isolation regardless of these options (see "Module-owned default
-namespace, always vendored" above), but until now external tools that
-verify isolation by diffing `readlink(2)` on `/proc/<pid>/ns/{ipc,pid}`
-(including `lkm4ctr_checker`'s generic namespace test) could not observe
-it, and `docker exec`/`docker run` could not even *probe* namespace support
-at all: `fs/proc/namespaces.c`'s `ns_entries[]` table only registers those
-procfs entries `#ifdef CONFIG_IPC_NS`/`#ifdef CONFIG_PID_NS`, a decision
-baked into the running `vmlinux` that no syscall hook can undo.
-`glue/vendor_kernel_procfs.c` closes this observability gap in three parts:
-- Hooking `readlink(2)`/`readlinkat(2)`: the real syscall always runs
-  first, and only on its `-ENOENT` for a path unambiguously naming
-  `.../<pid|self|thread-self>/ns/ipc` or `.../<pid|self|thread-self>/ns/pid`
-  is the `"ipc:[<inum>]"`/`"pid:[<inum>]"` text fabricated, using the same
-  `vns_task_ipc_ns()`/`task_active_pid_ns()` namespace objects the real
-  SysV/mqueue syscalls and pid virtualization already act on.
-- Hooking `stat(2)`/`lstat(2)`/`newfstatat(2)`: runc/containerd's own
-  namespace-support probe (`configs.IsNamespaceSupported()`) never reads the
-  readlink(2) target at all, it only checks whether `stat(2)` on the path
-  *succeeds*. Without this second hook, that probe still fails with plain
-  `-ENOENT` even with the readlink(2) fabrication in place, and `docker
-  exec`/`docker run` abort with `"OCI runtime exec failed: ... namespace
-  NEWIPC is not supported: unknown"` (or the analogous `"namespace NEWPID
-  is not supported"` message for pid). Since struct stat's on-wire layout is
-  architecture-specific and the kernel's own conversion code isn't exported,
-  this hook instead transparently substitutes the `.../ns/ipc` or
-  `.../ns/pid` leaf for `.../ns/mnt` (identical length in both cases,
-  patched in place on the caller's own path buffer and restored immediately
-  after) before calling through to the real syscall: the mount namespace
-  entry is the one `/proc/<pid>/ns/` entry that is never Kconfig-gated, so
-  it is always present, and every caller of this stat(2) family only cares
-  whether the call succeeds (see above), not which namespace's numbers come
-  back.
-- Hooking `open(2)`/`openat(2)`/`openat2(2)`: closing the stat(2)/
-  readlink(2) gaps above is enough for `docker run`/`docker exec`'s own
-  namespace-support *probe* to pass, but `runc`'s `nsexec` C helper (forked
-  to actually join a running container's namespaces when `docker exec`
-  joins one) does not probe at all -- it plainly `open(2)`s
-  `.../ns/ipc`/`.../ns/pid` to obtain a real fd to `setns(2)` into. Without
-  this third hook, that `open(2)` still fails with plain `-ENOENT` even
-  with both fabrications above in place, and `docker exec` aborts with
-  `"OCI runtime exec failed: ... error executing setns process: exit
-  status 1; runc init error(s): ... failed to open /proc/<pid>/ns/ipc: No
-  such file or directory"`. Since the resulting fd is later handed to
-  `setns(2)` (`vns_sys_setns()`, `vendor/kernel/nsproxy.c`), which only
-  accepts a genuine nsfs file (`proc_ns_file()`'s exact `file->f_op ==
-  &ns_file_operations` check, followed by `get_proc_ns()`'s
-  `inode->i_private` read), this hook cannot get away with a stat(2)-style
-  substitution: it calls `fs/nsfs.c`'s own (non-exported, resolved the same
-  way as every other vendor_kernel symbol lookup) `ns_get_path()` with
-  `vns_ipcns_operations`/`vns_pidns_operations` (the same `proc_ns_operations`
-  vectors `vns_sys_setns()` itself already uses), producing a real,
-  interchangeable nsfs fd for the target task's actual vendored IPC/PID
-  namespace.
+`CONFIG_PID_NS=n`) remain procfs-visibility caveats. Namespace creation and
+the associated vendored IPC/PID behavior are separate from procfs visibility:
+`fs/proc/namespaces.c` compiles its `ns_entries[]` table according to the
+running kernel's configuration, so those names are absent when the native
+options are disabled.
 
-Both hook groups are installed best-effort/non-fatal (a resolution failure
-only logs a warning): they are purely an observability enhancement, so they
-never block `vendor_kernel`'s core namespace functionality from loading.
+`glue/vendor_kernel_procfs.c` hooks `proc_ns_dir_lookup()`. After the native
+lookup returns `-ENOENT` for `ipc` or `pid`, it retries only when the parent
+dentry is the current task's `/proc/self/ns` or `/proc/thread-self/ns`
+directory and native support for that namespace is absent. It calls
+procfs's own `proc_ns_instantiate()` with the vendored namespace operations,
+creating a real procfs symlink inode. The ordinary VFS path walk continues,
+so path permissions, LSM checks, symlink-follow checks, and nsfs behavior are
+not replaced by a syscall-level success result. If helper resolution fails,
+the missing component remains `ENOENT`.
+
+The procfs namespace inode itself keeps the selected `proc_ns_operations`
+pointer but has no module owner. Before instantiating a fallback inode, the
+hook therefore takes a module reference and tracks it by inode identity;
+`proc_evict_inode()` releases the reference only after native procfs eviction
+has completed. The newly instantiated dentry is immediately unhashed so a
+normal path lookup does not leave a positive dentry cached and pin the module
+until unrelated dcache reclaim. This also covers retained no-follow symlink
+descriptors: a controlled subsystem stop refuses while such inode pins remain.
+The lookup fallback is disabled unless the eviction and dentry-drop helpers
+are available.
+
+Droidspaces' `access("/proc/self/ns/{ipc,pid}", F_OK)` probe and the
+checker's self-path diagnostics therefore exercise this real lookup path.
+The compatibility is deliberately limited: it does not add these names to
+directory enumeration, and it does not provide `/proc/<other-pid>/ns/{ipc,pid}`
+when the native entries are absent. The previous readlink/stat/open fallbacks
+for IPC/PID were removed because a syscall's `-ENOENT` cannot distinguish a
+missing entry from path, permission, or LSM denial. In particular, opening
+another task's namespace remains unavailable on a kernel without native
+support; no permission check is bypassed to emulate it.
+
+The procfs compatibility hook is best-effort/non-fatal (a resolution failure
+only logs a warning), so it does not block `vendor_kernel`'s core namespace
+functionality from loading.
 Only IPC and PID get this treatment: `UTS`/`USER` are likewise vendored
 unconditionally of their respective `CONFIG_*_NS` option, but no device has
 been observed lacking `CONFIG_UTS_NS`/`CONFIG_USER_NS` while also lacking

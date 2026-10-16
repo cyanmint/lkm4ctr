@@ -434,11 +434,24 @@ jobs:
             if [ "$module_test" -eq 1 ]; then
               rmmod_test=1
             fi
-            LKM4CTR_TEST_MODULE="$module_test" LKM4CTR_TEST_RMMOD="$rmmod_test" bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$log"
+            proc_ns_fallback_test=0
+            # android12-5.10 is the designated fallback KMI. The guest checks
+            # that at least one namespace path is absent and its matching
+            # native unshare probe fails before insmod; other KMIs still
+            # validate both paths and classify native support before load.
+            if [ "$module_test" -eq 1 ] && [ "$KMI" = "android12-5.10" ]; then
+              proc_ns_fallback_test=1
+            fi
+            LKM4CTR_TEST_MODULE="$module_test" LKM4CTR_TEST_RMMOD="$rmmod_test" \
+              LKM4CTR_TEST_REQUIRE_PROC_NS_FALLBACK="$proc_ns_fallback_test" \
+              bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$log"
             rc=${PIPESTATUS[0]}
             echo "launcher_rc=$rc"
-            if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|RMMOD_TEST_FAILED|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
+            if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|RMMOD_TEST_FAILED|PROC_NS_ACCESS_FAIL|PROC_NS_FALLBACK_REQUIRED_FAILED|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
               echo "KERNEL_ERROR: $name (see $log)"
+              failures=$((failures + 1))
+            elif [ "$proc_ns_fallback_test" -eq 1 ] && ! grep -Fq 'PROC_NS_FALLBACK_REQUIRED_PASS' "$log"; then
+              echo "INCOMPLETE: $name did not verify the required IPC/PID procfs fallback"
               failures=$((failures + 1))
             elif [ "$module_test" -eq 1 ] && ! grep -Fq '=== LKM4CTR_QEMU_TEST: post-use rmmod after module and container tests succeeded ===' "$log"; then
               echo "INCOMPLETE: $name did not unload the used module before shutdown (see $log)"

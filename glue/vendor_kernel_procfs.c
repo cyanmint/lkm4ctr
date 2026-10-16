@@ -1,109 +1,43 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * vendor_kernel_procfs.c - fabricate /proc/<pid>/ns/{ipc,pid}'s readlink(2)
- * target and stat(2)/lstat(2)/newfstatat(2) success on kernels genuinely
- * missing CONFIG_IPC_NS/CONFIG_PID_NS.
+ * vendor_kernel_procfs.c - expose real vendored IPC/PID namespace symlinks
+ * through procfs when the corresponding native CONFIG_*_NS entry is absent.
  *
- * This is NEW code (not vendored from kernel-common).
+ * procfs compiles its namespace directory entries into ns_entries[];
+ * CONFIG_IPC_NS=n or CONFIG_PID_NS=n therefore makes the component lookup
+ * return -ENOENT even though vendor_kernel has real namespace objects. The
+ * proc_ns_dir_lookup hook retries only that missing component for the
+ * current task's /proc/self/ns or /proc/thread-self/ns directory and calls
+ * procfs's own proc_ns_instantiate(). This creates a normal procfs symlink;
+ * subsequent VFS, LSM, ptrace, and nsfs handling is unchanged.
+ * Since procfs inodes do not pin module-owned proc_ns_operations, each
+ * fallback inode holds a module reference until proc_evict_inode() completes.
+ * The created dentry is unhashed immediately so ordinary lookups do not
+ * leave a cached inode pinning the module until unrelated dcache reclaim. If
+ * either lifetime helper is unavailable, lookup remains fail-closed.
  *
- * Why this exists
- * ----------------
- * vendor_kernel_hook_unshare()/vendor_kernel_hook_clone*()
- * (glue/vendor_kernel_syscalls.c) already do real work for
- * CLONE_NEWIPC/CLONE_NEWPID: they build a genuine vendored `struct
- * ipc_namespace`/`struct pid_namespace` (ipc/namespace.c's
- * create_ipc_ns()/kernel/pid_namespace.c's vns_copy_pid_ns(), both ported
- * near-verbatim from kernel-common) and install it on the calling task via
- * vns_switch_task_namespaces() (IPC) or the real copy_process()/alloc_pid()
- * path (PID, unconditional of CONFIG_PID_NS), exactly like the real
- * unshare(2)/clone(2) would. SysV IPC/POSIX mqueue syscalls and
- * getpid()/proc/kill(2)/etc. observe this correctly through
- * vns_current_ipc_ns() (glue/vendor_kernel_ipc_syscalls.c) and the real,
- * unconditional task_active_pid_ns() respectively.
+ * No readlink/stat/open syscall result is fabricated for IPC/PID paths.
+ * Those syscall fallbacks cannot distinguish a missing procfs entry from
+ * permission or LSM denial. If a required procfs/VFS helper is unavailable,
+ * the missing component remains absent (fail closed). Directory enumeration
+ * remains controlled by the kernel's native ns_entries[] table.
  *
- * However, nothing about that makes /proc/<pid>/ns/ipc or /proc/<pid>/ns/pid
- * themselves resolvable. fs/proc/namespaces.c's `ns_entries[]` table only
- * includes `&ipcns_operations`/`&pidns_operations` `#ifdef
- * CONFIG_IPC_NS`/`#ifdef CONFIG_PID_NS` -- a compile-time decision baked
- * into vmlinux. On a kernel genuinely built with CONFIG_IPC_NS=n/
- * CONFIG_PID_NS=n (the whole reason vendor_kernel's IPC/PID namespaces
- * exist), that procfs directory entry does not exist at all, regardless of
- * what task->nsproxy->ipc_ns/task_active_pid_ns(task) actually point to:
- * readlink(2) on that path fails with plain -ENOENT.
- *
- * That breaks three independent things:
- *   - runc/containerd's own namespace-support probe (stat(2), not
- *     readlink(2) -- see the stat(2)-family fabrication further down this
- *     file), which checks /proc/<pid>/ns/{ipc,pid,user,uts,...} as part of a
- *     single combined check before issuing unshare()/clone3(), and again
- *     before `docker exec` joins a running container's namespaces. Without
- *     this fabrication, that probe fails outright and `docker exec`/`docker
- *     run` abort with `"OCI runtime exec failed: ... namespace NEWPID is
- *     not supported: unknown"` (or the analogous NEWIPC message).
- *   - any external tool (including lkm4ctr_checker) that verifies real
- *     namespace isolation by diffing /proc/self/ns/{ipc,pid}'s readlink(2)
- *     target before and after unshare(CLONE_NEWIPC)/unshare(CLONE_NEWPID):
- *     with no fabrication, the "after" readlink still fails with -ENOENT
- *     exactly like the "before" one, so the diff-based probe cannot observe
- *     vendor_kernel's real, already-working namespace isolation and reports
- *     a false STUB.
- *   - runc's own nsexec (the C helper forked by `docker exec`/`runc exec`
- *     to join a *running* container's namespaces via setns(2)) does not
- *     stat(2) or readlink(2) ".../ns/ipc"/".../ns/pid" at all: it plainly
- *     open(2)s each entry to obtain the fd it then hands to setns(2). With
- *     neither the stat(2) nor the open(2) gap closed, this fails with
- *     `"failed to open /proc/<pid>/ns/ipc: No such file or directory"`,
- *     surfacing as `"OCI runtime exec failed: ... error executing setns
- *     process: exit status 1; runc init error(s): ... failed to open
- *     /proc/<pid>/ns/ipc: No such file or directory"`. Fixing only the
- *     stat(2)/readlink(2) gaps above is not enough for `docker exec` to
- *     actually work: open(2) itself needs a real, usable nsfs fd (see the
- *     open(2)-family fabrication further down this file), not just a
- *     passing probe.
- *
- * This file closes three observability/functionality gaps, one hook group
- * per gap above: readlink(2)/readlinkat(2), stat(2)/lstat(2)/newfstatat(2)
- * (see the block comment further down for how the runc/containerd probe
- * fabrication works), and open(2)/openat(2)/openat2(2) (see the block
- * comment further down for how the real, usable nsfs fd fabrication
- * works). Each hook lets the real syscall run first, and only steps in on
- * its -ENOENT, for a path unambiguously naming ".../ns/ipc" or
- * ".../ns/pid" under a procfs-rooted pid directory
- * (".../<pid|self|thread-self>/ns/{ipc,pid}", or a bare "ns/{ipc,pid}"
- * resolved relative to a dfd whose superblock is procfs). For
- * readlink(2)/readlinkat(2) that means fabricating the "ipc:[<ino>]"/
- * "pid:[<ino>]" text real readlink(2) would have produced, mirroring
- * fs/nsfs.c's ns_get_name() format exactly. Any other -ENOENT (including
- * every other ns/ entry) passes through untouched.
- *
- * The fabricated inode number comes straight from vns_task_ipc_ns(task)'s /
- * task_active_pid_ns(task)'s `ns.inum` (allocated by vns_alloc_inum() -- see
- * ipc/namespace.c's create_ipc_ns()/kernel/pid_namespace.c's
- * vns_copy_pid_ns() and vns_ipc_default_init() below), so it is self
- * consistent with the real vendored namespace object the SysV/mqueue/pid
- * syscalls already operate against: a task that never
- * unshare(CLONE_NEWIPC)/unshare(CLONE_NEWPID) reads back vendor_kernel's own
- * default namespace's inum, and a task that did reads back a distinct one,
- * exactly matching real kernel semantics.
- *
- * Only IPC and PID get a fabricated entry here: UTS and USER namespaces are
- * likewise vendored unconditionally of their respective CONFIG_*_NS option,
- * but every device observed lacking CONFIG_IPC_NS/CONFIG_PID_NS still ships
- * CONFIG_UTS_NS=y/CONFIG_USER_NS=y, so no equivalent gap has been observed
- * for them; NET/MNT/CGROUP namespaces remain deliberately bookkeeping-only,
- * so fabricating their /proc/ns entries here would misreport nonexistent
- * isolation as real.
+ * The open syscall hooks below are retained only for the separate vendored
+ * user-namespace id-map procfs compatibility path.
  */
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/hashtable.h>
 #include <linux/uaccess.h>
 #include <linux/ctype.h>
-#include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/magic.h>
+#include <linux/module.h>
+#include <linux/namei.h>
 #include <linux/pid.h>
-#include <linux/pid_namespace.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <asm/ptrace.h>
 
 #include "../vendor/vendor_kernel.h"
@@ -113,22 +47,287 @@
 #define VNS_PROC_NS_IPC_NAME	"ipc"
 #define VNS_PROC_NS_PID_NAME	"pid"
 
+typedef struct dentry *(*vns_proc_ns_instantiate_fn_t)(struct dentry *,
+						       struct task_struct *,
+						       const void *);
+typedef int (*vns_proc_kern_path_fn_t)(const char *, unsigned int,
+				       struct path *);
+typedef void (*vns_proc_path_put_fn_t)(const struct path *);
+typedef void (*vns_proc_evict_inode_fn_t)(struct inode *);
+typedef void (*vns_proc_d_drop_fn_t)(struct dentry *);
+
+#define VNS_PROCFS_INODE_PIN_HASH_BITS 6
+
+struct vns_procfs_inode_pin {
+	struct hlist_node node;
+	struct inode *inode;
+};
+
+static vns_proc_ns_instantiate_fn_t vns_proc_ns_instantiate_real;
+static vns_proc_kern_path_fn_t vns_proc_kern_path_real;
+static vns_proc_path_put_fn_t vns_proc_path_put_real;
+static vns_proc_evict_inode_fn_t vns_proc_evict_inode_real;
+static vns_proc_d_drop_fn_t vns_proc_d_drop_real;
+static bool vns_proc_native_ipc_ns;
+static bool vns_proc_ns_entry_fallback_ready;
+static DEFINE_HASHTABLE(vns_procfs_inode_pins,
+		VNS_PROCFS_INODE_PIN_HASH_BITS);
+static DEFINE_SPINLOCK(vns_procfs_inode_pins_lock);
+static atomic_t vns_procfs_inode_pin_count = ATOMIC_INIT(0);
+
+static struct dentry *(*vns_real_proc_ns_dir_lookup)(struct inode *dir,
+						     struct dentry *dentry,
+						     unsigned int flags);
+
+static bool vns_proc_same_ns_dir(struct dentry *parent,
+				struct path *candidate)
+{
+	struct inode *parent_inode;
+
+	if (!parent || !candidate->dentry ||
+	    parent->d_sb->s_magic != PROC_SUPER_MAGIC ||
+	    candidate->dentry->d_sb->s_magic != PROC_SUPER_MAGIC ||
+	    parent->d_sb != candidate->dentry->d_sb)
+		return false;
+	parent_inode = d_inode(parent);
+	return parent_inode && parent_inode == d_inode(candidate->dentry);
+}
+
+static void vns_procfs_pin_inode(struct inode *inode,
+				 struct vns_procfs_inode_pin *candidate)
+{
+	struct vns_procfs_inode_pin *entry;
+	unsigned long flags;
+
+	if (!inode) {
+		/* The created proc inode may retain our ops; never drop this pin. */
+		atomic_inc(&vns_procfs_inode_pin_count);
+		kfree(candidate);
+		LKM4CTR_ERR("vendor_kernel",
+			    "proc namespace instantiate returned success without an inode; retaining a fail-safe module pin");
+		return;
+	}
+
+	candidate->inode = inode;
+	spin_lock_irqsave(&vns_procfs_inode_pins_lock, flags);
+	hash_for_each_possible(vns_procfs_inode_pins, entry, node,
+			       (unsigned long)inode) {
+		if (entry->inode == inode) {
+			spin_unlock_irqrestore(&vns_procfs_inode_pins_lock, flags);
+			kfree(candidate);
+			module_put(THIS_MODULE);
+			return;
+		}
+	}
+	hash_add(vns_procfs_inode_pins, &candidate->node,
+		 (unsigned long)inode);
+	atomic_inc(&vns_procfs_inode_pin_count);
+	spin_unlock_irqrestore(&vns_procfs_inode_pins_lock, flags);
+}
+
+static void vns_procfs_unpin_inode(struct inode *inode)
+{
+	struct vns_procfs_inode_pin *entry;
+	struct vns_procfs_inode_pin *found = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vns_procfs_inode_pins_lock, flags);
+	hash_for_each_possible(vns_procfs_inode_pins, entry, node,
+			       (unsigned long)inode) {
+		if (entry->inode == inode) {
+			hash_del(&entry->node);
+			found = entry;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&vns_procfs_inode_pins_lock, flags);
+
+	if (!found)
+		return;
+	atomic_dec(&vns_procfs_inode_pin_count);
+	kfree(found);
+	module_put(THIS_MODULE);
+}
+
+static void vendor_kernel_hook_proc_evict_inode(struct inode *inode)
+{
+	/* proc_evict_inode() clears proc-specific state before releasing our pin. */
+	vns_proc_evict_inode_real(inode);
+	vns_procfs_unpin_inode(inode);
+}
+
+static const char * const vendor_kernel_proc_evict_inode_names[] = {
+	"proc_evict_inode",
+	NULL,
+};
+
+static struct shadow_hook vendor_kernel_proc_evict_inode_hook =
+	SHADOW_HOOK(vendor_kernel_proc_evict_inode_names,
+		    vendor_kernel_hook_proc_evict_inode,
+		    &vns_proc_evict_inode_real);
+
+static struct task_struct *vns_proc_ns_parent_task(struct dentry *parent)
+{
+	static const struct {
+		const char *path;
+		bool thread_self;
+	} aliases[] = {
+		{ "/proc/thread-self/ns", true },
+		{ "/proc/self/ns", false },
+	};
+	struct task_struct *task;
+	struct path path;
+	unsigned int i;
+
+	if (!vns_proc_kern_path_real || !vns_proc_path_put_real)
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(aliases); i++) {
+		if (vns_proc_kern_path_real(aliases[i].path,
+					    LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
+					    &path))
+			continue;
+
+		if (vns_proc_same_ns_dir(parent, &path)) {
+			task = aliases[i].thread_self ? current : current->group_leader;
+			get_task_struct(task);
+			vns_proc_path_put_real(&path);
+			if (!pid_alive(task)) {
+				put_task_struct(task);
+				return NULL;
+			}
+			return task;
+		}
+		vns_proc_path_put_real(&path);
+	}
+
+	return NULL;
+}
+
+void vns_procfs_compat_resolve(void)
+{
+	vendor_kernel_proc_evict_inode_hook.quiesce_exempt = true;
+	vns_proc_native_ipc_ns = !!shadow_hook_resolve("copy_ipcs");
+	vns_proc_ns_instantiate_real = (vns_proc_ns_instantiate_fn_t)
+		shadow_hook_resolve("proc_ns_instantiate");
+	vns_proc_kern_path_real = (vns_proc_kern_path_fn_t)
+		shadow_hook_resolve("kern_path");
+	vns_proc_path_put_real = (vns_proc_path_put_fn_t)
+		shadow_hook_resolve("path_put");
+	vns_proc_evict_inode_real = (vns_proc_evict_inode_fn_t)
+		shadow_hook_resolve("proc_evict_inode");
+	vns_proc_d_drop_real = (vns_proc_d_drop_fn_t)
+		shadow_hook_resolve("d_drop");
+	vns_proc_ns_entry_fallback_ready = vns_proc_ns_instantiate_real &&
+		vns_proc_kern_path_real && vns_proc_path_put_real &&
+		vns_proc_evict_inode_real && vns_proc_d_drop_real;
+}
+
+static struct dentry *vendor_kernel_hook_proc_ns_dir_lookup(
+	struct inode *dir, struct dentry *dentry, unsigned int flags)
+{
+	const struct proc_ns_operations *ns_ops;
+	struct task_struct *task;
+	struct vns_procfs_inode_pin *candidate;
+	struct inode *inode;
+	struct dentry *res;
+	bool native;
+
+	if (!vns_real_proc_ns_dir_lookup)
+		return ERR_PTR(-ENOENT);
+	res = vns_real_proc_ns_dir_lookup(dir, dentry, flags);
+	if (!IS_ERR(res) || PTR_ERR(res) != -ENOENT ||
+	    !vns_proc_ns_entry_fallback_ready ||
+	    !vendor_kernel_proc_evict_inode_hook.installed)
+		return res;
+
+	if (dentry->d_name.len == strlen(VNS_PROC_NS_IPC_NAME) &&
+	    !memcmp(dentry->d_name.name, VNS_PROC_NS_IPC_NAME,
+		    dentry->d_name.len)) {
+		native = vns_proc_native_ipc_ns;
+		ns_ops = &vns_ipcns_operations;
+	} else if (dentry->d_name.len == strlen(VNS_PROC_NS_PID_NAME) &&
+		   !memcmp(dentry->d_name.name, VNS_PROC_NS_PID_NAME,
+			   dentry->d_name.len)) {
+		native = READ_ONCE(vns_pidns_runtime_supported);
+		ns_ops = &vns_pidns_operations;
+	} else {
+		return res;
+	}
+	if (native)
+		return res;
+
+	/* Match the actual parent dentry to the current task's procfs alias. */
+	if (!dentry->d_parent || d_inode(dentry->d_parent) != dir)
+		return res;
+	task = vns_proc_ns_parent_task(dentry->d_parent);
+	if (!task)
+		return res;
+	candidate = kmalloc(sizeof(*candidate), GFP_KERNEL);
+	if (!candidate || !try_module_get(THIS_MODULE)) {
+		kfree(candidate);
+		put_task_struct(task);
+		return res;
+	}
+	res = vns_proc_ns_instantiate_real(dentry, task, ns_ops);
+	put_task_struct(task);
+	if (IS_ERR(res)) {
+		kfree(candidate);
+		module_put(THIS_MODULE);
+		return res;
+	}
+	inode = d_inode(res ? res : dentry);
+	vns_procfs_pin_inode(inode, candidate);
+	/* Avoid leaving a cached dentry whose operations point into this module. */
+	vns_proc_d_drop_real(res ? res : dentry);
+	return res;
+}
+
+static const char * const vendor_kernel_proc_ns_dir_lookup_names[] = {
+	"proc_ns_dir_lookup",
+	NULL,
+};
+
+static struct shadow_hook vendor_kernel_proc_ns_dir_lookup_hook =
+	SHADOW_HOOK(vendor_kernel_proc_ns_dir_lookup_names,
+		    vendor_kernel_hook_proc_ns_dir_lookup,
+		    &vns_real_proc_ns_dir_lookup);
+
+bool vns_procfs_compat_active(void)
+{
+	bool needs_fallback = !vns_proc_native_ipc_ns ||
+		!READ_ONCE(vns_pidns_runtime_supported);
+
+	return !needs_fallback ||
+		(vns_proc_ns_entry_fallback_ready &&
+		 vendor_kernel_proc_ns_dir_lookup_hook.installed &&
+		 vendor_kernel_proc_evict_inode_hook.installed);
+}
+
+int vns_procfs_compat_prepare_exit(void)
+{
+	int pins = atomic_read(&vns_procfs_inode_pin_count);
+
+	if (!pins)
+		return 0;
+	LKM4CTR_WARN("vendor_kernel",
+		     "refusing stop while %d procfs namespace inode(s) retain module-owned namespace operations",
+		     pins);
+	return -EBUSY;
+}
+
 #if defined(CONFIG_ARM64)
 static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->regs[0]; }
 static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->regs[1]; }
-static unsigned long vns_procfs_arg2(const struct pt_regs *regs) { return regs->regs[2]; }
-static unsigned long vns_procfs_arg3(const struct pt_regs *regs) { return regs->regs[3]; }
 #elif defined(CONFIG_X86_64)
 static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->di; }
 static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->si; }
-static unsigned long vns_procfs_arg2(const struct pt_regs *regs) { return regs->dx; }
-static unsigned long vns_procfs_arg3(const struct pt_regs *regs) { return regs->r10; }
 #else
 #error "vendor_kernel: unsupported architecture"
 #endif
 
-/* Bare "self"/"thread-self"/numeric-pid path component used for procfs pid
- * path parsing in the namespace-fallback helpers below. */
+/* Bare "self"/"thread-self"/numeric-pid component used by the id-map
+ * compatibility path below. */
 static bool vns_component_is_pid_dir(const char *s)
 {
 	if (!*s)
@@ -142,34 +341,10 @@ static bool vns_component_is_pid_dir(const char *s)
 	return true;
 }
 
-/*
- * A bare "ns/ipc" path component with no directory prefix only makes sense
- * relative to a dfd that is itself rooted somewhere inside a procfs mount
- * (a detached fsopen("proc")+fsmount() dirfd, or an already-open
- * /proc/<pid> directory fd).
- */
-static bool vns_dfd_is_procfs(int dfd)
-{
-	struct fd f;
-	bool ret;
-
-	if (dfd == AT_FDCWD)
-		return false;
-
-	f = fdget(dfd);
-	if (fd_empty(f))
-		return false;
-	ret = fd_file(f)->f_path.dentry->d_sb->s_magic == PROC_SUPER_MAGIC;
-	fdput(f);
-	return ret;
-}
 
 /*
  * vns_resolve_ns_pid() - resolve the "self"/"thread-self"/numeric path
- * component immediately preceding "/ns/{ipc,pid}" (or, via
- * vns_path_wants_idmap() below, the pid directory owning a fabricated
- * uid_map/gid_map/projid_map/setgroups leaf) to the pid every caller of
- * this function subsequently feeds straight into find_get_pid(): the
+ * component naming the pid directory for a userns id-map file. Return the
  * number as seen from the *calling task's own* active pid namespace, not
  * the raw/global (init_pid_ns) number.
  *
@@ -184,7 +359,7 @@ static bool vns_dfd_is_procfs(int dfd)
  * own pid namespace via clone3(CLONE_NEWPID) -- exactly a container's own
  * init process -- since find_get_pid() then looks up a large raw/global
  * number inside a small-numbered idr and finds nothing, making the whole
- * fabricated fd's later magic-link reopen (".../fd/<n>", which every
+ * resulting fd's later magic-link reopen (".../fd/<n>", which every
  * modern runc/containerd performs as a defensive "unsafe procfs" check)
  * fail with -ENOENT even though the original open succeeded.
  *
@@ -213,340 +388,8 @@ static pid_t vns_resolve_ns_pid(const char *comp)
 	return (pid_t)val;
 }
 
-/*
- * vns_path_is_ns_entry() - does @upath (relative to @dfd) name
- * ".../<piddir>/ns/<ns_name>"? If so, resolves the owning task's pid (see
- * vns_resolve_ns_pid()'s own comment for the exact raw-vs-virtual pid
- * semantics that matters here) into *rpid and returns true. Returns false
- * otherwise (including on any parse failure) -- callers must fall back to
- * the real syscall unchanged.
- *
- * @ns_name is one of VNS_PROC_NS_IPC_NAME/VNS_PROC_NS_PID_NAME (both
- * exactly 3 bytes, matching vns_swap_leaf_to_mnt()'s assumption below).
- *
- * @out_len, if non-NULL, receives the total length (excluding the NUL
- * terminator) of the user-supplied path string on a true return, so callers
- * that need to locate the trailing @ns_name component's user address (see
- * vns_ns_fstat_fallback() below) don't have to re-parse @upath a second
- * time.
- */
-static bool vns_path_is_ns_entry(int dfd, const char __user *upath,
-				  const char *ns_name, pid_t *rpid,
-				  long *out_len)
-{
-	char buf[192];
-	char want[16];
-	char *base, *slash1, *piddir;
-	long n;
 
-	if (!upath)
-		return false;
 
-	n = strncpy_from_user(buf, upath, sizeof(buf));
-	if (n <= 0 || n >= sizeof(buf))
-		return false;
-
-	if (buf[0] == '/') {
-		if (strncmp(buf, "/proc/", 6))
-			return false;
-		base = buf + 6;
-	} else {
-		if (dfd == AT_FDCWD || !vns_dfd_is_procfs(dfd))
-			return false;
-		base = buf;
-	}
-
-	slash1 = strchr(base, '/');
-	if (!slash1)
-		return false;
-	*slash1 = '\0';
-	piddir = base;
-	if (!vns_component_is_pid_dir(piddir))
-		return false;
-
-	slash1++;
-	snprintf(want, sizeof(want), "ns/%s", ns_name);
-	if (strcmp(slash1, want))
-		return false;
-
-	*rpid = vns_resolve_ns_pid(piddir);
-	if (*rpid <= 0)
-		return false;
-	if (out_len)
-		*out_len = n;
-	return true;
-}
-
-/*
- * vns_ipc_ns_inum() - resolve @task's effective ipc_namespace inode number
- * into *inum. Returns false (leaving *inum untouched) if @task has none.
- */
-static bool vns_ipc_ns_inum(struct task_struct *task, unsigned int *inum)
-{
-	struct ipc_namespace *ns;
-
-	/*
-	 * vns_task_ipc_ns() returns a borrowed pointer into
-	 * task->nsproxy->ipc_ns with no reference of its own, and reads
-	 * task->nsproxy without task_lock(). Both the pointer read and the
-	 * ref-get must happen under task_lock(task), the same lock every
-	 * nsproxy-swapping path (vns_task_exit_cleanup(), unshare(2), setns(2))
-	 * takes before replacing/freeing task->nsproxy -- otherwise @task
-	 * could swap/free its nsproxy concurrently between the lookup above
-	 * and the vns_ipc_get_ref() below, leaving @ns dangling. The real
-	 * kernel's get_ipc_ns()/put_ipc_ns() are also no-ops when
-	 * CONFIG_IPC_NS=n (see <linux/ipc_namespace.h>) -- exactly the config
-	 * this whole file exists for -- so vns_ipc_get_ref()/vns_put_ipc_ns()
-	 * (the same refcount vendor_kernel's own put path already maintains
-	 * unconditionally) must be used instead.
-	 */
-	task_lock(task);
-	ns = vns_task_ipc_ns(task);
-	if (ns)
-		vns_ipc_get_ref(ns);
-	task_unlock(task);
-	if (!ns)
-		return false;
-
-	*inum = ns->ns.inum;
-	vns_put_ipc_ns(ns);
-	return true;
-}
-
-/*
- * vns_pid_ns_inum() - resolve @task's active pid_namespace inode number
- * into *inum. Returns false (leaving *inum untouched) if @task has none.
- *
- * task_active_pid_ns() (real kernel API, unconditional of CONFIG_PID_NS)
- * must be read under rcu_read_lock() -- the same protection
- * kernel/pid_namespace.c's own pidns_get() uses -- before taking the
- * vendored refcount via vns_get_pid_ns()/vns_put_pid_ns().
- */
-static bool vns_pid_ns_inum(struct task_struct *task, unsigned int *inum)
-{
-	struct pid_namespace *ns;
-
-	rcu_read_lock();
-	ns = task_active_pid_ns(task);
-	if (ns)
-		vns_get_pid_ns(ns);
-	rcu_read_unlock();
-	if (!ns)
-		return false;
-
-	*inum = ns->ns.inum;
-	vns_put_pid_ns(ns);
-	return true;
-}
-
-/*
- * vns_ns_readlink() - fabricate the "<ns_name>:[<ino>]" symlink target text
- * real readlink(2) on .../ns/<ns_name> would return, for the task named by
- * @rpid, using @get_inum to resolve that task's namespace inode number.
- * Returns the string length copied (>= 0) on success, or a negative errno.
- */
-static long vns_ns_readlink(pid_t rpid, const char *ns_name,
-			     bool (*get_inum)(struct task_struct *, unsigned int *),
-			     char __user *ubuf, int bufsiz)
-{
-	struct pid *pid;
-	struct task_struct *task;
-	unsigned int inum;
-	char name[32];
-	int n;
-
-	if (bufsiz < 0)
-		return -EINVAL;
-
-	pid = find_get_pid(rpid);
-	if (!pid)
-		return -ENOENT;
-
-	task = get_pid_task(pid, PIDTYPE_PID);
-	put_pid(pid);
-	if (!task)
-		return -ENOENT;
-
-	if (!get_inum(task, &inum)) {
-		put_task_struct(task);
-		return -ENOENT;
-	}
-	put_task_struct(task);
-
-	n = snprintf(name, sizeof(name), "%s:[%u]", ns_name, inum);
-	if (n < 0)
-		return -ENOENT;
-
-	if (bufsiz > n)
-		bufsiz = n;
-	if (copy_to_user(ubuf, name, bufsiz))
-		return -EFAULT;
-	return bufsiz;
-}
-
-/*
- * vns_ns_readlink_fallback() - shared -ENOENT fallback for
- * readlink(2)/readlinkat(2): only reached once the real syscall has already
- * failed to resolve the caller's original path. Tries ".../ns/ipc" then
- * ".../ns/pid"; returns @ret unchanged if neither matches.
- */
-static long vns_ns_readlink_fallback(int dfd, const char __user *upath,
-				      long ret, char __user *ubuf, int bufsiz)
-{
-	pid_t rpid;
-
-	if (ret != -ENOENT)
-		return ret;
-
-	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_IPC_NAME, &rpid, NULL))
-		return vns_ns_readlink(rpid, VNS_PROC_NS_IPC_NAME,
-					vns_ipc_ns_inum, ubuf, bufsiz);
-	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_PID_NAME, &rpid, NULL))
-		return vns_ns_readlink(rpid, VNS_PROC_NS_PID_NAME,
-					vns_pid_ns_inum, ubuf, bufsiz);
-
-	return ret;
-}
-
-static long (*real_sys_readlinkat)(const struct pt_regs *regs);
-static long (*real_sys_readlink)(const struct pt_regs *regs);
-
-static long vendor_kernel_hook_readlinkat(const struct pt_regs *regs)
-{
-	int dfd = (int)vns_procfs_arg0(regs);
-	const char __user *upath =
-		(const char __user *)(uintptr_t)vns_procfs_arg1(regs);
-	char __user *ubuf =
-		(char __user *)(uintptr_t)vns_procfs_arg2(regs);
-	int bufsiz = (int)vns_procfs_arg3(regs);
-	long ret = real_sys_readlinkat(regs);
-
-	return vns_ns_readlink_fallback(dfd, upath, ret, ubuf, bufsiz);
-}
-
-static long vendor_kernel_hook_readlink(const struct pt_regs *regs)
-{
-	const char __user *upath =
-		(const char __user *)(uintptr_t)vns_procfs_arg0(regs);
-	char __user *ubuf =
-		(char __user *)(uintptr_t)vns_procfs_arg1(regs);
-	int bufsiz = (int)vns_procfs_arg2(regs);
-	long ret = real_sys_readlink(regs);
-
-	return vns_ns_readlink_fallback(AT_FDCWD, upath, ret, ubuf, bufsiz);
-}
-
-/*
- * open(2)/openat(2)/openat2(2) fabrication for /proc/<pid>/ns/{ipc,pid}.
- *
- * Unlike the stat(2)-family fabrication below (which only needs the *call*
- * to succeed, and so can borrow the always-present ns/mnt entry's result),
- * runc's nsexec plainly open(2)s ".../ns/ipc"/".../ns/pid" to get a real fd
- * it then setns(2)s into when `docker exec`/`runc exec` joins a running
- * container -- see this file's own top comment for the exact failure this
- * closes. That fd has to be a genuine nsfs file: vns_sys_setns()
- * (vendor/kernel/nsproxy.c, ported near-verbatim from kernel-common) only
- * accepts it via proc_ns_file(file) (an exact "file->f_op ==
- * &ns_file_operations" pointer comparison) followed by
- * get_proc_ns(file_inode(file)) (a plain "return inode->i_private" cast to
- * struct ns_common *) -- nothing short of a real nsfs dentry/inode pair
- * satisfies both.
- *
- * fs/nsfs.c's ns_get_path() (declared in the already-included
- * <linux/proc_ns.h>, but -- like ns_get_path()'s own callers in
- * fs/proc/namespaces.c -- never EXPORT_SYMBOL'd for direct linking) builds
- * exactly that pair for a given task and ns operations vector: it calls
- * @ns_ops->get(task) to obtain a struct ns_common (taking a reference the
- * returned struct path implicitly owns) and stashes it as a fresh nsfs
- * inode's ->i_private with ->i_fop = &ns_file_operations, memoized on the
- * namespace object itself (ns->stashed) so repeated opens of the same
- * namespace share one dentry, exactly like a real CONFIG_IPC_NS=y/
- * CONFIG_PID_NS=y kernel's own /proc/<pid>/ns/{ipc,pid} would. Passing
- * vns_ipcns_operations/vns_pidns_operations (ipc/namespace.c,
- * kernel/pid_namespace.c -- already the real .get()/.put() callbacks
- * vendor_kernel's own vns_sys_setns()/vns_task_exit_cleanup() paths use)
- * makes the fabricated fd fully consistent with, and interchangeable with,
- * every other vendor_kernel namespace entry point. Both ipc/namespace.o and
- * kernel/pid_namespace.o are already CFI-disabled in vendor/Makefile's
- * VNS_CFI_UNSAFE_OBJS specifically because their proc_ns_operations structs
- * are "real-kernel-invoked via /proc/pid/ns/ opens and ns_get_path()" --
- * this is that call site.
- *
- * ns_get_path() is resolved by name via shadow_hook_resolve() (the same
- * technique used throughout vendor_kernel for non-exported symbols); the
- * remaining struct path -> fd plumbing (get_unused_fd_flags()/
- * dentry_open()/fd_install()/path_put()) mirrors ipc/mqueue.c's
- * vns_mq_open()'s own identical pattern for creating a real fd from a
- * struct path.
- */
-typedef int (*vns_ns_get_path_fn)(struct path *path, struct task_struct *task,
-				   const struct proc_ns_operations *ns_ops);
-
-static long vns_ns_open_fd(pid_t rpid, const struct proc_ns_operations *ns_ops)
-{
-	vns_ns_get_path_fn ns_get_path_fn;
-	struct pid *kpid;
-	struct task_struct *task;
-	struct path path;
-	struct file *file;
-	int fd, err;
-
-	ns_get_path_fn = (vns_ns_get_path_fn)shadow_hook_resolve("ns_get_path");
-	if (!ns_get_path_fn)
-		return -ENOENT;
-
-	kpid = find_get_pid(rpid);
-	if (!kpid)
-		return -ENOENT;
-	task = get_pid_task(kpid, PIDTYPE_PID);
-	put_pid(kpid);
-	if (!task)
-		return -ENOENT;
-
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0) {
-		put_task_struct(task);
-		return fd;
-	}
-
-	err = ns_get_path_fn(&path, task, ns_ops);
-	put_task_struct(task);
-	if (err) {
-		put_unused_fd(fd);
-		return err;
-	}
-
-	file = dentry_open(&path, O_RDONLY, current_cred());
-	path_put(&path);
-	if (IS_ERR(file)) {
-		put_unused_fd(fd);
-		return PTR_ERR(file);
-	}
-
-	fd_install(fd, file);
-	return fd;
-}
-
-/*
- * vns_ns_open_fallback() - shared -ENOENT fallback for open(2)/openat(2)/
- * openat2(2): only reached once the real syscall has already failed to
- * open the caller's original path. Tries ".../ns/ipc" then ".../ns/pid";
- * returns @ret unchanged if neither matches.
- */
-static long vns_ns_open_fallback(int dfd, const char __user *upath, long ret)
-{
-	pid_t rpid;
-
-	if (ret != -ENOENT)
-		return ret;
-
-	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_IPC_NAME, &rpid, NULL))
-		return vns_ns_open_fd(rpid, &vns_ipcns_operations);
-	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_PID_NAME, &rpid, NULL))
-		return vns_ns_open_fd(rpid, &vns_pidns_operations);
-
-	return ret;
-}
 
 /*
  * /proc/<pid>/{uid_map,gid_map,projid_map,setgroups} fabrication on kernels
@@ -575,8 +418,8 @@ static long vns_ns_open_fallback(int dfd, const char __user *upath, long ret)
  * The actual file_operations callbacks (open/read/write) and
  * vns_idmap_create_fd() itself live in glue/vendor_kernel_procfs_userns.c,
  * a separate translation unit kept out of lkm4ctr/Makefile's
- * VNS_CFI_UNSAFE_OBJS: unlike the newfstatat/stat/lstat hooks below, those
- * callbacks are called back into indirectly by the kernel's own
+ * VNS_CFI_UNSAFE_OBJS: those callbacks are called back into indirectly by
+ * the kernel's own
  * (KCFI-checked) VFS and must keep ordinary CFI instrumentation to remain
  * valid indirect-call targets. See that file's header comment for the full
  * rationale.
@@ -632,18 +475,12 @@ static long (*real_sys_openat2)(const struct pt_regs *regs);
 static long (*real_sys_openat)(const struct pt_regs *regs);
 static long (*real_sys_open)(const struct pt_regs *regs);
 
-/*
- * vns_open_fallback() - shared -ENOENT fallback for openat2/openat/open:
- * only reached once the real syscall has already failed to open the path.
- * Fabricates the uid_map/gid_map/projid_map/setgroups leaves when the path
- * matches; returns @ret unchanged otherwise.
- */
+/* Open fallback for the separate user-namespace id-map procfs files. */
 static long vns_open_fallback(int dfd, const char __user *upath, long ret)
 {
 	enum vns_idmap_kind kind;
 	pid_t pid;
 
-	ret = vns_ns_open_fallback(dfd, upath, ret);
 	if (ret != -ENOENT)
 		return ret;
 
@@ -702,175 +539,11 @@ static struct shadow_hook vendor_kernel_open_hook =
 	SHADOW_HOOK(vendor_kernel_open_names, vendor_kernel_hook_open,
 		    &real_sys_open);
 
-static const char * const vendor_kernel_readlinkat_names[] = {
-	"__arm64_sys_readlinkat", "__x64_sys_readlinkat", "sys_readlinkat",
-	NULL,
-};
-static const char * const vendor_kernel_readlink_names[] = {
-	"__arm64_sys_readlink", "__x64_sys_readlink", "sys_readlink", NULL,
-};
-
-static struct shadow_hook vendor_kernel_readlinkat_hook =
-	SHADOW_HOOK(vendor_kernel_readlinkat_names, vendor_kernel_hook_readlinkat,
-		    &real_sys_readlinkat);
-static struct shadow_hook vendor_kernel_readlink_hook =
-	SHADOW_HOOK(vendor_kernel_readlink_names, vendor_kernel_hook_readlink,
-		    &real_sys_readlink);
-
-/*
- * stat(2)/lstat(2)/newfstatat(2) fabrication for /proc/<pid>/ns/{ipc,pid}.
- *
- * readlink(2)/readlinkat(2) above only fixes tools that explicitly read the
- * symlink *target* text. runc/containerd's actual namespace-support probe
- * (libcontainer/configs.IsNamespaceSupported(), consulted both before
- * `docker run` and before `docker exec` joins a running container's
- * namespaces) never reads the target at all: it only calls stat(2) on the
- * path and checks whether the call itself succeeds ("os.Stat(...);
- * supported = err == nil"). Since fs/proc/namespaces.c's ns_entries[] table
- * omits &ipcns_operations/&pidns_operations entirely #ifndef
- * CONFIG_IPC_NS/CONFIG_PID_NS, that stat(2) call fails with plain -ENOENT
- * regardless of the readlink(2) fabrication above, and runc reports
- * "namespace NEWIPC/NEWPID is not supported" (surfacing as "OCI runtime
- * exec failed: ... namespace NEWPID is not supported" on `docker exec`).
- *
- * The stat(2) family has no equivalent "just fabricate the numbers" path
- * here: struct stat's on-wire layout is architecture-specific (arm64 uses
- * the asm-generic layout, x86_64 its own), and none of the kernel's own
- * construction code (fs/stat.c's cp_new_stat() et al) is exported for
- * reuse. Rather than hand-roll and risk getting either arch's field layout
- * wrong, this reuses the real kernel's own (guaranteed ABI-correct)
- * newfstatat(2)/stat(2)/lstat(2) implementation by transparently
- * substituting the ".../ns/ipc" or ".../ns/pid" leaf for ".../ns/mnt" --
- * exactly the same length in both cases, so the substitution can be done in
- * place on the caller's own path buffer with no reallocation -- before
- * calling through to the real syscall. The mount namespace entry is the one
- * /proc/<pid>/ns/ entry that is never Kconfig-gated (mount namespaces are
- * core kernel functionality, not an optional CONFIG_*_NS symbol), so it is
- * always present to redirect to. Every caller of this stat(2) family only
- * cares whether the call succeeds or fails (see above), not which
- * namespace's numbers come back, so borrowing the mnt namespace's stat(2)
- * result is harmless. The path bytes are restored to the original leaf
- * immediately afterwards so the caller's buffer is left exactly as it was.
- */
-static bool vns_swap_leaf_to_mnt(const char __user *upath, long len)
-{
-	if (len < 3)
-		return false;
-	if (copy_to_user((char __user *)upath + len - 3, "mnt", 3))
-		return false;
-	return true;
-}
-
-static void vns_restore_mnt_leaf(const char __user *upath, long len,
-				  const char *orig_leaf)
-{
-	/* Best-effort: nothing sane to do if this copy fails. */
-	unsigned long unused = copy_to_user((char __user *)upath + len - 3,
-					     orig_leaf, 3);
-	(void)unused;
-}
-
-/*
- * vns_ns_fstat_fallback() - shared -ENOENT fallback for
- * newfstatat/stat/lstat: only reached once the real syscall already failed
- * to stat the caller's original path. Returns @ret unchanged unless the
- * path names ".../ns/ipc" or ".../ns/pid", in which case it retries the
- * real syscall against ".../ns/mnt" instead (see the block comment above).
- */
-static long vns_ns_fstat_fallback(int dfd, const char __user *upath,
-				   long ret,
-				   long (*real_stat_fn)(const struct pt_regs *),
-				   const struct pt_regs *regs)
-{
-	pid_t rpid;
-	long len;
-	const char *ns_name;
-
-	if (ret != -ENOENT)
-		return ret;
-
-	if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_IPC_NAME, &rpid, &len))
-		ns_name = VNS_PROC_NS_IPC_NAME;
-	else if (vns_path_is_ns_entry(dfd, upath, VNS_PROC_NS_PID_NAME, &rpid,
-				       &len))
-		ns_name = VNS_PROC_NS_PID_NAME;
-	else
-		return ret;
-
-	if (!vns_swap_leaf_to_mnt(upath, len))
-		return ret;
-
-	ret = real_stat_fn(regs);
-	vns_restore_mnt_leaf(upath, len, ns_name);
-	return ret;
-}
-
-static long (*real_sys_newfstatat)(const struct pt_regs *regs);
-static long (*real_sys_stat)(const struct pt_regs *regs);
-static long (*real_sys_lstat)(const struct pt_regs *regs);
-
-static long vendor_kernel_hook_newfstatat(const struct pt_regs *regs)
-{
-	int dfd = (int)vns_procfs_arg0(regs);
-	const char __user *upath =
-		(const char __user *)(uintptr_t)vns_procfs_arg1(regs);
-	long ret = real_sys_newfstatat(regs);
-
-	return vns_ns_fstat_fallback(dfd, upath, ret, real_sys_newfstatat,
-				      regs);
-}
-
-static long vendor_kernel_hook_stat(const struct pt_regs *regs)
-{
-	const char __user *upath =
-		(const char __user *)(uintptr_t)vns_procfs_arg0(regs);
-	long ret = real_sys_stat(regs);
-
-	return vns_ns_fstat_fallback(AT_FDCWD, upath, ret, real_sys_stat,
-				      regs);
-}
-
-static long vendor_kernel_hook_lstat(const struct pt_regs *regs)
-{
-	const char __user *upath =
-		(const char __user *)(uintptr_t)vns_procfs_arg0(regs);
-	long ret = real_sys_lstat(regs);
-
-	return vns_ns_fstat_fallback(AT_FDCWD, upath, ret, real_sys_lstat,
-				      regs);
-}
-
-static const char * const vendor_kernel_newfstatat_names[] = {
-	"__arm64_sys_newfstatat", "__x64_sys_newfstatat", "sys_newfstatat",
-	NULL,
-};
-static const char * const vendor_kernel_stat_names[] = {
-	"__arm64_sys_stat", "__x64_sys_newstat", "__x64_sys_stat", "sys_stat",
-	NULL,
-};
-static const char * const vendor_kernel_lstat_names[] = {
-	"__arm64_sys_lstat", "__x64_sys_newlstat", "__x64_sys_lstat",
-	"sys_lstat", NULL,
-};
-
-static struct shadow_hook vendor_kernel_newfstatat_hook =
-	SHADOW_HOOK(vendor_kernel_newfstatat_names,
-		    vendor_kernel_hook_newfstatat, &real_sys_newfstatat);
-static struct shadow_hook vendor_kernel_stat_hook =
-	SHADOW_HOOK(vendor_kernel_stat_names, vendor_kernel_hook_stat,
-		    &real_sys_stat);
-static struct shadow_hook vendor_kernel_lstat_hook =
-	SHADOW_HOOK(vendor_kernel_lstat_names, vendor_kernel_hook_lstat,
-		    &real_sys_lstat);
-
 struct shadow_hook *vendor_kernel_procfs_hooks[] = {
+	&vendor_kernel_proc_evict_inode_hook,
+	&vendor_kernel_proc_ns_dir_lookup_hook,
 	&vendor_kernel_openat2_hook,
 	&vendor_kernel_openat_hook,
 	&vendor_kernel_open_hook,
-	&vendor_kernel_readlinkat_hook,
-	&vendor_kernel_readlink_hook,
-	&vendor_kernel_newfstatat_hook,
-	&vendor_kernel_stat_hook,
-	&vendor_kernel_lstat_hook,
 	NULL,
 };

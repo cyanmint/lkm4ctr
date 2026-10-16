@@ -6,9 +6,13 @@ kind of system calls `runc`'s `nsexec` does (`unshare(2)`/`fork(2)`/
 `setns(2)`, plus `mq_*`/`msg*`/`mount(2)` for the other container-relevant
 subsystems) and reports, for each feature, whether it observed:
 
-* **PASS** — the syscall succeeded *and* a real, verifiable side effect
-  proves genuine isolation (e.g. a child's hostname change after
-  `unshare(CLONE_NEWUTS)` is never visible to the parent).
+* **PASS** — the test's stated success condition was verified. For
+  namespace-isolation tests, that requires a real, verifiable side effect
+  (e.g. a child's hostname change after `unshare(CLONE_NEWUTS)` is never
+  visible to the parent). For `proc_ns_access`, PASS means only that the
+  namespace path is accessible; for `proc_ns_link`, PASS means only that
+  `O_PATH|O_NOFOLLOW` opened a symlink; neither diagnostic proves namespace
+  isolation.
 * **STUB** — the syscall succeeded, but no isolation was actually
   observed: a "bookkeeping-only" fallback accepted the flag/call and did
   nothing behind it.
@@ -62,7 +66,7 @@ Example output (privileged, on a kernel with full native namespace support):
 
 ```
 lkm4ctr_checker v4.0 - userspace container-isolation diagnostics
-PASS = real isolation observed, STUB = bookkeeping only (no real isolation), FAIL = syscall itself failed
+PASS = test-specific behavior verified (isolation where applicable), STUB = bookkeeping only, FAIL = syscall itself failed
 --------------------------------------------------------------------------------------------------------
 ns_uts (UTS)                 PASS  child set 'shadowchk-4733', parent still 'myhost'
 ns_pid (PID)                 PASS  grandchild became pid 1 in new namespace
@@ -73,6 +77,8 @@ ptrace                       PASS  PTRACE_TRACEME/PTRACE_CONT round-tripped succ
 wait4/waitid                 PASS  wait4() and waitid() both correctly reaped pid/exit status
 ns_user (USER)               PASS  uid remapped 1 -> 65534 inside namespace
 ns_user (id mapping)         PASS  getuid/getgid/getresuid/getresgid all report mapped id 0 (real 1/1)
+proc_ns_access (IPC)         PASS  access(/proc/self/ns/ipc, F_OK) succeeded
+proc_ns_access (PID)         PASS  access(/proc/self/ns/pid, F_OK) succeeded
 ns_ipc (IPC)                 PASS  namespace id changed (ipc:[4026531839] -> ipc:[4026532267])
 ns_net (NET)                 PASS  namespace id changed (net:[4026531833] -> net:[4026532268])
 ns_mnt (MNT)                 PASS  namespace id changed (mnt:[4026531832] -> mnt:[4026532327])
@@ -102,7 +108,9 @@ summary: 0 FAIL, 0 STUB (bookkeeping-only)
 | `wait4/waitid`        | Two throwaway children with distinct exit codes, reaped via `wait4()` and `waitid(P_PID, ..., WEXITED)` respectively; PASS only if both report the correct pid *and* exit status. |
 | `ns_user (USER)`      | Fork a child that `unshare(CLONE_NEWUSER)`s; PASS if `geteuid()` inside changed from the caller's real (non-root) uid (either remapped to `0`, matching a docker-style single mapping, or to the kernel's overflow uid `65534` when unmapped) — both are real, observable isolation. If the checker itself is running as uid `0` (where a remap-to-0 can't be told apart from "not remapped, still 0"), it instead forks a child, `setuid(1)`s it, and re-runs this same test as uid `1` so it stays conclusive instead of being `SKIP`ped. |
 | `ns_user (id mapping)` | Same `unshare(CLONE_NEWUSER)`, but then writes an explicit `"0 <real> 1"` mapping to `/proc/self/uid_map`/`gid_map` (denying `setgroups(2)` first, exactly like every container runtime does) and checks that `getuid`/`getgid`/`getresuid`/`getresgid` **all** report the mapped id `0` — a strictly stronger check of vendor_kernel's vendored user-namespace credential paths than `ns_user (USER)`'s single `geteuid()` sample. Same uid-`0` → `setuid(1)`-and-retry fallback as `ns_user (USER)` above. |
-| `ns_ipc`              | Fork a child that `unshare(CLONE_NEWIPC)`s, then compares `readlink("/proc/self/ns/ipc")` between parent and child (an appearing/changing `ipc:[id]` counts as PASS even if the "before" readlink itself failed with `-ENOENT`, which happens whenever `CONFIG_IPC_NS` is genuinely absent and no real `/proc/<pid>/ns/ipc` entry exists at all). This is now backed by vendor_kernel's own real isolation path: `glue/vendor_kernel_procfs.c` fabricates the distinct `/proc/<pid>/ns/ipc` entry when needed, and the vendored SysV IPC/mqueue paths operate on a namespace-scoped `ipc_namespace` instead of the host default — see [`VENDOR_KERNEL.md`](VENDOR_KERNEL.md). |
+| `proc_ns_access (IPC/PID)` | Separately calls `access("/proc/self/ns/ipc", F_OK)` and `access("/proc/self/ns/pid", F_OK)`, matching Droidspaces' namespace-capability probe. This is a visibility diagnostic only: PASS means the path is accessible, not that isolation works. The checker does not synthesize missing entries; a kernel without a safe compatibility implementation will report FAIL when its native procfs entry is absent. |
+| `proc_ns_link (IPC/PID)` | Opens both paths with `O_PATH|O_NOFOLLOW`, then verifies the resulting file descriptor is a symlink. This exercises the real procfs leaf without following it and covers flags used by callers that retain a no-follow link descriptor; PASS does not prove namespace isolation. |
+| `ns_ipc`              | Fork a child that `unshare(CLONE_NEWIPC)`s, then compares `readlink("/proc/self/ns/ipc")` between parent and child. When native `CONFIG_IPC_NS` is absent, the procfs lookup hook instantiates a real symlink for the current task's `/proc/self/ns/ipc`; directory enumeration and `/proc/<other-pid>/ns/ipc` are not added. The vendored SysV IPC/mqueue paths operate on namespace-scoped `ipc_namespace` objects — see [`VENDOR_KERNEL.md`](VENDOR_KERNEL.md). |
 | `clone(CLONE_NEWIPC)` | Creates a parent semaphore, then `clone()`s a child with `CLONE_NEWIPC`; PASS only if the child cannot see the parent's semaphore and can create one locally. This directly exercises namespace installation before the child can run its first SysV IPC operation. |
 | `ns_net`/`ns_mnt`/`ns_cgroup` | Fork a child that `unshare()`s the corresponding `CLONE_NEW*` flag, then compares `readlink("/proc/self/ns/<type>")` between parent and child. A genuinely new kernel namespace object always gets a distinct `type:[inode]` id; an accepted-but-inert fallback leaves it unchanged. These three have no cheap additional functional test the way UTS/PID/USER/IPC do — see [`VENDOR_KERNEL.md`](VENDOR_KERNEL.md) for the current NET/MNT/CGROUP caveats. |
 | `mqueue (POSIX)`      | Real `mq_open()` + `mq_send()` + `mq_receive()` round trip of an actual payload, not just checking `mq_open()`'s return value. |
