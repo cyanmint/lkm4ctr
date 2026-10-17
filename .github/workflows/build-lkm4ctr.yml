@@ -447,7 +447,7 @@ jobs:
               bash qemu_test.sh testsuite/image1.ext4 "$kernel" /init injected-ramdisk.cpio 2>&1 | tee "$log"
             rc=${PIPESTATUS[0]}
             echo "launcher_rc=$rc"
-            if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|RMMOD_TEST_FAILED|PROC_NS_ACCESS_FAIL|PROC_NS_FALLBACK_REQUIRED_FAILED|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
+            if grep -Eq 'Kernel panic|Oops:|BUG:|list_add corruption|list_del corruption|CFI failure|Unknown symbol|RMMOD_TEST_FAILED|PROC_NS_ACCESS_FAIL|PROC_NS_SELF_LINK_FAIL|PROC_NS_SELF_READLINK_FAIL|PROC_NS_PID_LINK_FAIL|PROC_NS_PID_READLINK_FAIL|PROC_NS_FALLBACK_REQUIRED_FAILED|lkm4ctr\.ko failed to load|insmod: failed' "$log"; then
               echo "KERNEL_ERROR: $name (see $log)"
               failures=$((failures + 1))
             elif [ "$proc_ns_fallback_test" -eq 1 ] && ! grep -Fq 'PROC_NS_FALLBACK_REQUIRED_PASS' "$log"; then

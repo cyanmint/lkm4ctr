@@ -70,6 +70,10 @@ lkm4ctr-objs := \
 OBJECT_FILES_NON_STANDARD_kernel/pid_namespace.o := y
 
 ccflags-y += -I$(src)/../glue
+# Android 17-6.18 procfs stores the exact target PID in its private inode;
+# compile the accessor against this KMI's own fs/proc/internal.h, never a
+# copied struct layout or hard-coded offset.
+ccflags-y += -I$(srctree)/fs
 
 # [BUILD-COMPAT] Disable Clang CFI (CONFIG_CFI_CLANG, -fsanitize=(k)cfi) for
 # every object that either (a) resolves a kernel symbol at runtime via

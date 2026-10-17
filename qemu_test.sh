@@ -121,6 +121,23 @@ lkm4ctr_proc_ns_check_after_load() {
 	for proc_ns_name in ipc pid; do
 		if lkm4ctr_proc_ns_path_accessible "$proc_ns_name"; then
 			echo "PROC_NS_ACCESS_PASS: phase=post-insmod ns=$proc_ns_name"
+			if [ -L "/proc/self/ns/$proc_ns_name" ]; then
+				proc_ns_link_target=$(/busybox readlink \
+					"/proc/self/ns/$proc_ns_name" 2>/dev/null) ||
+					proc_ns_link_target=
+				case "$proc_ns_link_target" in
+					"$proc_ns_name:"*)
+						echo "PROC_NS_SELF_READLINK_PASS: ns=$proc_ns_name target=$proc_ns_link_target"
+						;;
+					*)
+						echo "PROC_NS_SELF_READLINK_FAIL: ns=$proc_ns_name target=${proc_ns_link_target:-unavailable}"
+						proc_ns_failed=1
+						;;
+				esac
+			else
+				echo "PROC_NS_SELF_LINK_FAIL: ns=$proc_ns_name"
+				proc_ns_failed=1
+			fi
 			if [ "$proc_ns_name" = "ipc" ]; then
 				proc_ns_pre=$proc_ns_ipc_pre
 				proc_ns_native=$proc_ns_ipc_native

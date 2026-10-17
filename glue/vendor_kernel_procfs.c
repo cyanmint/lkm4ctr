@@ -6,17 +6,18 @@
  * procfs compiles its namespace directory entries into ns_entries[];
  * CONFIG_IPC_NS=n or CONFIG_PID_NS=n therefore makes the component lookup
  * return -ENOENT even though vendor_kernel has real namespace objects. The
- * The proc_ns_dir_lookup hook retries only that missing component for a
- * procfs namespace directory whose exact PID identity was captured from
- * procfs's native parent-directory instantiation (or a current-task alias)
- * and calls procfs's own proc_ns_instantiate(). This creates a normal procfs
- * symlink; subsequent VFS, LSM, ptrace, and nsfs handling is unchanged.
+ * proc_ns_dir_lookup hook retries only that missing component for a
+ * procfs namespace directory whose exact PID identity comes from the
+ * matching procfs inode accessor on 6.18+ or an older-KMI instantiation
+ * capture (or a current-task alias), and calls procfs's own
+ * proc_ns_instantiate(). This creates a normal procfs symlink; subsequent
+ * VFS, LSM, ptrace, and nsfs handling is unchanged.
  * Since procfs inodes do not pin module-owned proc_ns_operations, each
  * fallback inode holds a module reference until proc_evict_inode() completes.
  * The created dentry is unhashed immediately so ordinary lookups do not
  * leave a cached inode pinning the module until unrelated dcache reclaim. If
- * a required helper or target-PID capture is unavailable, the affected
- * lookup remains fail-closed.
+ * a required helper or target-PID identity source is unavailable, the
+ * affected lookup remains fail-closed.
  *
  * No readlink/stat/open syscall result is fabricated for IPC/PID paths.
  * Those syscall fallbacks cannot distinguish a missing procfs entry from
@@ -41,7 +42,11 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/version.h>
 #include <asm/ptrace.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#include <proc/internal.h>
+#endif
 
 #include "../vendor/vendor_kernel.h"
 #include "shadow_hook.h"
@@ -207,6 +212,21 @@ static void vns_procfs_map_task_pid(struct inode *inode, struct pid *pid)
 
 static struct task_struct *vns_procfs_task_for_inode(struct inode *inode)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	struct pid *pid;
+	struct task_struct *task;
+
+	if (!inode || !inode->i_sb ||
+	    inode->i_sb->s_magic != PROC_SUPER_MAGIC)
+		return NULL;
+	pid = proc_pid(inode);
+	if (!pid)
+		return NULL;
+	pid = get_pid(pid);
+	task = get_pid_task(pid, PIDTYPE_PID);
+	put_pid(pid);
+	return task;
+#else
 	struct vns_procfs_task_pid *entry;
 	struct pid *pid = NULL;
 	struct task_struct *task;
@@ -227,6 +247,7 @@ static struct task_struct *vns_procfs_task_for_inode(struct inode *inode)
 	task = get_pid_task(pid, PIDTYPE_PID);
 	put_pid(pid);
 	return task;
+#endif
 }
 
 static void vns_procfs_unmap_task_pid(struct inode *inode)
@@ -469,6 +490,11 @@ int vns_procfs_compat_lifecycle_init(void)
 	err = shadow_hook_install(&vendor_kernel_proc_evict_inode_hook);
 	if (err)
 		return err;
+	if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)) {
+		LKM4CTR_INFO("vendor_kernel",
+			     "using the KMI-matched procfs inode PID accessor for arbitrary-PID namespace fallback");
+		return 0;
+	}
 	if (!vns_proc_pid_make_inode_real || !vns_proc_get_task_pid_real) {
 		LKM4CTR_WARN("vendor_kernel",
 			     "procfs target-PID capture is unavailable; /proc/self aliases remain supported, but arbitrary-PID fallback stays fail-closed");

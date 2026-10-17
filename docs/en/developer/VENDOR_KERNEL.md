@@ -184,15 +184,24 @@ options are disabled.
 `glue/vendor_kernel_procfs.c` hooks `proc_ns_dir_lookup()`. After the native
 lookup returns `-ENOENT` for `ipc` or `pid`, it retries only when native
 support for that namespace is absent and the parent is a confirmed procfs
-namespace directory. For `/proc/<pid>/ns`, an inode-keyed side table records
-the `struct pid *` that native procfs used when `proc_pid_make_inode()`
-created a process-specific directory inode. This constructor hook is used
-instead of `proc_pident_instantiate()`: LTO can inline the latter into the
-pathname-lookup path while retaining its readdir callback copy, causing an
-otherwise-installed hook to miss `/proc/<pid>/ns` lookups. The hook brackets
-native inode construction with referenced `get_task_pid()` snapshots and
-records the identity only when the PID association stayed unchanged; it does
-not inspect private `proc_inode` layout or reconstruct a PID from a pathname.
+namespace directory. For `/proc/<pid>/ns`, the fallback obtains the exact
+`struct pid *` native procfs associated with the process-specific directory
+inode. Before 6.18, an inode-keyed side table records that pointer. Where the
+native `proc_pid_make_inode()` entry is hookable, the capture hook brackets
+the constructor with referenced `get_task_pid()` snapshots and records the
+identity only when the PID association stays unchanged. This older-KMI path
+does not inspect private `proc_inode` layout. Android 17-6.18's stock LTO build
+can inline this constructor into direct pathname lookup, so the entry hook
+misses live `/proc/<pid>/ns` inodes. On 6.18+, the fallback calls
+`proc_pid(inode)` from the matching KMI's `fs/proc/internal.h` to obtain the
+exact `struct pid *` stored in the inode, takes its own PID reference, and
+then resolves the task. It is compiled against the matching KMI source and
+its actual `proc_inode` definition (including layout randomization); it does not
+copy the struct, infer offsets, or reconstruct identity from a pathname. It
+also avoids the `de_thread()` gap in `security_task_to_inode()`, which runs
+after the PID pointer is stored and does not receive that pointer. Older KMI
+lines retain the inode-keyed side table and constructor-bracketing hook.
+
 `/proc/self/ns` and
 `/proc/thread-self/ns` retain a current-task alias fallback when no side-table
 record is available. The namespace lookup then obtains the task from the
@@ -203,13 +212,15 @@ symlink-follow checks, and nsfs behavior are not replaced by a syscall-level
 success result. If an identity or required helper is unavailable, the
 affected lookup remains `ENOENT`.
 
-The PID side table is cleaned by the native procfs inode-eviction hook and is
-cleared after compatibility hooks are quiesced and drained. It holds PID
-references, not task pointers or module callbacks. If a `/proc/<pid>/ns`
-directory inode was already cached before the compatibility hooks were
-installed, no exact PID mapping exists for it; arbitrary-PID fallback stays
-fail-closed until procfs recreates that directory. The `/proc/self` and
-`/proc/thread-self` aliases remain independently supported in that case.
+On pre-6.18 KMI lines, the PID side table is cleaned by the native procfs
+inode-eviction hook and cleared after compatibility hooks are quiesced and
+drained. It holds PID references, not task pointers or module callbacks. If a
+`/proc/<pid>/ns` directory inode was already cached before those hooks were
+installed, no side-table identity exists for it and arbitrary-PID fallback
+stays fail-closed until procfs recreates that directory. On 6.18+, the direct
+inode accessor also works for a directory inode cached before module load.
+The `/proc/self` and `/proc/thread-self` aliases remain independently
+supported in either case.
 
 For PID fallback on `CONFIG_PID_NS=n`, `init_pid_ns.ns.ops` is NULL by the
 native kernel's configuration. The hook attaches the vendored PID namespace
@@ -233,17 +244,21 @@ are available.
 Droidspaces' `access("/proc/self/ns/{ipc,pid}", F_OK)` probe and the
 checker's self-path diagnostics therefore exercise this real lookup path.
 The compatibility is deliberately limited: it does not add these names to
-directory enumeration, and arbitrary-PID fallback requires a target identity
-captured when procfs creates that task's `ns` directory. The previous
+directory enumeration. Before 6.18, arbitrary-PID fallback requires a target
+identity captured when procfs creates that task's `ns` directory; on 6.18+,
+it reads the stored identity through the matching KMI's procfs accessor. The previous
 readlink/stat/open fallbacks for IPC/PID were removed because a syscall's
 `-ENOENT` cannot distinguish a missing entry from path, permission, or LSM
 denial. No permission check is bypassed to emulate namespace links.
 
 The procfs compatibility hooks are best-effort/non-fatal (a resolution
 failure only logs a warning), so they do not block `vendor_kernel`'s core
-namespace functionality from loading. Target-PID capture is installed
-independently of the optional lookup-hook group so inode identity tracking
-and eviction cleanup remain paired if that group is toggled at runtime.
+namespace functionality from loading. On KMI lines before 6.18, target-PID
+capture is installed independently of the optional lookup-hook group so inode
+identity tracking and eviction cleanup remain paired if that group is toggled
+at runtime. On 6.18+, the matching private procfs header supplies the stored
+PID accessor directly, so no target-PID capture hook or side-table entry is
+needed.
 Only IPC and PID get this treatment: `UTS`/`USER` are likewise vendored
 unconditionally of their respective `CONFIG_*_NS` option, but no device has
 been observed lacking `CONFIG_UTS_NS`/`CONFIG_USER_NS` while also lacking
