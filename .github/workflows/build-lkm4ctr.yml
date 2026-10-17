@@ -30,6 +30,9 @@
 # The resulting .ko for a given KMI is uploaded on its own
 # (lkm4ctr-modules-<kmi>-arm64); it no longer bundles the userspace
 # checker binary (see below).
+# A separate KernelSU module ZIP is assembled from all built KMI artifacts
+# and includes the action script, boot service, multilingual WebUI and every
+# matching lkm4ctr-<kmi>-arm64.ko file.
 #
 # lkm4ctr_checker is a plain userspace diagnostic *binary*, not a kernel
 # module: it performs real syscalls to observe whether isolation actually
@@ -86,12 +89,12 @@ on:
   workflow_dispatch:
     inputs:
       kmis:
-        description: 'Comma-separated DDK KMIs to build against (blank = full matrix)'
+        description: 'Comma-separated DDK KMIs to build against (blank = full matrix; KernelSU ZIP/release requires the full matrix)'
         required: false
         type: string
         default: ''
       create_release:
-        description: 'Create a GitHub release with lkm4ctr.ko (all built KMIs) and lkm4ctr_checker'
+        description: 'Create a GitHub release with lkm4ctr.ko, lkm4ctr_checker, and the KernelSU module ZIP'
         required: false
         type: boolean
         default: false
@@ -123,22 +126,33 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      is_full_matrix: ${{ steps.set-matrix.outputs.is_full_matrix }}
       test_matrix: ${{ steps.set-matrix.outputs.test_matrix }}
       ddk_release: ${{ steps.set-matrix.outputs.ddk_release }}
     steps:
       - name: Compute KMI matrix
         id: set-matrix
         run: |
-          kmis="${{ github.event.inputs.kmis }}"
+          kmis="$REQUESTED_KMIS"
           if [ -z "$kmis" ]; then
             kmis="$DEFAULT_KMIS"
           fi
           json=$(python3 -c "
           import json, sys
           kmis = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
+          supported = [k.strip() for k in sys.argv[2].split(',') if k.strip()]
+          if not kmis:
+              raise SystemExit('KMI list must not be empty')
+          if len(kmis) != len(set(kmis)):
+              raise SystemExit('KMI list contains duplicates')
+          unknown = sorted(set(kmis) - set(supported))
+          if unknown:
+              raise SystemExit('Unsupported KMI(s): ' + ', '.join(unknown))
           print(json.dumps(kmis))
-          " "$kmis")
+          " "$kmis" "$DEFAULT_KMIS")
           echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          is_full_matrix=$(python3 -c 'import json,sys; requested=json.loads(sys.argv[1]); supported=[k.strip() for k in sys.argv[2].split(",") if k.strip()]; print("true" if len(requested)==len(supported) and set(requested)==set(supported) else "false")' "$json" "$DEFAULT_KMIS")
+          echo "is_full_matrix=$is_full_matrix" >> "$GITHUB_OUTPUT"
           # The "test" matrix is the "build" matrix above plus
           # $TEST_ONLY_KMIS (KMIs with no DDK image/build job yet, booted
           # without a module artifact), deduplicated.
@@ -159,6 +173,8 @@ jobs:
           # "jobs.<job_id>.container", so downstream jobs cannot reference
           # env.DDK_RELEASE directly there.
           echo "ddk_release=$DDK_RELEASE" >> "$GITHUB_OUTPUT"
+        env:
+          REQUESTED_KMIS: ${{ github.event.inputs.kmis }}
 
   # lkm4ctr_checker is a plain userspace diagnostic binary (see
   # lkm4ctr_checker/README.md): it has no kernel-module build dependency
@@ -241,9 +257,11 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build lkm4ctr.ko (arm64, via DDK container)
+        env:
+          KMI: ${{ matrix.kmi }}
         run: |
           set -euxo pipefail
-          KDIR="/opt/ddk/kdir/${{ matrix.kmi }}"
+          KDIR="/opt/ddk/kdir/$KMI"
           ROOT="$GITHUB_WORKSPACE/vendor"
 
           # Mirror module lifecycle/exit-hook diagnostics to QEMU's serial log.
@@ -265,6 +283,47 @@ jobs:
         with:
           name: lkm4ctr-modules-${{ matrix.kmi }}-arm64
           path: modules-out/
+
+
+  build-kernelsu-module:
+    needs: [prepare, build, build-checker]
+    if: ${{ needs.prepare.outputs.is_full_matrix == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download all per-KMI lkm4ctr modules
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lkm4ctr-modules-*-arm64
+          path: kernelsu-module-input
+
+      - name: Download lkm4ctr_checker
+        uses: actions/download-artifact@v8
+        with:
+          name: lkm4ctr_checker-arm64
+          path: kernelsu-checker-input
+
+      - name: Validate module controls and build KernelSU ZIP
+        run: |
+          set -euo pipefail
+          sh -n kernelsu/control.sh kernelsu/action.sh kernelsu/service.sh
+          python3 -m unittest discover -s kernelsu/tests -v
+          python3 kernelsu/build_module.py \
+            kernelsu-module-input \
+            kernelsu-checker-input/lkm4ctr_checker \
+            "$KMI_MATRIX_JSON" \
+            "$RUNNER_TEMP/lkm4ctr-kernelsu-module.zip"
+          unzip -l "$RUNNER_TEMP/lkm4ctr-kernelsu-module.zip"
+        env:
+          KMI_MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+
+      - name: Upload KernelSU module ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: lkm4ctr-kernelsu-module
+          path: ${{ runner.temp }}/lkm4ctr-kernelsu-module.zip
 
 
   # Build one injected (busybox) ramdisk with the KMI's remotely built module
@@ -376,6 +435,8 @@ jobs:
       #        image1.ext4 (/dev/nvme0n1) and switch_root's into it. The host
       #        launcher enables module testing for this official stock image. ---
       - name: Build injected (busybox) ramdisk
+        env:
+          KMI: ${{ matrix.kmi }}
         run: |
           set -e
           mkdir injected-ramdisk/
@@ -387,7 +448,7 @@ jobs:
           if [ -f payload/lkm4ctr.ko ]; then
             cp payload/lkm4ctr.ko injected-ramdisk/
           else
-            echo "no lkm4ctr.ko built for ${{ matrix.kmi }} -- boot/checker baseline only"
+            echo "no lkm4ctr.ko built for $KMI -- boot/checker baseline only"
           fi
 
           # Merged host-launcher/stage-1/stage-2 script: committed at
@@ -467,7 +528,7 @@ jobs:
             fi
           done
           if [ "$kernel_count" -eq 0 ]; then
-            echo "No kernel images found for ${{ matrix.kmi }}"
+            echo "No kernel images found for $KMI"
             exit 1
           fi
           if [ "$failures" -ne 0 ]; then
@@ -490,12 +551,11 @@ jobs:
           path: qemu-Image.*.log
 
   # Only runs for a manual workflow_dispatch run with the "create_release"
-  # input checked on. Collects lkm4ctr.ko for every KMI built in the "build"
-  # matrix job plus the lkm4ctr_checker binary and publishes them all as
-  # assets on a single GitHub release.
+  # input checked on. Publishes the per-KMI modules, checker and combined
+  # KernelSU module ZIP as assets on one GitHub release.
   release:
-    needs: [prepare, build, build-checker]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release }}
+    needs: [prepare, build, build-checker, build-kernelsu-module]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && needs.build-kernelsu-module.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -515,6 +575,12 @@ jobs:
           name: lkm4ctr_checker-arm64
           path: release-assets/lkm4ctr_checker-arm64
 
+      - name: Download KernelSU module ZIP
+        uses: actions/download-artifact@v8
+        with:
+          name: lkm4ctr-kernelsu-module
+          path: release-assets/kernelsu-module
+
       - name: Assemble release assets
         run: |
           set -euo pipefail
@@ -527,19 +593,23 @@ jobs:
           done
           cp release-assets/lkm4ctr_checker-arm64/lkm4ctr_checker release-out/lkm4ctr_checker-arm64
           chmod +x release-out/lkm4ctr_checker-arm64
+          cp release-assets/kernelsu-module/lkm4ctr-kernelsu-module.zip release-out/lkm4ctr-kernelsu-module.zip
           echo "=== release assets ==="
           ls -la release-out
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          KMI_MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.release_tag }}"
+          tag="$RELEASE_TAG"
           if [ -z "$tag" ]; then
             tag="lkm4ctr-$(date -u +%Y%m%d%H%M%S)"
           fi
           gh release create "$tag" release-out/* \
-            --repo "${{ github.repository }}" \
+            --repo "$REPOSITORY" \
             --title "$tag" \
-            --notes "Automated lkm4ctr build (KMIs: ${{ needs.prepare.outputs.matrix }})"
+            --notes "Automated lkm4ctr build (KMIs: $KMI_MATRIX_JSON)"

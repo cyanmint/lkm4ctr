@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="title">lkm4ctr Control Panel</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { margin: 0; padding: 20px; color: #202124; background: #f4f6f8; }
+    main { max-width: 680px; margin: 0 auto; }
+    header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    h1 { margin: 0 0 6px; font-size: 1.4rem; }
+    select { max-width: 150px; padding: 7px; border: 1px solid #d8dee5; border-radius: 8px; background: #fff; color: inherit; font: inherit; }
+    p { margin: 6px 0 18px; color: #5f6368; }
+    .status { padding: 14px 16px; margin-bottom: 18px; border: 1px solid #d8dee5; border-radius: 12px; background: #fff; }
+    .status div { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; }
+    .status span { color: #5f6368; }
+    .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    button { min-height: 52px; padding: 10px 12px; border: 0; border-radius: 10px; color: #fff; background: #2457c5; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: #4b5563; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .output-label { display: block; margin-top: 16px; font-weight: 650; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 180px; margin-top: 6px; padding: 10px; border: 1px solid #d8dee5; border-radius: 8px; background: #fff; color: inherit; font: 13px/1.45 ui-monospace, monospace; resize: vertical; }
+    #message { min-height: 1.5em; margin-top: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (prefers-color-scheme: dark) {
+      body { color: #e8eaed; background: #17191c; }
+      .status { border-color: #3c4043; background: #22252a; }
+      textarea { border-color: #3c4043; background: #22252a; }
+      .status span, p { color: #bdc1c6; }
+    }
+    @media (max-width: 440px) {
+      body { padding: 14px; }
+      .actions { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1 data-i18n="title">lkm4ctr Control Panel</h1>
+      <select id="language" aria-label="Language">
+        <option value="en">English</option>
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+      </select>
+    </header>
+    <p data-i18n="intro">Selects the matching KMI module for this kernel. Check the kernel log if loading fails.</p>
+    <section class="status" aria-live="polite">
+      <div><span data-i18n="kmiLabel">Current KMI</span><strong id="kmi" data-i18n="loading">Loading…</strong></div>
+      <div><span data-i18n="moduleLabel">Module state</span><strong id="module-state" data-i18n="loading">Loading…</strong></div>
+      <div><span data-i18n="autoloadLabel">Boot auto-load</span><strong id="auto-state" data-i18n="loading">Loading…</strong></div>
+    </section>
+    <section class="actions" aria-label="Actions" data-i18n-aria="actionsLabel">
+      <button data-command="load" data-i18n="load">1 · Load lkm4ctr now</button>
+      <button class="secondary" data-command="unload" data-i18n="unload">2 · Unload lkm4ctr now</button>
+      <button data-command="enable-autoload" data-i18n="enableAutoload">3 · Load lkm4ctr at boot</button>
+      <button class="secondary" data-command="disable-autoload" data-i18n="disableAutoload">4 · Do not load lkm4ctr at boot</button>
+      <button data-command="checker" data-i18n="checker">5 · Run lkm4ctr_checker</button>
+    </section>
+    <label class="output-label" for="operation-output" data-i18n="outputLabel">Command output</label>
+    <textarea id="operation-output" rows="9" readonly spellcheck="false" aria-live="polite"></textarea>
+    <div id="message" role="status" aria-live="polite"></div>
+  </main>
+  <script>
+    (() => {
+      const control = '/data/adb/modules/lkm4ctr/control.sh';
+      const busybox = '/data/adb/ksu/bin/busybox';
+      const message = document.getElementById('message');
+      const operationOutput = document.getElementById('operation-output');
+      const buttons = [...document.querySelectorAll('button[data-command]')];
+      const languagePicker = document.getElementById('language');
+      let callbackCounter = 0;
+      const translations = {
+        en: {
+          title: 'lkm4ctr Control Panel', intro: 'Selects the matching KMI module for this kernel. Check the kernel log if loading fails.', actionsLabel: 'Module actions', languageLabel: 'Language',
+          kmiLabel: 'Current KMI', moduleLabel: 'Module state', autoloadLabel: 'Boot auto-load', loading: 'Loading…',
+          unknown: 'Unknown', loaded: 'Loaded', unloaded: 'Not loaded', enabled: 'Enabled', disabled: 'Disabled',
+          load: '1 · Load lkm4ctr now', unload: '2 · Unload lkm4ctr now', enableAutoload: '3 · Load lkm4ctr at boot',
+          disableAutoload: '4 · Do not load lkm4ctr at boot', checker: '5 · Run lkm4ctr_checker',
+          outputLabel: 'Command output', running: 'Working…', done: 'Operation completed', checkerDone: 'Checker completed', noOutput: 'The command returned no output.',
+          apiMissing: 'KernelSU WebUI exec API is unavailable', noResponse: 'No response', failed: 'Operation failed', statusFailed: 'Could not read status'
+        },
+        'zh-Hans': {
+          title: 'lkm4ctr 控制面板', intro: '根据当前内核自动选择匹配的 KMI 模块。加载失败时请查看内核日志。', actionsLabel: '模组操作', languageLabel: '界面语言',
+          kmiLabel: '当前 KMI', moduleLabel: '模块状态', autoloadLabel: '开机自动加载', loading: '读取中…',
+          unknown: '未知', loaded: '已加载', unloaded: '未加载', enabled: '已启用', disabled: '已关闭',
+          load: '1 · 立即 insmod lkm4ctr', unload: '2 · 立即 rmmod lkm4ctr', enableAutoload: '3 · 开机自动 insmod lkm4ctr',
+          disableAutoload: '4 · 不要开机自动 insmod lkm4ctr', checker: '5 · 运行 lkm4ctr_checker',
+          outputLabel: '命令输出', running: '正在执行…', done: '操作完成', checkerDone: '诊断完成', noOutput: '命令没有返回输出。',
+          apiMissing: 'KernelSU WebUI exec API 不可用', noResponse: '无响应', failed: '操作失败', statusFailed: '无法读取状态'
+        },
+        'zh-Hant': {
+          title: 'lkm4ctr 控制面板', intro: '依目前核心自動選擇相符的 KMI 模組。載入失敗時請檢查核心日誌。', actionsLabel: '模組操作', languageLabel: '介面語言',
+          kmiLabel: '目前 KMI', moduleLabel: '模組狀態', autoloadLabel: '開機自動載入', loading: '讀取中…',
+          unknown: '未知', loaded: '已載入', unloaded: '未載入', enabled: '已啟用', disabled: '已關閉',
+          load: '1 · 立即 insmod lkm4ctr', unload: '2 · 立即 rmmod lkm4ctr', enableAutoload: '3 · 開機自動 insmod lkm4ctr',
+          disableAutoload: '4 · 不要開機自動 insmod lkm4ctr', checker: '5 · 執行 lkm4ctr_checker',
+          outputLabel: '命令輸出', running: '執行中…', done: '操作完成', checkerDone: '診斷完成', noOutput: '命令沒有傳回輸出。',
+          apiMissing: 'KernelSU WebUI exec API 無法使用', noResponse: '沒有回應', failed: '操作失敗', statusFailed: '無法讀取狀態'
+        }
+      };
+      const browserLanguage = (navigator.language || 'en').toLowerCase();
+      const language = browserLanguage.startsWith('zh-hant') ||
+        browserLanguage.startsWith('zh-tw') ||
+        browserLanguage.startsWith('zh-hk') ||
+        browserLanguage.startsWith('zh-mo') ? 'zh-Hant' :
+        browserLanguage.startsWith('zh') ? 'zh-Hans' : 'en';
+      languagePicker.value = language;
+
+      function text(key) {
+        return translations[languagePicker.value][key] || translations.en[key] || key;
+      }
+
+      function localize() {
+        const selectedLanguage = languagePicker.value;
+        document.documentElement.lang = selectedLanguage === 'zh-Hans' ? 'zh-CN' : selectedLanguage === 'zh-Hant' ? 'zh-TW' : 'en';
+        document.querySelectorAll('[data-i18n]').forEach(element => {
+          element.textContent = text(element.dataset.i18n);
+        });
+        document.querySelectorAll('[data-i18n-aria]').forEach(element => {
+          element.setAttribute('aria-label', text(element.dataset.i18nAria));
+        });
+        languagePicker.setAttribute('aria-label', text('languageLabel'));
+      }
+
+      function execRoot(command) {
+        if (!window.ksu || typeof window.ksu.exec !== 'function') {
+          return Promise.reject(new Error(text('apiMissing')));
+        }
+        const callbackName = `lkm4ctrExec_${Date.now()}_${callbackCounter++}`;
+        return new Promise((resolve, reject) => {
+          window[callbackName] = (errno, stdout, stderr) => {
+            delete window[callbackName];
+            resolve({ errno, stdout, stderr });
+          };
+          try {
+            window.ksu.exec(command, '{}', callbackName);
+          } catch (error) {
+            delete window[callbackName];
+            reject(error);
+          }
+        });
+      }
+
+      async function run(command) {
+        const result = await execRoot(`${busybox} sh ${control} ${command}`);
+        if (!result || result.errno !== 0) {
+          const output = result ? [result.stdout, result.stderr].filter(Boolean).join('\n').trim() : '';
+          const error = new Error(output || `${text('failed')} (${result ? result.errno : text('noResponse')})`);
+          error.output = output;
+          throw error;
+        }
+        return { stdout: result.stdout || '', stderr: result.stderr || '' };
+      }
+
+      function updateStatus(output) {
+        const values = Object.fromEntries(output.trim().split(/\r?\n/).map(line => line.split('=')));
+        document.getElementById('kmi').textContent = values.KMI || text('unknown');
+        document.getElementById('module-state').textContent = values.STATE === 'loaded' ? text('loaded') : values.STATE === 'unloaded' ? text('unloaded') : text('unknown');
+        document.getElementById('auto-state').textContent = values.AUTOLOAD === 'enabled' ? text('enabled') : values.AUTOLOAD === 'disabled' ? text('disabled') : text('unknown');
+      }
+
+      async function refresh() {
+        const result = await run('status');
+        updateStatus(result.stdout);
+      }
+
+      async function execute(command) {
+        buttons.forEach(button => { button.disabled = true; });
+        message.textContent = text('running');
+        operationOutput.value = text('running');
+        try {
+          const result = await run(command);
+          operationOutput.value = [result.stdout, result.stderr].filter(Boolean).join('\n').trim() || text('noOutput');
+          message.textContent = command === 'checker' ? text('checkerDone') : text('done');
+          try {
+            await refresh();
+          } catch (error) {
+            message.textContent = `${text('statusFailed')}: ${error.message}`;
+          }
+        } catch (error) {
+          operationOutput.value = error.output || error.message || text('noOutput');
+          message.textContent = text('failed');
+        } finally {
+          buttons.forEach(button => { button.disabled = false; });
+        }
+      }
+
+      languagePicker.addEventListener('change', () => {
+        localize();
+        refresh().catch(error => { message.textContent = `${text('statusFailed')}: ${error.message}`; });
+      });
+      buttons.forEach(button => button.addEventListener('click', () => execute(button.dataset.command)));
+      localize();
+      refresh().catch(error => { message.textContent = `${text('statusFailed')}: ${error.message}`; });
+    })();
+  </script>
+</body>
+</html>

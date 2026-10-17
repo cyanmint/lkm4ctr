@@ -6,10 +6,11 @@
 
 ## 1. 项目提供什么
 
-项目产生两个相互独立的产物：
+项目产生三个产物：
 
 - `lkm4ctr-<kmi>-arm64.ko`：内核模块。它是一个合并模块，包含 vendored namespace、IPC/mqueue、overlayfs 实现以及 hook/glue 代码。
 - `lkm4ctr_checker-arm64`：可选的用户空间诊断程序。它不是内核模块，不需要 `insmod`，会执行真实系统调用并报告 `PASS`、`STUB` 或 `FAIL`。
+- `lkm4ctr-kernelsu-module.zip`：KernelSU 模组，包含所有 KMI 版本、`lkm4ctr_checker`、action 脚本、开机服务和带命令输出框的多语言 WebUI。
 
 模块的目标是让原版容器运行时直接工作，不需要项目专用的运行时补丁。
 
@@ -18,7 +19,7 @@
 ### 设备
 
 - 已 root 的 **arm64** Android 设备。示例中的 `sudo` 表示 Termux 中可获得 root 的配置，也可以改用 `su -c`。
-- 当前支持的 Android GKI KMI 系列：`android12-5.10`、`android13-5.10`、`android13-5.15`、`android14-5.15`、`android14-6.1`、`android15-6.6`、`android16-6.12`。
+- 当前支持的 Android GKI KMI 系列：`android12-5.10`、`android13-5.10`、`android13-5.15`、`android14-5.15`、`android14-6.1`、`android15-6.6`、`android16-6.12`、`android17-6.18`。
 - 与设备 **完全匹配** 的 KMI 和内核 ABI 模块。`android14-5.15` 不能替代 `android14-6.1`。
 - 设备内核仍需具备项目要求的其他能力，尤其是 `CONFIG_NAMESPACES=y`、`CONFIG_NET_NS=y` 和 `CONFIG_TIME_NS=y`。树外模块不能安全地补出所有内核子系统。
 - 足够的存储空间和内存。
@@ -61,9 +62,12 @@ getprop ro.build.version.release
 ```text
 lkm4ctr-android14-6.1-arm64.ko
 lkm4ctr_checker-arm64
+lkm4ctr-kernelsu-module.zip
 ```
 
 下载与设备 `<kmi>` 完全一致的 `.ko`。不要通过改名掩盖不匹配，也不要加载其他 KMI 的模块。
+
+也可以在 KernelSU Manager 中安装 `lkm4ctr-kernelsu-module.zip`。ZIP 包含所有 KMI 版本和 `lkm4ctr_checker`，会根据内核 release 自动选择匹配版本；默认开启开机自动加载。点击模块的 Action 按钮后，等待音量键：音量上切换立即加载/卸载，音量下切换开机自动加载；如果无法读取音量键或等待期间没有按键，默认执行音量上操作。WebUI 提供四个模组控制按钮和一个 checker 按钮，下方只读文本框显示 insmod/rmmod 与 checker 输出；界面会根据系统语言选择简体中文、繁体中文或英文，也可手动切换。
 
 ```sh
 mkdir -p "$HOME/lkm4ctr"

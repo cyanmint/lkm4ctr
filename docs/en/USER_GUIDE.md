@@ -6,10 +6,11 @@ This is a user guide, not a promise of full Linux-container compatibility. Read 
 
 ## 1. What the project provides
 
-The project produces two separate artifacts:
+The project produces three artifacts:
 
 - `lkm4ctr-<kmi>-arm64.ko`: the kernel module. It is one merged module containing the vendored namespace, IPC/mqueue, and overlayfs paths plus the hook/glue code.
 - `lkm4ctr_checker-arm64`: an optional userspace diagnostic program. It is not a kernel module and does not need `insmod`; it performs real syscalls and reports `PASS`, `STUB`, or `FAIL`.
+- `lkm4ctr-kernelsu-module.zip`: a KernelSU module containing every KMI build, `lkm4ctr_checker`, an action script, a boot service, and a multilingual WebUI with command output.
 
 The module is intended to make stock container runtimes work. They do not need a project-specific runtime patch.
 
@@ -26,6 +27,7 @@ The module is intended to make stock container runtimes work. They do not need a
   - `android14-6.1`
   - `android15-6.6`
   - `android16-6.12`
+  - `android17-6.18`
 - A module built for the **exact** KMI and kernel ABI. A module for `android14-5.15` is not interchangeable with one for `android14-6.1`.
 - A device kernel with the remaining prerequisites required by the project, notably `CONFIG_NAMESPACES=y`, `CONFIG_NET_NS=y`, and `CONFIG_TIME_NS=y`. The module cannot make every kernel subsystem exist safely from outside the kernel.
 - Sufficient free storage and memory for the container images and Docker data root.
@@ -68,9 +70,12 @@ The easiest path is a GitHub release asset from the project's [releases page](ht
 ```text
 lkm4ctr-android14-6.1-arm64.ko
 lkm4ctr_checker-arm64
+lkm4ctr-kernelsu-module.zip
 ```
 
 Download the `.ko` whose `<kmi>` matches the device. Do not rename a module to hide a mismatch, and do not load a module built for another KMI.
+
+To use KernelSU, install `lkm4ctr-kernelsu-module.zip` from the KernelSU Manager. It includes all KMI builds and `lkm4ctr_checker`, detects the matching KMI from the kernel release, and enables boot auto-load by default. Its Action button waits up to 30 seconds for a volume key: Volume Up toggles immediate load/unload, Volume Down toggles boot auto-load, and Volume Up is the fallback if key input is unavailable or no key is detected. The WebUI provides four module controls and a checker button; a read-only output box displays load/unload and checker results. English, Simplified Chinese, and Traditional Chinese labels are auto-selected from the device language, with a language selector.
 
 Copy the files to a readable location, for example:
 

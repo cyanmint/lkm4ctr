@@ -19,9 +19,9 @@ detail — read the relevant one before changing that area.
 
 ## Repository layout
 
-The project is a flat, unified tree: only `glue/` and
+The project is a flat, unified tree: `glue/`, `kernelsu/`, and
 `lkm4ctr_checker/` are code this project writes; everything under
-`vendor/` is vendored code.
+`vendor/` is vendored kernel code.
 
 - `vendor/` — the unified kernel module build directory and kbuild
   `Makefile`/`Kconfig`, at the project root.
@@ -47,14 +47,21 @@ The project is a flat, unified tree: only `glue/` and
       compat layers.
 - `lkm4ctr_checker/` — a plain **userspace** diagnostic binary (not a
   kernel module). No build-time or load-time dependency on `lkm4ctr.ko`.
+- `kernelsu/` — the KernelSU module wrapper: KMI detection and load controls,
+  boot auto-load service, action-button volume-key handling, bundled userspace
+  checker, multilingual WebUI with command-output display, package builder,
+  and host-side packaging/control tests. The release
+  ZIP bundles every `.ko` built by the workflow matrix.
 - `qemu_test.sh` — a single merged script with three roles, dispatched on
   PID/argv[0]/flags (see its own header comment): host-side QEMU launcher,
   ramdisk stage-1/stage-2 init, and a `-t` "checker mode" that runs
   `lkm4ctr_checker` before/after `insmod`.
 - `remove_syscalls.py` — maintenance helper (not run in CI).
 - `.github/workflows/build-lkm4ctr.yml` — CI: builds `lkm4ctr.ko` across
-  a KMI matrix inside SukiSU-Ultra's DDK container images and boot-tests
-  every KMI under QEMU.
+  a KMI matrix inside SukiSU-Ultra's DDK container images, assembles the
+  KernelSU ZIP from those build artifacts, and boot-tests every KMI under
+  QEMU. Manual releases include the standalone `.ko` assets, checker, and
+  KernelSU ZIP.
 
 The `shadow_cgdevices` submodule (cgroup-device compatibility hook shim)
 has been removed entirely; it is not vendored or replaced elsewhere in this
@@ -125,6 +132,10 @@ over.
   container image.
 - `build-checker` job: builds `lkm4ctr_checker` once (arm64, static),
   independent of the KMI matrix.
+- `build-kernelsu-module` job: packages all built KMI variants and the checker
+  with the KernelSU controls and WebUI, then uploads `lkm4ctr-kernelsu-module.zip`.
+  It runs only for a complete supported-KMI matrix; partial manual builds cannot
+  publish an incomplete KernelSU ZIP or release.
 - `test` job: a matrix over every KMI (the build matrix plus
   `TEST_ONLY_KMIS`, i.e. KMIs with no DDK image/build yet, tested boot-only
   without a module). Downloads the pinned, official Google arm64 GKI `Image`
@@ -138,7 +149,8 @@ over.
   summary — informational, not a pass/fail gate.
 - `release` job: only on a manual `workflow_dispatch` with
   `create_release` checked; publishes every built `lkm4ctr-<kmi>-arm64.ko`
-  plus the checker binary as GitHub release assets.
+  plus the checker binary and `lkm4ctr-kernelsu-module.zip` as GitHub release
+  assets.
 
 There is no separate lint step; the closest to "linting" this module gets
 is a clean `modpost` (no section-mismatch/unresolved-symbol warnings) in
