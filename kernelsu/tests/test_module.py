@@ -389,17 +389,28 @@ class KernelSUModuleTests(unittest.TestCase):
         self.assertIn("id: lkm4ctr", manifest)
         self.assertIn(f"summary: {KERNELSU_DESCRIPTION}", manifest)
         self.assertIn(
-            'license: "Public Domain (AI files); GPL; see LICENSES.md"',
+            'license: "Public Domain (AI-generated); GPL (vendor/); see copying.txt"',
             manifest,
         )
         self.assertIn("tags: [android, containers, docker, kernel, root]", manifest)
         self.assertIn('assetPattern: "lkm4ctr-kernelsu-module.zip"', manifest)
 
-    def test_license_inventory_matches_ai_and_gpl_file_sets(self) -> None:
-        inventory = (ROOT / "LICENSES.md").read_text(encoding="utf-8")
+    def test_copying_file_summarizes_project_license_scope(self) -> None:
+        copying = (ROOT / "copying.txt").read_text(encoding="utf-8")
         self.assertEqual(len(AI_PUBLIC_DOMAIN_FILES), 31)
-        self.assertIn("All 31 are therefore included in the Public Domain set", inventory)
-        self.assertIn("All of `vendor/` is excluded from the AI reclassification", inventory)
+        self.assertIn("vendor/", copying)
+        self.assertIn("glue/", copying)
+        self.assertIn("kernelsu/", copying)
+        self.assertIn("lkm4ctr_checker/", copying)
+        self.assertIn("AI-generated", copying)
+        self.assertIn("no copyright subsists", copying)
+        self.assertIn("CC0", copying)
+        self.assertIn("WTFPL", copying)
+        self.assertIn("0BSD", copying)
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", copying)
+        self.assertIn("Version 2, June 1991", copying)
+        self.assertIn("END OF TERMS AND CONDITIONS", copying)
+        self.assertNotIn("glue/vendor_kernel_nsfs_lifecycle.c", copying)
         for relative_path in ("kernelsu/customize.sh", "module.yaml"):
             with self.subTest(ai_metadata=relative_path):
                 source = (ROOT / relative_path).read_text(encoding="utf-8")
@@ -415,7 +426,6 @@ class KernelSUModuleTests(unittest.TestCase):
                     source.splitlines()[0],
                 )
                 self.assertNotIn("SPDX-License-Identifier: GPL", source)
-                self.assertIn(f"`{relative_path}`", inventory)
 
         remaining_project_gpl = subprocess.run(
             [
@@ -443,7 +453,6 @@ class KernelSUModuleTests(unittest.TestCase):
             with self.subTest(vendored_source=relative_path):
                 source = (ROOT / relative_path).read_text(encoding="utf-8")
                 self.assertIn("SPDX-License-Identifier: GPL", source.splitlines()[0])
-        self.assertIn("not a CC0 dedication", inventory)
 
     def test_kernel_module_and_checker_report_release_version(self) -> None:
         kernel_module = (ROOT / "glue" / "lkm4ctr_main.c").read_text(encoding="utf-8")
@@ -499,6 +508,10 @@ class KernelSUModuleTests(unittest.TestCase):
                 )
                 self.assertIn("action.sh", names)
                 self.assertIn("customize.sh", names)
+                self.assertIn("copying.txt", names)
+                self.assertEqual(
+                    archive.read("copying.txt"), (ROOT / "copying.txt").read_bytes()
+                )
                 self.assertIn("service.sh", names)
                 self.assertIn("control.sh", names)
                 self.assertIn("webroot/index.html", names)

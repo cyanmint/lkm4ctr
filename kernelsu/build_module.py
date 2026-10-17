@@ -22,6 +22,7 @@ MODULE_FILES = (
     "service.sh",
     "webroot/index.html",
 )
+ROOT_FILES = ("copying.txt",)
 EXECUTABLE_FILES = {"control.sh", "action.sh", "service.sh", "bin/lkm4ctr_checker"}
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -80,6 +81,11 @@ def main() -> None:
         source = MODULE / relative
         if not source.is_file():
             fail(f"Required module file is missing: {source}")
+        entries[relative] = source.read_bytes()
+    for relative in ROOT_FILES:
+        source = ROOT / relative
+        if not source.is_file():
+            fail(f"Required project file is missing: {source}")
         entries[relative] = source.read_bytes()
     entries["bin/lkm4ctr_checker"] = checker_data
     entries["supported_kmis.txt"] = ("\n".join(requested) + "\n").encode("utf-8")

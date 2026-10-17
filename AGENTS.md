@@ -173,3 +173,20 @@ the `build` job.
   classification — update the relevant README (and the summary table in
   the top-level `README.md`) whenever a change moves a feature between
   these categories.
+
+## Copyright and licensing
+
+- When vendoring files or code, preserve their original license notices and
+  copyright attribution. Do not replace upstream licenses with the project's
+  licensing policy; retain the source's original license text when required.
+- Files newly created by an agent for this project must be identified as
+  Public Domain when they are AI-generated and therefore not copyrightable
+  under the project's provenance policy. This is not a waiver or dedication
+  of an existing copyright: no copyright subsists in such content to waive.
+  Do not use CC0, WTFPL, or 0BSD as substitutes for this declaration.
+- These rules apply to newly created content, not to vendored or pre-existing
+  material. When editing an existing file or combining sources, preserve its
+  original notices and classify only the new, AI-generated material; do not
+  relabel mixed or uncertain content file-wide without provenance evidence.
+- Keep the root `copying.txt` aligned with these directory-level boundaries,
+  and include it in the packaged KernelSU module.

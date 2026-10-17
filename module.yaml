@@ -4,7 +4,7 @@ id: lkm4ctr
 name: lkm4ctr Kernel Module
 summary: Auto-load lkm4ctr.ko enables Docker and containers on all currently released arm64 Android GKI KMIs; no custom kernel flash.
 description: README.md
-license: "Public Domain (AI files); GPL; see LICENSES.md"
+license: "Public Domain (AI-generated); GPL (vendor/); see copying.txt"
 tags: [android, containers, docker, kernel, root]
 release:
   assetPattern: "lkm4ctr-kernelsu-module.zip"
