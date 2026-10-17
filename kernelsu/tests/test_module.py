@@ -228,7 +228,7 @@ class KernelSUModuleTests(unittest.TestCase):
                 "exit \"${TEST_CONTROL_STATUS:-0}\"\n",
                 encoding="utf-8",
             )
-            control.chmod(0o755)
+            control.chmod(0o644)
 
             for status, expected_message in (
                 ("0", "Volume Up action completed successfully."),
@@ -250,6 +250,29 @@ class KernelSUModuleTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
                     else:
                         self.assertEqual(result.returncode, 7)
+
+    def test_service_runs_control_when_control_is_not_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            module_dir = Path(directory)
+            service = module_dir / "service.sh"
+            service.write_bytes((ROOT / "kernelsu" / "service.sh").read_bytes())
+            control = module_dir / "control.sh"
+            control.write_text(
+                "#!/bin/sh\nprintf 'control finished: %s\\n' \"$1\"\n",
+                encoding="utf-8",
+            )
+            control.chmod(0o644)
+            result = subprocess.run(
+                ["sh", portable(service)], check=False, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "control finished: boot")
+
+    def test_shell_entrypoints_invoke_control_through_shell(self) -> None:
+        for script in (ACTION, ROOT / "kernelsu" / "service.sh"):
+            with self.subTest(script=script.name):
+                contents = script.read_text(encoding="utf-8")
+                self.assertIn('sh "$MODDIR/control.sh"', contents)
 
     def test_both_volume_keys_use_the_postoperation_result_handler(self) -> None:
         action = ACTION.read_text(encoding="utf-8")
