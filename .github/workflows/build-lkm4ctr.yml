@@ -584,15 +584,21 @@ jobs:
       - name: Assemble release assets
         run: |
           set -euo pipefail
+          module_version="$(python3 -c 'from pathlib import Path; print(next((line.split("=", 1)[1].strip() for line in Path("kernelsu/module.prop").read_text(encoding="utf-8").splitlines() if line.startswith("version=")), ""))')"
+          if [ -z "$module_version" ]; then
+            echo "module.prop has no version" >&2
+            exit 1
+          fi
           mkdir -p release-out
           for d in release-assets/lkm4ctr-modules-*-arm64/; do
             name="$(basename "$d")"
             kmi="${name#lkm4ctr-modules-}"
             kmi="${kmi%-arm64}"
-            cp "$d/lkm4ctr.ko" "release-out/lkm4ctr-${kmi}-arm64.ko"
+            cp "$d/lkm4ctr.ko" "release-out/lkm4ctr-${module_version}-${kmi}-arm64.ko"
           done
-          cp release-assets/lkm4ctr_checker-arm64/lkm4ctr_checker release-out/lkm4ctr_checker-arm64
-          chmod +x release-out/lkm4ctr_checker-arm64
+          cp release-assets/lkm4ctr_checker-arm64/lkm4ctr_checker \
+            "release-out/lkm4ctr_checker-${module_version}-arm64"
+          chmod +x "release-out/lkm4ctr_checker-${module_version}-arm64"
           cp release-assets/kernelsu-module/lkm4ctr-kernelsu-module.zip release-out/lkm4ctr-kernelsu-module.zip
           echo "=== release assets ==="
           ls -la release-out

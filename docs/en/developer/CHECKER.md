@@ -65,7 +65,7 @@ unprivileged `unshare(2)` calls will legitimately report `FAIL` with
 Example output (privileged, on a kernel with full native namespace support):
 
 ```
-lkm4ctr_checker v4.0 - userspace container-isolation diagnostics
+lkm4ctr_checker v4.0.5 - userspace container-isolation diagnostics
 PASS = test-specific behavior verified (isolation where applicable), STUB = bookkeeping only, FAIL = syscall itself failed
 --------------------------------------------------------------------------------------------------------
 ns_uts (UTS)                 PASS  child set 'shadowchk-4733', parent still 'myhost'

@@ -150,9 +150,9 @@ over.
   upstream `kernel/common` (android14-6.1) and posts the diff to the job
   summary — informational, not a pass/fail gate.
 - `release` job: only on a manual `workflow_dispatch` with
-  `create_release` checked; publishes every built `lkm4ctr-<kmi>-arm64.ko`
-  plus the checker binary and `lkm4ctr-kernelsu-module.zip` as GitHub release
-  assets.
+  `create_release` checked; publishes every built
+  `lkm4ctr-4.0.5-<kmi>-arm64.ko` plus `lkm4ctr_checker-4.0.5-arm64` and
+  `lkm4ctr-kernelsu-module.zip` as GitHub release assets.
 
 There is no separate lint step; the closest to "linting" this module gets
 is a clean `modpost` (no section-mismatch/unresolved-symbol warnings) in

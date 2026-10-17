@@ -5,9 +5,9 @@
 ## Start here
 
 1. Check the device kernel: `uname -a`
-2. Either download the matching `lkm4ctr-<kmi>-arm64.ko` release asset or install `lkm4ctr-kernelsu-module.zip` in KernelSU; the KernelSU module selects the matching KMI automatically
+2. Either download the matching `lkm4ctr-4.0.5-<kmi>-arm64.ko` release asset or install `lkm4ctr-kernelsu-module.zip` in KernelSU; the KernelSU module selects the matching KMI automatically
 3. Install `fuse-overlayfs` and configure Docker to use it by default (see the user manual)
-4. For a standalone `.ko` install, load it as root: `sudo insmod /path/to/lkm4ctr-<matching-kmi>-arm64.ko` (KernelSU installs and loads the bundled module itself)
+4. For a standalone `.ko` install, load it as root: `sudo insmod /path/to/lkm4ctr-4.0.5-<matching-kmi>-arm64.ko` (KernelSU installs and loads the bundled module itself)
 5. Start Docker: `sudo dockerd --config-file="$PREFIX/etc/docker/daemon.json" --bridge=none --experimental`
 6. Test a container: `sudo docker run --network=host --rm -it docker.io/library/alpine:latest /bin/sh`
 

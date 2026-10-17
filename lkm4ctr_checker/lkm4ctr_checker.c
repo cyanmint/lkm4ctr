@@ -109,7 +109,7 @@
 #define CLONE_SYSVSEM 0x00040000
 #endif
 
-#define LKM4CTR_CHECKER_VERSION "4.0"
+#define LKM4CTR_CHECKER_VERSION "4.0.5"
 
 enum shadow_checker_result {
 	SHADOW_CHECKER_PASS = 0,

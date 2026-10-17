@@ -8,8 +8,8 @@ This is a user guide, not a promise of full Linux-container compatibility. Read 
 
 The project produces three artifacts:
 
-- `lkm4ctr-<kmi>-arm64.ko`: the kernel module. It is one merged module containing the vendored namespace, IPC/mqueue, and overlayfs paths plus the hook/glue code.
-- `lkm4ctr_checker-arm64`: an optional userspace diagnostic program. It is not a kernel module and does not need `insmod`; it performs real syscalls and reports `PASS`, `STUB`, or `FAIL`.
+- `lkm4ctr-<version>-<kmi>-arm64.ko`: the versioned kernel module asset. It is one merged module containing the vendored namespace, IPC/mqueue, and overlayfs paths plus the hook/glue code.
+- `lkm4ctr_checker-<version>-arm64`: the versioned optional userspace diagnostic program. It is not a kernel module and does not need `insmod`; it performs real syscalls and reports `PASS`, `STUB`, or `FAIL`.
 - `lkm4ctr-kernelsu-module.zip`: a KernelSU module containing every KMI build, `lkm4ctr_checker`, an action script, a boot service, and a multilingual WebUI with command output.
 
 The module is intended to make stock container runtimes work. They do not need a project-specific runtime patch.
@@ -68,22 +68,22 @@ For example, a kernel string containing `android14-6.1` belongs to the `android1
 The easiest path is a GitHub release asset from the project's [releases page](https://github.com/cyanmint/lkm4ctr/releases):
 
 ```text
-lkm4ctr-android14-6.1-arm64.ko
-lkm4ctr_checker-arm64
+lkm4ctr-4.0.5-android14-6.1-arm64.ko
+lkm4ctr_checker-4.0.5-arm64
 lkm4ctr-kernelsu-module.zip
 update.json
 ```
 
 Download the `.ko` whose `<kmi>` matches the device. Do not rename a module to hide a mismatch, and do not load a module built for another KMI.
 
-To use KernelSU, install `lkm4ctr-kernelsu-module.zip` from the KernelSU Manager. It includes all KMI builds and `lkm4ctr_checker`, detects the matching KMI from the kernel release, and enables boot auto-load by default. Its Action button waits up to 30 seconds for a volume key: Volume Up toggles immediate load/unload, Volume Down toggles boot auto-load, and Volume Up is the fallback if key input is unavailable or no key is detected. The WebUI provides four module controls and a checker button; a read-only output box displays load/unload and checker results. English, Simplified Chinese, and Traditional Chinese labels are auto-selected from the device language, with a language selector. Releases also include `update.json`; after a release with a higher `versionCode` is published, KernelSU Manager can offer an in-app update to the latest module ZIP.
+To use KernelSU, install `lkm4ctr-kernelsu-module.zip` from the KernelSU Manager. It includes all KMI builds and `lkm4ctr_checker`, detects the matching KMI from the kernel release, and enables boot auto-load by default. Its Action button waits up to 30 seconds for a volume key: Volume Up toggles immediate load/unload, Volume Down toggles boot auto-load, and Volume Up is the fallback if key input is unavailable or no key is detected. After the selected operation finishes, the Action output shows its result. The WebUI provides four module controls and a checker button; a read-only output box displays load/unload and checker results. English, Simplified Chinese, and Traditional Chinese labels are auto-selected from the device language, with a language selector. Releases also include `update.json`; after a release with a higher `versionCode` is published, KernelSU Manager can offer an in-app update to the latest module ZIP.
 
 Copy the files to a readable location, for example:
 
 ```sh
 mkdir -p "$HOME/lkm4ctr"
-cp /sdcard/Download/lkm4ctr-android14-6.1-arm64.ko "$HOME/lkm4ctr/lkm4ctr.ko"
-cp /sdcard/Download/lkm4ctr_checker-arm64 "$HOME/lkm4ctr/"
+cp /sdcard/Download/lkm4ctr-4.0.5-android14-6.1-arm64.ko "$HOME/lkm4ctr/lkm4ctr.ko"
+cp /sdcard/Download/lkm4ctr_checker-4.0.5-arm64 "$HOME/lkm4ctr/lkm4ctr_checker"
 chmod 755 "$HOME/lkm4ctr/lkm4ctr_checker"
 ```
 

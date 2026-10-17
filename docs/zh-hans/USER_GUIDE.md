@@ -8,8 +8,8 @@
 
 项目产生三个产物：
 
-- `lkm4ctr-<kmi>-arm64.ko`：内核模块。它是一个合并模块，包含 vendored namespace、IPC/mqueue、overlayfs 实现以及 hook/glue 代码。
-- `lkm4ctr_checker-arm64`：可选的用户空间诊断程序。它不是内核模块，不需要 `insmod`，会执行真实系统调用并报告 `PASS`、`STUB` 或 `FAIL`。
+- `lkm4ctr-<version>-<kmi>-arm64.ko`：带版本号的内核模块。它是一个合并模块，包含 vendored namespace、IPC/mqueue、overlayfs 实现以及 hook/glue 代码。
+- `lkm4ctr_checker-<version>-arm64`：带版本号的用户空间诊断程序。它不是内核模块，不需要 `insmod`，会执行真实系统调用并报告 `PASS`、`STUB` 或 `FAIL`。
 - `lkm4ctr-kernelsu-module.zip`：KernelSU 模组，包含所有 KMI 版本、`lkm4ctr_checker`、action 脚本、开机服务和带命令输出框的多语言 WebUI。
 
 模块的目标是让原版容器运行时直接工作，不需要项目专用的运行时补丁。
@@ -60,20 +60,20 @@ getprop ro.build.version.release
 最简单的方式是从项目的 [Releases 页面](https://github.com/cyanmint/lkm4ctr/releases) 下载：
 
 ```text
-lkm4ctr-android14-6.1-arm64.ko
-lkm4ctr_checker-arm64
+lkm4ctr-4.0.5-android14-6.1-arm64.ko
+lkm4ctr_checker-4.0.5-arm64
 lkm4ctr-kernelsu-module.zip
 update.json
 ```
 
 下载与设备 `<kmi>` 完全一致的 `.ko`。不要通过改名掩盖不匹配，也不要加载其他 KMI 的模块。
 
-也可以在 KernelSU Manager 中安装 `lkm4ctr-kernelsu-module.zip`。ZIP 包含所有 KMI 版本和 `lkm4ctr_checker`，会根据内核 release 自动选择匹配版本；默认开启开机自动加载。点击模块的 Action 按钮后，等待音量键：音量上切换立即加载/卸载，音量下切换开机自动加载；如果无法读取音量键或等待期间没有按键，默认执行音量上操作。WebUI 提供四个模组控制按钮和一个 checker 按钮，下方只读文本框显示 insmod/rmmod 与 checker 输出；界面会根据系统语言选择简体中文、繁体中文或英文，也可手动切换。Release 会同时发布 `update.json`；当后续版本提高 `versionCode` 后，KernelSU Manager 可显示更新按钮并下载最新模组 ZIP。
+也可以在 KernelSU Manager 中安装 `lkm4ctr-kernelsu-module.zip`。ZIP 包含所有 KMI 版本和 `lkm4ctr_checker`，会根据内核 release 自动选择匹配版本；默认开启开机自动加载。点击模块的 Action 按钮后，等待音量键：音量上切换立即加载/卸载，音量下切换开机自动加载；如果无法读取音量键或等待期间没有按键，默认执行音量上操作。所选操作完成后，Action 输出会显示执行结果。WebUI 提供四个模组控制按钮和一个 checker 按钮，下方只读文本框显示 insmod/rmmod 与 checker 输出；界面会根据系统语言选择简体中文、繁体中文或英文，也可手动切换。Release 会同时发布 `update.json`；当后续版本提高 `versionCode` 后，KernelSU Manager 可显示更新按钮并下载最新模组 ZIP。
 
 ```sh
 mkdir -p "$HOME/lkm4ctr"
-cp /sdcard/Download/lkm4ctr-android14-6.1-arm64.ko "$HOME/lkm4ctr/lkm4ctr.ko"
-cp /sdcard/Download/lkm4ctr_checker-arm64 "$HOME/lkm4ctr/"
+cp /sdcard/Download/lkm4ctr-4.0.5-android14-6.1-arm64.ko "$HOME/lkm4ctr/lkm4ctr.ko"
+cp /sdcard/Download/lkm4ctr_checker-4.0.5-arm64 "$HOME/lkm4ctr/lkm4ctr_checker"
 chmod 755 "$HOME/lkm4ctr/lkm4ctr_checker"
 ```
 

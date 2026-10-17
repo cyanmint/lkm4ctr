@@ -216,6 +216,59 @@ class KernelSUModuleTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "checker report line")
 
+    def test_action_shows_control_result_after_operation_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            module_dir = Path(directory)
+            action = module_dir / "action.sh"
+            action.write_bytes(ACTION.read_bytes())
+            control = module_dir / "control.sh"
+            control.write_text(
+                "#!/bin/sh\n"
+                "printf 'control finished: %s\\n' \"$1\"\n"
+                "exit \"${TEST_CONTROL_STATUS:-0}\"\n",
+                encoding="utf-8",
+            )
+            control.chmod(0o755)
+
+            for status, expected_message in (
+                ("0", "Volume Up action completed successfully."),
+                ("7", "Action failed with exit status 7."),
+            ):
+                with self.subTest(status=status):
+                    env = os.environ.copy()
+                    env["LKM4CTR_BUSYBOX"] = portable(module_dir / "missing-busybox")
+                    env["TEST_CONTROL_STATUS"] = status
+                    result = subprocess.run(
+                        ["sh", portable(action)], env=env, capture_output=True, text=True
+                    )
+                    self.assertIn("control finished: toggle-load", result.stdout)
+                    self.assertGreater(
+                        result.stdout.index(expected_message),
+                        result.stdout.index("control finished: toggle-load"),
+                    )
+                    if status == "0":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 7)
+
+    def test_both_volume_keys_use_the_postoperation_result_handler(self) -> None:
+        action = ACTION.read_text(encoding="utf-8")
+        self.assertIn("run_control 'Volume Up' toggle-load", action)
+        self.assertIn("run_control 'Volume Down' toggle-autoload", action)
+
+    def test_release_asset_names_include_module_version(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "build-lkm4ctr.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("lkm4ctr-${module_version}-${kmi}-arm64.ko", workflow)
+        self.assertIn("lkm4ctr_checker-${module_version}-arm64", workflow)
+
+    def test_kernel_module_and_checker_report_release_version(self) -> None:
+        kernel_module = (ROOT / "glue" / "lkm4ctr_main.c").read_text(encoding="utf-8")
+        checker = (ROOT / "lkm4ctr_checker" / "lkm4ctr_checker.c").read_text(encoding="utf-8")
+        self.assertIn('#define LKM4CTR_VERSION "4.0.5"', kernel_module)
+        self.assertIn('#define LKM4CTR_CHECKER_VERSION "4.0.5"', checker)
+
     def test_zip_contains_root_module_and_every_supported_kmi(self) -> None:
         kmis = [
             line.strip()

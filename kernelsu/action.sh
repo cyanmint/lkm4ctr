@@ -21,12 +21,26 @@ else
     echo 'Volume-key input is unavailable; defaulting to Volume Up.'
 fi
 
+run_control() {
+    key_name=$1
+    command_name=$2
+    action_output=$("$MODDIR/control.sh" "$command_name" 2>&1)
+    action_status=$?
+
+    printf '%s\n' "$action_output"
+    if [ "$action_status" -ne 0 ]; then
+        printf 'Action failed with exit status %s.\n' "$action_status"
+        return "$action_status"
+    fi
+    printf '%s action completed successfully.\n' "$key_name"
+}
+
 case "$selection" in
     down)
-        "$MODDIR/control.sh" toggle-autoload
+        run_control 'Volume Down' toggle-autoload
         ;;
     up|"")
-        "$MODDIR/control.sh" toggle-load
+        run_control 'Volume Up' toggle-load
         ;;
     *)
         echo "Unrecognized volume-key event: $selection" >&2
