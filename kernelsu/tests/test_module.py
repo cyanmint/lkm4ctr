@@ -18,6 +18,10 @@ UPDATE_BUILDER = ROOT / "kernelsu" / "build_update_json.py"
 WEBUI = ROOT / "kernelsu" / "webroot" / "index.html"
 ACTION = ROOT / "kernelsu" / "action.sh"
 CUSTOMIZE = ROOT / "kernelsu" / "customize.sh"
+KERNELSU_DESCRIPTION = (
+    "Auto-load lkm4ctr.ko to enable Docker and containers on supported arm64 "
+    "Android GKI kernels without flashing a custom kernel."
+)
 
 
 def portable(path: Path) -> str:
@@ -75,6 +79,9 @@ class KernelSUModuleTests(unittest.TestCase):
         )
         self.assertEqual(properties.get("version"), "4.0.5")
         self.assertEqual(properties.get("versionCode"), "40005")
+        self.assertEqual(
+            properties.get("description"), KERNELSU_DESCRIPTION
+        )
 
     def test_update_json_matches_release_version_and_latest_kernelSU_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -327,6 +334,24 @@ class KernelSUModuleTests(unittest.TestCase):
         self.assertIn("lkm4ctr-${module_version}-${kmi}-arm64.ko", workflow)
         self.assertIn("lkm4ctr_checker-${module_version}-arm64", workflow)
 
+    def test_release_notes_url_is_downloaded_and_used_for_release(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "build-lkm4ctr.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("release_note_url:", workflow)
+        self.assertIn("RELEASE_NOTE_URL: ${{ inputs.release_note_url }}", workflow)
+        self.assertIn("release_note_url is required when create_release is enabled", workflow)
+        self.assertIn("--proto '=https' --proto-redir '=https'", workflow)
+        self.assertIn('--output "$notes_file" "$RELEASE_NOTE_URL"', workflow)
+        self.assertIn('--notes-file "$notes_file"', workflow)
+
+    def test_kernelsu_manifest_points_to_the_module_and_zip_asset(self) -> None:
+        manifest = (ROOT / "module.yaml").read_text(encoding="utf-8")
+        self.assertIn("schemaVersion: 1", manifest)
+        self.assertIn("id: lkm4ctr", manifest)
+        self.assertIn(f"summary: {KERNELSU_DESCRIPTION}", manifest)
+        self.assertIn('assetPattern: "lkm4ctr-kernelsu-module.zip"', manifest)
+
     def test_kernel_module_and_checker_report_release_version(self) -> None:
         kernel_module = (ROOT / "glue" / "lkm4ctr_main.c").read_text(encoding="utf-8")
         checker = (ROOT / "lkm4ctr_checker" / "lkm4ctr_checker.c").read_text(encoding="utf-8")
@@ -374,6 +399,7 @@ class KernelSUModuleTests(unittest.TestCase):
                 self.assertIn(
                     "version=4.0.5\nversionCode=40005", module_prop_contents
                 )
+                self.assertIn(f"description={KERNELSU_DESCRIPTION}", module_prop_contents)
                 self.assertIn(
                     "updateJson=https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json",
                     module_prop_contents,

@@ -1,0 +1,7 @@
+schemaVersion: 1
+id: lkm4ctr
+name: lkm4ctr Kernel Module
+summary: Auto-load lkm4ctr.ko to enable Docker and containers on supported arm64 Android GKI kernels without flashing a custom kernel.
+description: README.md
+release:
+  assetPattern: "lkm4ctr-kernelsu-module.zip"

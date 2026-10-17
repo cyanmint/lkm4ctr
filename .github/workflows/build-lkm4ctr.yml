@@ -103,6 +103,11 @@ on:
         required: false
         type: string
         default: ''
+      release_note_url:
+        description: 'HTTPS URL for the Markdown release notes (required when creating a release)'
+        required: false
+        type: string
+        default: ''
 
 env:
   # KMIs published by SukiSU-Ultra's ghcr.io/ylarod/ddk-min image at this
@@ -607,8 +612,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NOTE_URL: ${{ inputs.release_note_url }}
           REPOSITORY: ${{ github.repository }}
-          KMI_MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
         run: |
           set -euo pipefail
           module_version="$(python3 -c 'from pathlib import Path; print(next((line.split("=", 1)[1].strip() for line in Path("kernelsu/module.prop").read_text(encoding="utf-8").splitlines() if line.startswith("version=")), ""))')"
@@ -626,7 +631,24 @@ jobs:
           fi
           python3 kernelsu/build_update_json.py kernelsu/module.prop "$tag" release-out/update.json
           python3 -m json.tool release-out/update.json
+          if [ -z "$RELEASE_NOTE_URL" ]; then
+            echo "release_note_url is required when create_release is enabled" >&2
+            exit 1
+          fi
+          case "$RELEASE_NOTE_URL" in
+            https://*) ;;
+            *) echo "release_note_url must use HTTPS" >&2; exit 1 ;;
+          esac
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 --max-filesize 65536 \
+            --output "$notes_file" "$RELEASE_NOTE_URL"
+          if [ ! -s "$notes_file" ]; then
+            echo "Downloaded release notes are empty" >&2
+            exit 1
+          fi
           gh release create "$tag" release-out/* \
             --repo "$REPOSITORY" \
             --title "$tag" \
-            --notes "Automated lkm4ctr build (KMIs: $KMI_MATRIX_JSON)"
+            --notes-file "$notes_file"

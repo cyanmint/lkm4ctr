@@ -1,6 +1,6 @@
 # lkm4ctr
 
-`lkm4ctr` is an arm64 Android GKI kernel module that supplies selected container prerequisites without recompiling the Android kernel. It is intended for rooted devices and must match the device KMI exactly.
+`lkm4ctr` automatically loads `lkm4ctr.ko` to enable Docker and containers on supported arm64 Android GKI kernels without flashing a custom kernel. The module is intended for rooted devices and must match the device KMI exactly.
 
 ## Start here
 
