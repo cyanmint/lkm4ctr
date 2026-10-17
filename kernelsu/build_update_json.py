@@ -36,16 +36,22 @@ def read_properties(path: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        fail("Usage: build_update_json.py <module.prop> <output.json>")
+    if len(sys.argv) != 4:
+        fail("Usage: build_update_json.py <module.prop> <release-version> <output.json>")
 
     module_prop = Path(sys.argv[1])
-    output = Path(sys.argv[2])
+    release_version = sys.argv[2]
+    output = Path(sys.argv[3])
     properties = read_properties(module_prop)
     if properties.get("id") != MODULE_ID:
         fail(f"module.prop id must be {MODULE_ID!r}")
 
     version = properties.get("version", "")
+    if version != release_version:
+        fail(
+            f"module.prop version {version!r} must match release version "
+            f"{release_version!r}"
+        )
     version_code = properties.get("versionCode", "")
     if not version:
         fail("module.prop version is required")

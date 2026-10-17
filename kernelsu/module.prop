@@ -1,7 +1,7 @@
 id=lkm4ctr
 name=lkm4ctr Kernel Module
-version=1.0.0
-versionCode=1
+version=4.0.5
+versionCode=40005
 author=cyanmint
 description=Autoload the matching lkm4ctr Android GKI module and run its diagnostic checker from KernelSU.
 updateJson=https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json

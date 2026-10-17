@@ -72,8 +72,10 @@ class KernelSUModuleTests(unittest.TestCase):
             properties.get("updateJson"),
             "https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json",
         )
+        self.assertEqual(properties.get("version"), "4.0.5")
+        self.assertEqual(properties.get("versionCode"), "40005")
 
-    def test_update_json_uses_module_version_and_latest_kernelSU_zip(self) -> None:
+    def test_update_json_matches_release_version_and_latest_kernelSU_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             module_prop = temp / "module.prop"
@@ -82,7 +84,13 @@ class KernelSUModuleTests(unittest.TestCase):
             )
             output = temp / "update.json"
             result = subprocess.run(
-                ["python3", portable(UPDATE_BUILDER), portable(module_prop), portable(output)],
+                [
+                    "python3",
+                    portable(UPDATE_BUILDER),
+                    portable(module_prop),
+                    "2.4.1",
+                    portable(output),
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -96,6 +104,28 @@ class KernelSUModuleTests(unittest.TestCase):
                     "zipUrl": "https://github.com/cyanmint/lkm4ctr/releases/latest/download/lkm4ctr-kernelsu-module.zip",
                 },
             )
+
+    def test_update_json_rejects_release_tag_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            module_prop = temp / "module.prop"
+            module_prop.write_text(
+                "id=lkm4ctr\nversion=4.0.5\nversionCode=40005\n", encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    "python3",
+                    portable(UPDATE_BUILDER),
+                    portable(module_prop),
+                    "4.0.6",
+                    portable(temp / "update.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must match release version", result.stderr)
 
     def test_autoload_setting_defaults_on_and_can_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -223,9 +253,13 @@ class KernelSUModuleTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 names = set(archive.namelist())
                 self.assertIn("module.prop", names)
+                module_prop_contents = archive.read("module.prop").decode("utf-8")
+                self.assertIn(
+                    "version=4.0.5\nversionCode=40005", module_prop_contents
+                )
                 self.assertIn(
                     "updateJson=https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json",
-                    archive.read("module.prop").decode("utf-8"),
+                    module_prop_contents,
                 )
                 self.assertIn("action.sh", names)
                 self.assertIn("service.sh", names)
