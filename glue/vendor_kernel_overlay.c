@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_overlay.c - lifecycle + registration glue for the vendored
  * fs/overlayfs (vendor/fs/overlayfs/). This is NEW code (not

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_ipc_callbacks.c - real-name wrappers that are installed as
  * callbacks called back into by this module's OWN CFI-instrumented ipc

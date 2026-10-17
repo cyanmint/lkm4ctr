@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * vendor_kernel_diag.h - the live-resource "provider" API that backs the
  * procfs-style /v/ns/<type>/ and /v/ipc/<class>/ trees exposed by the

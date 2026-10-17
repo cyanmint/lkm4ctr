@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * lkm4ctr_hotreload - "hot reload" this module in place from a new .ko
  * built on disk, without an operator having to run `rmmod`/`insmod` by

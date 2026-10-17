@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * vendor_kernel_ovl_vfs_compat.h - lkm4ctr [BUILD-COMPAT]: the single, unified
  * VFS/fs_context compatibility layer for the single vendored overlayfs source

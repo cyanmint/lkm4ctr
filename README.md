@@ -1,6 +1,6 @@
 # lkm4ctr
 
-`lkm4ctr` automatically loads `lkm4ctr.ko` to enable Docker and containers on GKI-compatible Android kernels with a matching arm64 KMI build, without flashing a custom kernel. The module is intended for rooted devices and must match the device KMI exactly.
+`lkm4ctr` automatically loads `lkm4ctr.ko` to enable Docker and containers on all currently released arm64 Android GKI KMIs; no custom kernel flash. The module is intended for rooted devices and must match the device KMI exactly.
 
 See [LICENSES.md](LICENSES.md) for the separation between AI-generated Public Domain files and GPL-licensed sources.
 

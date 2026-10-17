@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_syscalls_userns.c - uid/gid getter/setter syscall hooks for
  * vendor_kernel. This is NEW code (not vendored from kernel-common).

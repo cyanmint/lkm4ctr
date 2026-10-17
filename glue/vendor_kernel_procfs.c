@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_procfs.c - expose real vendored IPC/PID namespace symlinks
  * through procfs when the corresponding native CONFIG_*_NS entry is absent.

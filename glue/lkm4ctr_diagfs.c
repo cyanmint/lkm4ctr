@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * lkm4ctr_diagfs - the "lkm4ctr" pseudo-filesystem: `mount -t lkm4ctr diag
  * ./mnt` exposes a read/write diagnostics tree replacing the earlier

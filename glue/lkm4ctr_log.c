@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * lkm4ctr_log - implementation of the ring buffer declared in
  * glue/lkm4ctr_log.h. See that header for the full rationale.

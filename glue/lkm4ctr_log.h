@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * lkm4ctr_log - shared, always-on ring-buffer log for the unified lkm4ctr.ko,
  * plus the CONFIG_LKM4CTR_LOG_DMESG build switch that controls whether the

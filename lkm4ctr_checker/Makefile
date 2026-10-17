@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 #
 # lkm4ctr_checker is a plain userspace diagnostic binary (NOT a kernel
 # module): it performs real syscalls (unshare/fork/setns, mq_*, msg*,

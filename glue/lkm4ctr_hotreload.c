@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * lkm4ctr_hotreload - hot-reload this module in place from a new .ko on
  * disk, orchestrated entirely from inside the kernel via the diagfs

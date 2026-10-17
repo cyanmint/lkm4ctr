@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_ipc_compat.c - local resolvers/stubs for the kernel-internal
  * symbols pulled in by the vendored SysV IPC / POSIX mqueue sources

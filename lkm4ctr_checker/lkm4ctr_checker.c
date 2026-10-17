@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * lkm4ctr_checker - userspace diagnostic tool for the lkm4ctr module
  * family.

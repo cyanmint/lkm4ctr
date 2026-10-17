@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_diag.c - diagnostics renderer and live-resource "provider"
  * backend for vendor_kernel. This is NEW code (not vendored from kernel-common).

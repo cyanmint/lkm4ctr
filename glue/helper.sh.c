@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * glue/helper.sh.c - contents of diagfs/helper.sh as a C string.
  *
@@ -11,7 +11,7 @@
 
 const char lkm4ctr_helper_sh_data[] =
 "#!/bin/sh\n"
-"# SPDX-License-Identifier: GPL-2.0\n"
+"# Public Domain since creation (AI-generated; no copyright subsists; not CC0).\n"
 "#\n"
 "# lkm4ctr diagfs helper functions (flattened layout).\n"
 "#\n"

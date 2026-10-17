@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_syscalls.c - syscall hook handlers for vendor_kernel.
  * This is NEW code (not vendored from kernel-common).

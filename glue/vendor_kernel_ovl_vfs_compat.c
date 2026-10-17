@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_ovl_vfs_compat.c - resolves, at module-load time, every
  * VFS/security/exportfs helper the single vendored overlayfs source

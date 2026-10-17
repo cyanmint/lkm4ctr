@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_procfs_userns.c - real file_operations callbacks
  * (open/read/write/release) for the fabricated

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_compat.c - local stubs/resolvers for kernel-internal symbols
  * used by the vendored namespace files.

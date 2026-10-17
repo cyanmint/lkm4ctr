@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * vendor_kernel_ipc_syscalls.c - syscall hook handlers wiring the vendored
  * SysV IPC (ipc/msg.c, ipc/sem.c, ipc/shm.c) and POSIX message queue

@@ -1,10 +1,10 @@
-# AI-generated metadata; Public Domain (no copyright holder; not CC0).
+# Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 schemaVersion: 1
 id: lkm4ctr
 name: lkm4ctr Kernel Module
-summary: Auto-load lkm4ctr.ko to enable Docker and containers on GKI-compatible Android kernels with a matching arm64 KMI build, without flashing a custom kernel.
+summary: Auto-load lkm4ctr.ko enables Docker and containers on all currently released arm64 Android GKI KMIs; no custom kernel flash.
 description: README.md
-license: "Public Domain (kernelsu/customize.sh); GPL (per-file SPDX)"
+license: "Public Domain (AI files); GPL; see LICENSES.md"
 tags: [android, containers, docker, kernel, root]
 release:
   assetPattern: "lkm4ctr-kernelsu-module.zip"

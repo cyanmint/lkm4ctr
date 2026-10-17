@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// Public Domain since creation (AI-generated; no copyright subsists; not CC0).
 /*
  * Pin lkm4ctr while a kernel NSFS inode retains module-owned proc_ns_ops.
  *

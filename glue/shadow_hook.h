@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * shadow_hook - tiny ftrace/kprobe-based function hijacking ABI shared by the
  * shadow_hijack / vendor_kernel subsystems.

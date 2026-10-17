@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * lkm4ctr_compat - small cross-kernel-version compatibility shims shared
  * by the unified lkm4ctr.ko subsystems.

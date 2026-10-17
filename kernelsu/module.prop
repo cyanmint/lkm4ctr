@@ -3,5 +3,5 @@ name=lkm4ctr Kernel Module
 version=4.0.5
 versionCode=40005
 author=cyanmint
-description=Auto-load lkm4ctr.ko to enable Docker and containers on GKI-compatible Android kernels with a matching arm64 KMI build, without flashing a custom kernel.
+description=Auto-load lkm4ctr.ko enables Docker and containers on all currently released arm64 Android GKI KMIs; no custom kernel flash.
 updateJson=https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* Public Domain since creation (AI-generated; no copyright subsists; not CC0). */
 /*
  * vendor_kernel_data_syms.h - lkm4ctr [BUILD-COMPAT]: module-owned stand-ins
  * for the DATA symbols init_user_ns/overflowuid/overflowgid. This is NEW code
