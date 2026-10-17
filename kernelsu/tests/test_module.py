@@ -19,8 +19,8 @@ WEBUI = ROOT / "kernelsu" / "webroot" / "index.html"
 ACTION = ROOT / "kernelsu" / "action.sh"
 CUSTOMIZE = ROOT / "kernelsu" / "customize.sh"
 KERNELSU_DESCRIPTION = (
-    "Auto-load lkm4ctr.ko to enable Docker and containers on supported arm64 "
-    "Android GKI kernels without flashing a custom kernel."
+    "Auto-load lkm4ctr.ko to enable Docker and containers on GKI-compatible "
+    "Android kernels with a matching arm64 KMI build, without flashing a custom kernel."
 )
 
 
@@ -260,6 +260,10 @@ class KernelSUModuleTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 7)
 
     def test_install_customize_makes_module_files_executable(self) -> None:
+        customize_text = CUSTOMIZE.read_text(encoding="utf-8")
+        self.assertIn("Public Domain (AI-generated", customize_text)
+        self.assertIn("not CC0", customize_text)
+        self.assertNotIn("CC0-1.0", customize_text)
         with tempfile.TemporaryDirectory() as directory:
             module_dir = Path(directory)
             service = module_dir / "service.sh"
@@ -350,7 +354,18 @@ class KernelSUModuleTests(unittest.TestCase):
         self.assertIn("schemaVersion: 1", manifest)
         self.assertIn("id: lkm4ctr", manifest)
         self.assertIn(f"summary: {KERNELSU_DESCRIPTION}", manifest)
+        self.assertIn(
+            'license: "Public Domain (kernelsu/customize.sh); GPL (per-file SPDX)"',
+            manifest,
+        )
+        self.assertIn("tags: [android, containers, docker, kernel, root]", manifest)
         self.assertIn('assetPattern: "lkm4ctr-kernelsu-module.zip"', manifest)
+
+    def test_license_inventory_keeps_gpl_sources_separate(self) -> None:
+        inventory = (ROOT / "LICENSES.md").read_text(encoding="utf-8")
+        self.assertIn("`vendor/` contains vendored Linux/Android kernel code", inventory)
+        self.assertIn("`glue/` contains project glue and bridge code with existing GPL", inventory)
+        self.assertIn("not a CC0 dedication", inventory)
 
     def test_kernel_module_and_checker_report_release_version(self) -> None:
         kernel_module = (ROOT / "glue" / "lkm4ctr_main.c").read_text(encoding="utf-8")
