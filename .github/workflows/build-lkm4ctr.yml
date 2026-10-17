@@ -594,6 +594,8 @@ jobs:
           cp release-assets/lkm4ctr_checker-arm64/lkm4ctr_checker release-out/lkm4ctr_checker-arm64
           chmod +x release-out/lkm4ctr_checker-arm64
           cp release-assets/kernelsu-module/lkm4ctr-kernelsu-module.zip release-out/lkm4ctr-kernelsu-module.zip
+          python3 kernelsu/build_update_json.py kernelsu/module.prop release-out/update.json
+          python3 -m json.tool release-out/update.json
           echo "=== release assets ==="
           ls -la release-out
 

@@ -50,7 +50,7 @@ The project is a flat, unified tree: `glue/`, `kernelsu/`, and
 - `kernelsu/` — the KernelSU module wrapper: KMI detection and load controls,
   boot auto-load service, action-button volume-key handling, bundled userspace
   checker, multilingual WebUI with command-output display, package builder,
-  and host-side packaging/control tests. The release
+  release update-feed generator, and host-side packaging/control tests. The release
   ZIP bundles every `.ko` built by the workflow matrix.
 - `qemu_test.sh` — a single merged script with three roles, dispatched on
   PID/argv[0]/flags (see its own header comment): host-side QEMU launcher,
@@ -136,6 +136,8 @@ over.
   with the KernelSU controls and WebUI, then uploads `lkm4ctr-kernelsu-module.zip`.
   It runs only for a complete supported-KMI matrix; partial manual builds cannot
   publish an incomplete KernelSU ZIP or release.
+- The `release` job generates `update.json` from `kernelsu/module.prop` and
+  publishes it beside the KernelSU ZIP for the Manager's in-app update check.
 - `test` job: a matrix over every KMI (the build matrix plus
   `TEST_ONLY_KMIS`, i.e. KMIs with no DDK image/build yet, tested boot-only
   without a module). Downloads the pinned, official Google arm64 GKI `Image`

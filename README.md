@@ -13,7 +13,7 @@
 
 `NET_NS` is currently bookkeeping-only, so host networking is required for network access. Read the manual before loading a module on a real device.
 
-The KernelSU ZIP includes every KMI build and `lkm4ctr_checker`, enables boot auto-load by default, and provides an action button plus a multilingual WebUI for module control and checker output.
+The KernelSU ZIP includes every KMI build and `lkm4ctr_checker`, enables boot auto-load by default, and provides an action button plus a multilingual WebUI for module control and checker output. Published releases include an update feed so KernelSU Manager can offer in-app updates when `versionCode` increases.
 
 ## Documentation
 

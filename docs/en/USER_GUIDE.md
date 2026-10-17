@@ -71,11 +71,12 @@ The easiest path is a GitHub release asset from the project's [releases page](ht
 lkm4ctr-android14-6.1-arm64.ko
 lkm4ctr_checker-arm64
 lkm4ctr-kernelsu-module.zip
+update.json
 ```
 
 Download the `.ko` whose `<kmi>` matches the device. Do not rename a module to hide a mismatch, and do not load a module built for another KMI.
 
-To use KernelSU, install `lkm4ctr-kernelsu-module.zip` from the KernelSU Manager. It includes all KMI builds and `lkm4ctr_checker`, detects the matching KMI from the kernel release, and enables boot auto-load by default. Its Action button waits up to 30 seconds for a volume key: Volume Up toggles immediate load/unload, Volume Down toggles boot auto-load, and Volume Up is the fallback if key input is unavailable or no key is detected. The WebUI provides four module controls and a checker button; a read-only output box displays load/unload and checker results. English, Simplified Chinese, and Traditional Chinese labels are auto-selected from the device language, with a language selector.
+To use KernelSU, install `lkm4ctr-kernelsu-module.zip` from the KernelSU Manager. It includes all KMI builds and `lkm4ctr_checker`, detects the matching KMI from the kernel release, and enables boot auto-load by default. Its Action button waits up to 30 seconds for a volume key: Volume Up toggles immediate load/unload, Volume Down toggles boot auto-load, and Volume Up is the fallback if key input is unavailable or no key is detected. The WebUI provides four module controls and a checker button; a read-only output box displays load/unload and checker results. English, Simplified Chinese, and Traditional Chinese labels are auto-selected from the device language, with a language selector. Releases also include `update.json`; after a release with a higher `versionCode` is published, KernelSU Manager can offer an in-app update to the latest module ZIP.
 
 Copy the files to a readable location, for example:
 

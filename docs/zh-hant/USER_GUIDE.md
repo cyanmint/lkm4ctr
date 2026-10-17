@@ -63,11 +63,12 @@ getprop ro.build.version.release
 lkm4ctr-android14-6.1-arm64.ko
 lkm4ctr_checker-arm64
 lkm4ctr-kernelsu-module.zip
+update.json
 ```
 
 下載與裝置 `<kmi>` 完全一致的 `.ko`。不要透過改名掩蓋不匹配，也不要載入其他 KMI 的模組。
 
-也可在 KernelSU Manager 中安裝 `lkm4ctr-kernelsu-module.zip`。ZIP 包含所有 KMI 版本和 `lkm4ctr_checker`，會依核心 release 自動選擇匹配版本；預設啟用開機自動載入。點擊模組的 Action 按鈕後等待音量鍵：音量上切換立即載入/卸載，音量下切換開機自動載入；如果無法讀取音量鍵或等待期間沒有按鍵，預設執行音量上操作。WebUI 提供四個模組控制按鈕和一個 checker 按鈕，下方唯讀文字框顯示 insmod/rmmod 與 checker 輸出；介面會依系統語言選擇簡體中文、繁體中文或英文，也可手動切換。
+也可在 KernelSU Manager 中安裝 `lkm4ctr-kernelsu-module.zip`。ZIP 包含所有 KMI 版本和 `lkm4ctr_checker`，會依核心 release 自動選擇匹配版本；預設啟用開機自動載入。點擊模組的 Action 按鈕後等待音量鍵：音量上切換立即載入/卸載，音量下切換開機自動載入；如果無法讀取音量鍵或等待期間沒有按鍵，預設執行音量上操作。WebUI 提供四個模組控制按鈕和一個 checker 按鈕，下方唯讀文字框顯示 insmod/rmmod 與 checker 輸出；介面會依系統語言選擇簡體中文、繁體中文或英文，也可手動切換。Release 會一併發布 `update.json`；後續版本提高 `versionCode` 後，KernelSU Manager 即可顯示更新按鈕並下載最新模組 ZIP。
 
 ```sh
 mkdir -p "$HOME/lkm4ctr"

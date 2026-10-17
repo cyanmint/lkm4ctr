@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CONTROL = ROOT / "kernelsu" / "control.sh"
 BUILDER = ROOT / "kernelsu" / "build_module.py"
+UPDATE_BUILDER = ROOT / "kernelsu" / "build_update_json.py"
 WEBUI = ROOT / "kernelsu" / "webroot" / "index.html"
 ACTION = ROOT / "kernelsu" / "action.sh"
 
@@ -61,6 +62,41 @@ class KmiSelectionTests(unittest.TestCase):
 
 
 class KernelSUModuleTests(unittest.TestCase):
+    def test_module_prop_points_to_latest_release_update_json(self) -> None:
+        properties = dict(
+            line.split("=", 1)
+            for line in (ROOT / "kernelsu" / "module.prop").read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+        self.assertEqual(
+            properties.get("updateJson"),
+            "https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json",
+        )
+
+    def test_update_json_uses_module_version_and_latest_kernelSU_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            module_prop = temp / "module.prop"
+            module_prop.write_text(
+                "id=lkm4ctr\nversion=2.4.1\nversionCode=42\n", encoding="utf-8"
+            )
+            output = temp / "update.json"
+            result = subprocess.run(
+                ["python3", portable(UPDATE_BUILDER), portable(module_prop), portable(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8")),
+                {
+                    "version": "2.4.1",
+                    "versionCode": 42,
+                    "zipUrl": "https://github.com/cyanmint/lkm4ctr/releases/latest/download/lkm4ctr-kernelsu-module.zip",
+                },
+            )
+
     def test_autoload_setting_defaults_on_and_can_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = os.environ.copy()
@@ -187,6 +223,10 @@ class KernelSUModuleTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 names = set(archive.namelist())
                 self.assertIn("module.prop", names)
+                self.assertIn(
+                    "updateJson=https://github.com/cyanmint/lkm4ctr/releases/latest/download/update.json",
+                    archive.read("module.prop").decode("utf-8"),
+                )
                 self.assertIn("action.sh", names)
                 self.assertIn("service.sh", names)
                 self.assertIn("control.sh", names)
