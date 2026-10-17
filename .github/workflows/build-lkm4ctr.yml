@@ -308,7 +308,7 @@ jobs:
       - name: Validate module controls and build KernelSU ZIP
         run: |
           set -euo pipefail
-          sh -n kernelsu/control.sh kernelsu/action.sh kernelsu/service.sh
+          sh -n kernelsu/control.sh kernelsu/action.sh kernelsu/service.sh kernelsu/customize.sh
           python3 -m unittest discover -s kernelsu/tests -v
           python3 kernelsu/build_module.py \
             kernelsu-module-input \

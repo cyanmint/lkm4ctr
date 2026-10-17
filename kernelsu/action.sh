@@ -24,7 +24,7 @@ fi
 run_control() {
     key_name=$1
     command_name=$2
-    action_output=$(sh "$MODDIR/control.sh" "$command_name" 2>&1)
+    action_output=$("$MODDIR/control.sh" "$command_name" 2>&1)
     action_status=$?
 
     printf '%s\n' "$action_output"

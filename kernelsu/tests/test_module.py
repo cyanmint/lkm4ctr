@@ -17,6 +17,7 @@ BUILDER = ROOT / "kernelsu" / "build_module.py"
 UPDATE_BUILDER = ROOT / "kernelsu" / "build_update_json.py"
 WEBUI = ROOT / "kernelsu" / "webroot" / "index.html"
 ACTION = ROOT / "kernelsu" / "action.sh"
+CUSTOMIZE = ROOT / "kernelsu" / "customize.sh"
 
 
 def portable(path: Path) -> str:
@@ -228,7 +229,7 @@ class KernelSUModuleTests(unittest.TestCase):
                 "exit \"${TEST_CONTROL_STATUS:-0}\"\n",
                 encoding="utf-8",
             )
-            control.chmod(0o644)
+            control.chmod(0o755)
 
             for status, expected_message in (
                 ("0", "Volume Up action completed successfully."),
@@ -251,28 +252,68 @@ class KernelSUModuleTests(unittest.TestCase):
                     else:
                         self.assertEqual(result.returncode, 7)
 
-    def test_service_runs_control_when_control_is_not_executable(self) -> None:
+    def test_install_customize_makes_module_files_executable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             module_dir = Path(directory)
             service = module_dir / "service.sh"
             service.write_bytes((ROOT / "kernelsu" / "service.sh").read_bytes())
+            action = module_dir / "action.sh"
+            action.write_bytes(ACTION.read_bytes())
             control = module_dir / "control.sh"
             control.write_text(
-                "#!/bin/sh\nprintf 'control finished: %s\\n' \"$1\"\n",
+                "#!/bin/sh\n"
+                "MODDIR=${0%/*}\n"
+                "if [ \"$1\" = checker ]; then \"$MODDIR/bin/lkm4ctr_checker\"; else printf 'control finished: %s\\n' \"$1\"; fi\n",
                 encoding="utf-8",
             )
-            control.chmod(0o644)
+            checker = module_dir / "bin" / "lkm4ctr_checker"
+            checker.parent.mkdir()
+            checker.write_text("#!/bin/sh\nprintf 'checker ran\\n'\n", encoding="utf-8")
+            module_binary = module_dir / "kmi" / "lkm4ctr-android14-6.1-arm64.ko"
+            module_binary.parent.mkdir()
+            module_binary.write_bytes(b"module fixture")
+            for path in (service, action, control, checker, module_binary):
+                path.chmod(0o644)
+
+            source_script = (
+                'MODPATH="$1"; '
+                'abort() { printf "%s\\n" "$*" >&2; exit 1; }; '
+                '. "$2"'
+            )
+            customize_result = subprocess.run(
+                ["sh", "-c", source_script, "test-customize", portable(module_dir), portable(CUSTOMIZE)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(customize_result.returncode, 0, customize_result.stderr)
+
             result = subprocess.run(
                 ["sh", portable(service)], check=False, capture_output=True, text=True
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "control finished: boot")
+            if os.name != "nt":
+                for path in (service, action, control, checker, module_binary):
+                    with self.subTest(path=path.relative_to(module_dir)):
+                        self.assertTrue(path.stat().st_mode & 0o111, f"{path} is not executable")
 
-    def test_shell_entrypoints_invoke_control_through_shell(self) -> None:
-        for script in (ACTION, ROOT / "kernelsu" / "service.sh"):
-            with self.subTest(script=script.name):
-                contents = script.read_text(encoding="utf-8")
-                self.assertIn('sh "$MODDIR/control.sh"', contents)
+            env = os.environ.copy()
+            env["LKM4CTR_BUSYBOX"] = portable(module_dir / "missing-busybox")
+            action_result = subprocess.run(
+                ["sh", portable(action)], env=env, check=False, capture_output=True, text=True
+            )
+            self.assertEqual(action_result.returncode, 0, action_result.stdout + action_result.stderr)
+            self.assertIn("control finished: toggle-load", action_result.stdout)
+
+            checker_result = subprocess.run(
+                ["sh", "-c", '"$1" checker', "test-checker", portable(control)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(checker_result.returncode, 0, checker_result.stderr)
+            self.assertEqual(checker_result.stdout.strip(), "checker ran")
 
     def test_both_volume_keys_use_the_postoperation_result_handler(self) -> None:
         action = ACTION.read_text(encoding="utf-8")
@@ -338,6 +379,7 @@ class KernelSUModuleTests(unittest.TestCase):
                     module_prop_contents,
                 )
                 self.assertIn("action.sh", names)
+                self.assertIn("customize.sh", names)
                 self.assertIn("service.sh", names)
                 self.assertIn("control.sh", names)
                 self.assertIn("webroot/index.html", names)
@@ -382,7 +424,7 @@ class KernelSUModuleTests(unittest.TestCase):
         self.assertIn("operationOutput.value", page)
 
     def test_shell_scripts_are_ascii_english(self) -> None:
-        for script in (CONTROL, ACTION, ROOT / "kernelsu" / "service.sh"):
+        for script in (CONTROL, ACTION, ROOT / "kernelsu" / "service.sh", CUSTOMIZE):
             with self.subTest(script=script.name):
                 self.assertTrue(script.read_bytes().isascii())
 

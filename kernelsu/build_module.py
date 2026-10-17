@@ -16,6 +16,7 @@ MODULE = ROOT / "kernelsu"
 SUPPORTED_FILE = MODULE / "supported_kmis.txt"
 MODULE_FILES = (
     "module.prop",
+    "customize.sh",
     "control.sh",
     "action.sh",
     "service.sh",
