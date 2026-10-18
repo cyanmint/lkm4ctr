@@ -8,7 +8,6 @@ mkdir -p /dev /proc /sys /newroot
 /busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 /busybox mdev -s
 
-/busybox sleep 4
 if [ ! -e /dev/loop-control ]; then
 	/busybox mknod -m 0600 /dev/loop-control c 10 237
 fi
@@ -22,6 +21,21 @@ while [ "$loop_number" -lt 64 ]; do
 		/busybox mknod -m 0600 "/dev/block/loop$loop_number" b 7 "$loop_number"
 	fi
 	loop_number=$((loop_number + 1))
+done
+
+attempt=0
+while [ ! -b /dev/sda ] || [ ! -b /dev/sdb ]; do
+	/busybox mdev -s
+	if [ -b /dev/sda ] && [ -b /dev/sdb ]; then
+		break
+	fi
+	if [ "$attempt" -ge 30 ]; then
+		echo "REDROID_TEST_FAILED: Disk A/B device nodes did not appear"
+		/busybox poweroff -f
+		exit 1
+	fi
+	/busybox sleep 1
+	attempt=$((attempt + 1))
 done
 
 if ! /busybox mount -t ext4 -o rw /dev/sda /newroot; then
