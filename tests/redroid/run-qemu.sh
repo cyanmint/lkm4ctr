@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 5 ]; then
-	echo "Usage: $0 <kernel> <disk-a.ext4> <disk-b.ext4> <busybox> <output-dir>" >&2
+if [ "$#" -ne 7 ]; then
+	echo "Usage: $0 <kernel> <disk-a.ext4> <disk-b.ext4> <busybox> <output-dir> <lkm4ctr.ko> <lkm4ctr_checker>" >&2
 	exit 2
 fi
 
@@ -13,6 +13,8 @@ disk_a=$2
 disk_b=$3
 busybox=$4
 output_dir=$5
+module=$6
+checker=$7
 ramdisk_dir=$(mktemp -d)
 mount_dir=$(mktemp -d)
 trap 'rm -rf "$ramdisk_dir"; sudo umount "$mount_dir" 2>/dev/null || true; rmdir "$mount_dir"' EXIT
@@ -21,6 +23,8 @@ mkdir -p "$output_dir/disk-b-contents"
 mkdir -p "$ramdisk_dir/dev" "$ramdisk_dir/proc" "$ramdisk_dir/sys"
 install -m 0755 "$busybox" "$ramdisk_dir/busybox"
 install -m 0755 tests/redroid/init "$ramdisk_dir/init"
+install -m 0644 "$module" "$ramdisk_dir/lkm4ctr.ko"
+install -m 0755 "$checker" "$ramdisk_dir/lkm4ctr_checker"
 (cd "$ramdisk_dir" && find . | cpio -o -H newc > "$output_dir/redroid-initramfs.cpio")
 
 set +e

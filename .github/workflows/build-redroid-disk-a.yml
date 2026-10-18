@@ -1,0 +1,49 @@
+# Build the Redroid rootfs used by the single-KMI dual-disk QEMU test and
+# publish it as a prebuilt asset on the existing 4.0.1 release. The tested
+# lkm4ctr.ko and lkm4ctr_checker are deliberately supplied by the test's
+# injected initramfs, not baked into this reusable rootfs disk.
+
+name: Build Redroid test Disk A
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Redroid disk build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs zstd
+
+      - name: Build compressed Redroid Disk A
+        run: |
+          bash tests/redroid/build-disk-a.sh \
+            redroid-test-disk-a.ext4.zst
+
+      - name: Upload Redroid Disk A as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: redroid-test-disk-a
+          path: redroid-test-disk-a.ext4.zst
+          compression-level: 0
+
+      - name: Upload Disk A to release 4.0.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release view 4.0.1 --repo "$REPOSITORY"
+          gh release upload 4.0.1 \
+            redroid-test-disk-a.ext4.zst \
+            --repo "$REPOSITORY" \
+            --clobber

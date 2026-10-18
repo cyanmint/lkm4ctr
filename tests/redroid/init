@@ -15,6 +15,21 @@ if ! /busybox mount -t ext4 -o rw /dev/sda /newroot; then
 	exit 1
 fi
 
+if [ ! -s /lkm4ctr.ko ] || [ ! -x /lkm4ctr_checker ]; then
+	echo "REDROID_TEST_FAILED: module/checker are missing from the injected initramfs"
+	/busybox poweroff -f
+	exit 1
+fi
+mkdir -p /newroot/system/bin
+if ! /busybox cp /lkm4ctr.ko /newroot/system/bin/lkm4ctr.ko ||
+   ! /busybox cp /lkm4ctr_checker /newroot/system/bin/lkm4ctr_checker ||
+   ! /busybox chmod 0644 /newroot/system/bin/lkm4ctr.ko ||
+   ! /busybox chmod 0755 /newroot/system/bin/lkm4ctr_checker; then
+	echo "REDROID_TEST_FAILED: could not copy module/checker to Disk A"
+	/busybox poweroff -f
+	exit 1
+fi
+
 echo "REDROID_TEST: switching to the Redroid rootfs on Disk A"
 exec /busybox switch_root /newroot /init \
 	androidboot.hardware=redroid \

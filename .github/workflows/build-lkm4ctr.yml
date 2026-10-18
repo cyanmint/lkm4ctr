@@ -113,12 +113,6 @@ on:
         required: false
         type: string
         default: ''
-      publish_redroid_disk_a:
-        description: 'Upload the generated Redroid Disk A image to the existing 4.0.1 release (requires the Redroid test to pass)'
-        required: false
-        type: boolean
-        default: false
-
 env:
   # KMIs published by SukiSU-Ultra's ghcr.io/ylarod/ddk-min image at this
   # DDK_RELEASE (see .../build-lkm.yml's matrix).
@@ -565,21 +559,29 @@ jobs:
           name: qemu-logs-${{ matrix.kmi }}
           path: qemu-Image.*.log
 
-  # Build one Redroid rootfs disk containing the module and checker for the
-  # android14-6.1 KMI. This is kept separate from the standard QEMU matrix so
-  # the containerized Android userspace does not multiply the matrix runtime.
-  build-redroid-disk-a:
-    needs: [prepare, build, build-checker]
-    if: ${{ !cancelled() && contains(fromJson(needs.prepare.outputs.matrix), 'android14-6.1') && needs.build.result == 'success' && needs.build-checker.result == 'success' }}
+  # Runs only after every ordinary KMI QEMU test completes successfully.
+  # Disk A is a prebuilt Redroid rootfs downloaded from the 4.0.1 release;
+  # the matching module/checker are injected into this QEMU initramfs and
+  # copied onto Disk A after mount, before switch_root.
+  redroid-test:
+    needs: [prepare, test, build]
+    if: ${{ !cancelled() && contains(fromJson(needs.prepare.outputs.matrix), 'android14-6.1') && needs.test.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Redroid disk build tools
+      - name: Install Redroid QEMU test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y e2fsprogs zstd
+          sudo apt-get install -y cpio e2fsprogs qemu-system-arm zstd
+
+      - name: Download prebuilt Redroid Disk A from release 4.0.1
+        run: |
+          mkdir -p redroid
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/cyanmint/lkm4ctr/releases/download/4.0.1/redroid-test-disk-a.ext4.zst \
+            -o redroid/redroid-test-disk-a.ext4.zst
 
       - name: Download android14-6.1 lkm4ctr.ko
         uses: actions/download-artifact@v8
@@ -592,42 +594,6 @@ jobs:
         with:
           name: lkm4ctr_checker-arm64
           path: payload/
-
-      - name: Build compressed Redroid Disk A
-        run: |
-          bash tests/redroid/build-disk-a.sh \
-            payload/lkm4ctr.ko \
-            payload/lkm4ctr_checker \
-            redroid-test-disk-a.ext4.zst
-
-      - name: Upload Redroid Disk A artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: redroid-test-disk-a
-          path: redroid-test-disk-a.ext4.zst
-          compression-level: 0
-
-  # Runs only after every ordinary KMI QEMU test completes successfully.
-  # QEMU uses two USB disks: Disk A is the Redroid rootfs; Disk B is a fresh
-  # ext4 filesystem that Android's boot-completion service mounts for logs.
-  redroid-test:
-    needs: [prepare, test, build-redroid-disk-a]
-    if: ${{ !cancelled() && contains(fromJson(needs.prepare.outputs.matrix), 'android14-6.1') && needs.test.result == 'success' && needs.build-redroid-disk-a.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Redroid QEMU test tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cpio e2fsprogs qemu-system-arm zstd
-
-      - name: Download Redroid Disk A
-        uses: actions/download-artifact@v8
-        with:
-          name: redroid-test-disk-a
-          path: redroid/
 
       - name: Download testsuite busybox
         run: |
@@ -671,7 +637,9 @@ jobs:
             redroid-test-disk-a.ext4 \
             redroid-test-disk-b.ext4 \
             testsuite/busybox \
-            redroid-output
+            redroid-output \
+            payload/lkm4ctr.ko \
+            payload/lkm4ctr_checker
 
       - name: Upload Redroid test results from Disk B
         if: always()
@@ -683,32 +651,6 @@ jobs:
             redroid-output/
           if-no-files-found: warn
           compression-level: 0
-
-  # Publishing the generated test disk is intentionally opt-in because it
-  # attaches a large binary asset to the historical 4.0.1 release.
-  publish-redroid-disk-a:
-    needs: [build-redroid-disk-a, redroid-test]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_redroid_disk_a && needs.build-redroid-disk-a.result == 'success' && needs.redroid-test.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download Redroid Disk A artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: redroid-test-disk-a
-          path: redroid/
-
-      - name: Upload Disk A to release 4.0.1
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          gh release view 4.0.1 --repo "$REPOSITORY"
-          gh release upload 4.0.1 \
-            redroid/redroid-test-disk-a.ext4.zst \
-            --repo "$REPOSITORY" \
-            --clobber
 
   # Only runs for a manual workflow_dispatch run with the "create_release"
   # input checked on. Publishes the per-KMI modules, checker and combined
