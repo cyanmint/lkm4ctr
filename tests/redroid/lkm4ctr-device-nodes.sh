@@ -45,4 +45,4 @@ while [ "$loop_number" -lt 64 ]; do
 	loop_number=$((loop_number + 1))
 done
 
-echo "REDROID_DEVICE_NODES_READY"
+echo '<6>REDROID_DEVICE_NODES_READY' > /dev/kmsg

@@ -1,6 +1,6 @@
 # Public Domain (AI-generated; no copyright subsists in this content).
 
-on post-fs
+on post-fs-data
     exec -- /system/bin/sh /system/bin/lkm4ctr-device-nodes.sh
 
 service lkm4ctr_test /system/bin/sh /system/bin/lkm4ctr-test.sh
