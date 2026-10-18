@@ -1,0 +1,22 @@
+#!/busybox sh
+
+mkdir -p /dev /proc /sys /newroot
+/busybox mount -t proc proc /proc
+/busybox mount -t sysfs sysfs /sys
+/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+/busybox mdev -s
+
+sleep 4
+if ! /busybox mount -t ext4 -o rw /dev/sda /newroot; then
+	echo "REDROID_TEST_FAILED: could not mount Disk A from /dev/sda"
+	/busybox poweroff -f
+	exit 1
+fi
+
+echo "REDROID_TEST: switching to the Redroid rootfs on Disk A"
+exec /busybox switch_root /newroot /init \
+	androidboot.hardware=redroid \
+	androidboot.redroid_width=720 \
+	androidboot.redroid_height=1280 \
+	androidboot.redroid_dpi=240 \
+	androidboot.selinux=permissive

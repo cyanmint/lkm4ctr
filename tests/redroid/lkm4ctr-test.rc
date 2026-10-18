@@ -1,0 +1,11 @@
+# Public Domain (AI-generated; no copyright subsists in this content).
+
+service lkm4ctr_test /system/bin/sh /system/bin/lkm4ctr-test.sh
+    class late_start
+    user root
+    group root
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start lkm4ctr_test
