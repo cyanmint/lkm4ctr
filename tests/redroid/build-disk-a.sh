@@ -26,8 +26,23 @@ docker export "$container" |
 	sudo tar --numeric-owner --same-owner -xpf - -C "$rootfs"
 docker rm "$container" >/dev/null
 
-test -x "$rootfs/init"
-test -x "$rootfs/system/bin/sh"
+if [ -L "$rootfs/init" ]; then
+	init_target=$(readlink "$rootfs/init")
+	case "$init_target" in
+		/*) init_target="$rootfs$init_target" ;;
+		*) init_target="$rootfs/$init_target" ;;
+	esac
+else
+	init_target="$rootfs/init"
+fi
+if [ ! -x "$init_target" ]; then
+	echo "Redroid /init target is not executable within the extracted rootfs: $init_target" >&2
+	exit 1
+fi
+if [ ! -x "$rootfs/system/bin/sh" ]; then
+	echo "Redroid /system/bin/sh is missing or not executable" >&2
+	exit 1
+fi
 sudo install -D -o 0 -g 0 -m 0755 \
 	tests/redroid/lkm4ctr-test.sh "$rootfs/system/bin/lkm4ctr-test.sh"
 sudo install -D -o 0 -g 0 -m 0644 \
