@@ -1,4 +1,6 @@
 #!/busybox sh
+# shellcheck shell=dash
+# Public Domain (AI-generated; no copyright subsists in this content).
 
 mkdir -p /dev /proc /sys /newroot
 /busybox mount -t proc proc /proc
@@ -6,7 +8,7 @@ mkdir -p /dev /proc /sys /newroot
 /busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 /busybox mdev -s
 
-sleep 4
+/busybox sleep 4
 if ! /busybox mount -t ext4 -o rw /dev/sda /newroot; then
 	echo "REDROID_TEST_FAILED: could not mount Disk A from /dev/sda"
 	/busybox poweroff -f

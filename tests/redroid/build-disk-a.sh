@@ -42,4 +42,8 @@ mkdir -p "$(dirname "$output")"
 truncate -s 8G "$disk"
 sudo mkfs.ext4 -F -m 0 -L REDROID_ROOTFS -d "$rootfs" "$disk"
 zstd -T0 -3 --force "$disk" -o "$output"
+if [ "$(stat -c %s "$output")" -ge 2000000000 ]; then
+	echo "Compressed Disk A exceeds GitHub's 2 GB release-asset limit" >&2
+	exit 1
+fi
 ls -lh "$output"
