@@ -43,20 +43,13 @@ if [ ! -x "$rootfs/system/bin/sh" ]; then
 	echo "Redroid /system/bin/sh is missing or not executable" >&2
 	exit 1
 fi
-if [ ! -f "$rootfs/init.rc" ]; then
-	echo "Redroid root init.rc is missing" >&2
-	exit 1
-fi
 sudo install -D -o 0 -g 0 -m 0755 \
 	tests/redroid/lkm4ctr-test.sh "$rootfs/system/bin/lkm4ctr-test.sh"
 sudo install -D -o 0 -g 0 -m 0644 \
 	tests/redroid/lkm4ctr-test.rc "$rootfs/system/etc/init/lkm4ctr-test.rc"
 sudo install -D -o 0 -g 0 -m 0755 \
 	tests/redroid/lkm4ctr-device-nodes.sh "$rootfs/system/bin/lkm4ctr-device-nodes.sh"
-if ! grep -Fq '# lkm4ctr device-node setup' "$rootfs/init.rc"; then
-	sudo tee -a "$rootfs/init.rc" \
-		< tests/redroid/lkm4ctr-device-nodes.rc >/dev/null
-fi
+sudo bash tests/redroid/install-device-node-hook.sh "$rootfs"
 
 mkdir -p "$(dirname "$output")"
 truncate -s 8G "$disk"
