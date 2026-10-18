@@ -1,0 +1,4 @@
+# Public Domain (AI-generated; no copyright subsists in this content).
+# lkm4ctr device-node setup
+on post-fs-data
+    exec -- /system/bin/sh /system/bin/lkm4ctr-device-nodes.sh

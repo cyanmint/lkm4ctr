@@ -653,6 +653,10 @@ jobs:
           sudo install -D -o 0 -g 0 -m 0755 \
             tests/redroid/lkm4ctr-device-nodes.sh \
             "$rootfs_mount/system/bin/lkm4ctr-device-nodes.sh"
+          if ! grep -Fq '# lkm4ctr device-node setup' "$rootfs_mount/init.rc"; then
+            sudo tee -a "$rootfs_mount/init.rc" \
+              < tests/redroid/lkm4ctr-device-nodes.rc >/dev/null
+          fi
           sudo umount "$rootfs_mount"
           mkdir -p redroid-output
           bash tests/redroid/run-qemu.sh \
