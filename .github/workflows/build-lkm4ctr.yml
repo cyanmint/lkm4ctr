@@ -69,11 +69,14 @@
 #     runs the checker again, starts dockerd, and executes the bundled Alpine
 #     and Ubuntu container tests. When enabled, it then unmounts test mounts
 #     and verifies rmmod on that same module instance immediately before poweroff.
-#   - After the KMI matrix succeeds, a separate android14-6.1 run boots the
-#     Redroid rootfs on Disk A with an empty writable Disk B for test logs.
-#     Android's init service starts at sys.boot_completed, runs the checker and
-#     module load/unload tests, writes logs to Disk B, unmounts it, and shuts
-#     down. Disk A can optionally be published to the existing 4.0.1 release.
+#   - After the KMI matrix succeeds, a separate android14-6.1 run downloads
+#     the prebuilt Redroid rootfs Disk A from release 4.0.1 and boots it with
+#     an empty writable Disk B for test logs. The test injects that KMI's
+#     module/checker into the initramfs, which copies them onto Disk A before
+#     switch_root. Android's init service runs the tests after boot completion,
+#     logs to Disk B, unmounts it, and shuts down.
+#   - .github/workflows/build-redroid-disk-a.yml builds Disk A independently
+#     and uploads it to the existing 4.0.1 release.
 #
 # Every KMI uses only its official, unmodified Google GKI Image; this workflow
 # does not download kernel images from testsuitekernels.zip or build test
