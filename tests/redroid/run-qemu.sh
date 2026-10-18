@@ -15,6 +15,7 @@ busybox=$4
 output_dir=$5
 module=$6
 checker=$7
+output_dir=$(cd "$output_dir" && pwd)
 ramdisk_dir=$(mktemp -d)
 mount_dir=$(mktemp -d)
 trap 'rm -rf "$ramdisk_dir"; sudo umount "$mount_dir" 2>/dev/null || true; rmdir "$mount_dir"' EXIT
