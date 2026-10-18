@@ -45,7 +45,9 @@ set -e
 echo "QEMU_EXIT_STATUS=$qemu_status"
 
 sudo mount -o loop,ro,noload "$disk_b" "$mount_dir"
-cp -a "$mount_dir/." "$output_dir/disk-b-contents/"
+sudo cp -a "$mount_dir/." "$output_dir/disk-b-contents/"
+sudo rm -rf "$output_dir/disk-b-contents/lost+found"
+sudo chown -R "$(id -u):$(id -g)" "$output_dir/disk-b-contents"
 test_log="$mount_dir/lkm4ctr-test.log"
 if [ -f "$test_log" ]; then
 	cat "$test_log"

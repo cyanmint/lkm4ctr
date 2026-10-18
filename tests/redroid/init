@@ -9,6 +9,21 @@ mkdir -p /dev /proc /sys /newroot
 /busybox mdev -s
 
 /busybox sleep 4
+if [ ! -e /dev/loop-control ]; then
+	/busybox mknod -m 0600 /dev/loop-control c 10 237
+fi
+if [ ! -e /dev/device-mapper ]; then
+	/busybox mknod -m 0600 /dev/device-mapper c 10 236
+fi
+/busybox mkdir -p /dev/block
+loop_number=0
+while [ "$loop_number" -lt 64 ]; do
+	if [ ! -e "/dev/block/loop$loop_number" ]; then
+		/busybox mknod -m 0600 "/dev/block/loop$loop_number" b 7 "$loop_number"
+	fi
+	loop_number=$((loop_number + 1))
+done
+
 if ! /busybox mount -t ext4 -o rw /dev/sda /newroot; then
 	echo "REDROID_TEST_FAILED: could not mount Disk A from /dev/sda"
 	/busybox poweroff -f
