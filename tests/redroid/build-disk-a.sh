@@ -47,6 +47,8 @@ sudo install -D -o 0 -g 0 -m 0755 \
 	tests/redroid/lkm4ctr-test.sh "$rootfs/system/bin/lkm4ctr-test.sh"
 sudo install -D -o 0 -g 0 -m 0644 \
 	tests/redroid/lkm4ctr-test.rc "$rootfs/system/etc/init/lkm4ctr-test.rc"
+sudo install -D -o 0 -g 0 -m 0755 \
+	tests/redroid/lkm4ctr-device-nodes.sh "$rootfs/system/bin/lkm4ctr-device-nodes.sh"
 
 mkdir -p "$(dirname "$output")"
 truncate -s 8G "$disk"

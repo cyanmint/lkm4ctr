@@ -44,6 +44,11 @@ qemu_status=${PIPESTATUS[0]}
 set -e
 echo "QEMU_EXIT_STATUS=$qemu_status"
 
+if ! grep -Fq 'REDROID_DEVICE_NODES_READY' "$output_dir/redroid-qemu.log"; then
+	echo "REDROID_TEST_FAILED: boot did not create the required loop and device-mapper nodes" >&2
+	exit 1
+fi
+
 sudo mount -o loop,ro,noload "$disk_b" "$mount_dir"
 sudo cp -a "$mount_dir/." "$output_dir/disk-b-contents/"
 sudo rm -rf "$output_dir/disk-b-contents/lost+found"
