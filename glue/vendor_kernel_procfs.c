@@ -642,19 +642,9 @@ int vns_procfs_compat_detach_init_pidns_ops(void)
 	return 0;
 }
 
-#if defined(CONFIG_ARM64)
-static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->regs[0]; }
-static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->regs[1]; }
-#elif defined(CONFIG_X86_64)
-static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->di; }
-static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->si; }
-#else
-#error "vendor_kernel: unsupported architecture"
-#endif
-
 /* Bare "self"/"thread-self"/numeric-pid component used by the id-map
  * compatibility path below. */
-static bool vns_component_is_pid_dir(const char *s)
+static bool __maybe_unused vns_component_is_pid_dir(const char *s)
 {
 	if (!*s)
 		return false;
@@ -701,7 +691,7 @@ static bool vns_component_is_pid_dir(const char *s)
  * newly introduced by switching "self"/"thread-self" to the vnr() forms
  * above.
  */
-static pid_t vns_resolve_ns_pid(const char *comp)
+static pid_t __maybe_unused vns_resolve_ns_pid(const char *comp)
 {
 	long val;
 
@@ -814,6 +804,15 @@ static bool __maybe_unused vns_path_wants_idmap(int dfd, const char __user *upat
  * value there anyway. Disable the three hooks there; the remaining 31 hooks
  * (proc_ns_dir_lookup, IPC syscalls, copy_namespaces, cred, ...) stay.
  */
+#if defined(CONFIG_ARM64)
+static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->regs[0]; }
+static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->regs[1]; }
+#elif defined(CONFIG_X86_64)
+static unsigned long vns_procfs_arg0(const struct pt_regs *regs) { return regs->di; }
+static unsigned long vns_procfs_arg1(const struct pt_regs *regs) { return regs->si; }
+#else
+#error "vendor_kernel: unsupported architecture"
+#endif
 static long (*real_sys_openat2)(const struct pt_regs *regs);
 static long (*real_sys_openat)(const struct pt_regs *regs);
 static long (*real_sys_open)(const struct pt_regs *regs);
