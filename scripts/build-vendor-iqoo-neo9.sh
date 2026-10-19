@@ -29,7 +29,7 @@
 #                             (default: 5.15.178-gaacdc35637c4-dirty)
 #   OUT_DIR                    where to write the .ko (default: out/)
 #   LKM4CTR_REPO               repo root (default: parent of this script's dir)
-#   JOBS                       -j value (default: $(nproc))
+#   JOBS                       -j value (default: 2; see note on LTO memory peak)
 #
 # The vivo GPL source tarball is NOT hosted by this project and must be obtained
 # from https://opensource.vivo.com/ (project 139, file android_15.0_kernel_SM8550.tar.gz).
@@ -46,7 +46,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # full release. With LOCALVERSION_AUTO=n this yields UTS_RELEASE=$TARGET_RELEASE.
 : "${TARGET_LOCALVERSION:="-gaacdc35637c4-dirty"}"
 : "${OUT_DIR:="$LKM4CTR_REPO/out"}"
-: "${JOBS:="$(nproc)"}"
+: "${JOBS:="2"}"
+# Default to -j2, not nproc: the LTO_CLANG_FULL + CFI_CLANG vmlinux.o link is a
+# single-process memory peak (lld loads all bitcode at once). On memory-lean
+# hosts (e.g. GitHub 16GB runners) -j4 makes the compile phase eat RAM early,
+# leaving no headroom for the link peak, which then OOM-kills the runner. -j2
+# keeps the compile phase lighter; the link step isn't parallelized by -j anyway.
+# Override with JOBS=<n> for beefier hosts.
 : "${NDK_URL:="https://dl.google.com/android/repository/android-ndk-r25c-linux.zip"}"
 
 # vermagic flags the running kernel expects (after the release token):

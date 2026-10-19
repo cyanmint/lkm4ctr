@@ -68,6 +68,21 @@ jobs:
             build-essential bc bison flex libssl-dev libelf-dev \
             cpio zip unzip wget curl python3 dwarves
 
+      # Full LTO + CFI linking vmlinux.o is the single biggest memory peak of
+      # the whole build (lld loads all bitcode modules at once for whole-program
+      # optimization). On a 16GB hosted runner this OOM-kills the runner agent —
+      # which manifests as "lost communication with the server" mid-link, not a
+      # make error. A 16G swap gives lld headroom to survive the link peak.
+      - name: Add 16G swap (survive LTO vmlinux.o link peak)
+        run: |
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "swap active:"
+          free -h
+          df -h /
+
       - name: Build lkm4ctr.ko against vivo source
         env:
           VIVO_KERNEL_TARBALL_URL: ${{ github.event.inputs.vivo_tarball_url || '' }}
