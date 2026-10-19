@@ -253,6 +253,7 @@ log "building lkm4ctr against vendor tree"
 make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   LOCALVERSION="$TARGET_LOCALVERSION" LOCALVERSION_AUTO=n \
   M="$LKM4CTR_REPO/vendor" LKM4CTR_LOG_DMESG=y \
+  LKM4CTR_DISABLE_OPENAT_HOOK=y \
   -j"$JOBS" modules 2>&1 | tee -a "$WORK/build.log"
 log "lkm4ctr build finished"
 KO="$LKM4CTR_REPO/vendor/lkm4ctr.ko"

@@ -750,7 +750,7 @@ static pid_t vns_resolve_ns_pid(const char *comp)
  * valid indirect-call targets. See that file's header comment for the full
  * rationale.
  */
-static bool vns_path_wants_idmap(int dfd, const char __user *upath,
+static bool __maybe_unused vns_path_wants_idmap(int dfd, const char __user *upath,
 				  enum vns_idmap_kind *out_kind, pid_t *out_pid)
 {
 	char buf[192];
@@ -797,6 +797,23 @@ static bool vns_path_wants_idmap(int dfd, const char __user *upath,
 	return *out_pid > 0;
 }
 
+#ifndef CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK
+/*
+ * openat/open/openat2 hooks + the /proc/<pid>/{uid_map,gid_map,...} ENOENT
+ * fallback. These hook the highest-frequency syscalls in the system; on
+ * stock GKI kernels (CONFIG_USER_NS=y) the fallback fakes the idmap procfs
+ * files that user namespaces need.
+ *
+ * They are gated behind CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK because on some
+ * vendor kernels built with LTO_CLANG_FULL + CFI_CLANG (e.g. the vivo iQOO
+ * Neo9 SM8550 kernel) the real_sys_openat(regs) indirect call resolved via
+ * shadow_hook_resolve() is not CFI-safe: under dense openat traffic (a
+ * `find /` or a container runtime mounting layers) it statistically hits a
+ * bad jump and panics at vendor_kernel_hook_openat+0x24/0x44. Those vendor
+ * kernels also lack CONFIG_USER_NS, so the idmap fallback has no functional
+ * value there anyway. Disable the three hooks there; the remaining 31 hooks
+ * (proc_ns_dir_lookup, IPC syscalls, copy_namespaces, cred, ...) stay.
+ */
 static long (*real_sys_openat2)(const struct pt_regs *regs);
 static long (*real_sys_openat)(const struct pt_regs *regs);
 static long (*real_sys_open)(const struct pt_regs *regs);
@@ -864,11 +881,14 @@ static struct shadow_hook vendor_kernel_openat_hook =
 static struct shadow_hook vendor_kernel_open_hook =
 	SHADOW_HOOK(vendor_kernel_open_names, vendor_kernel_hook_open,
 		    &real_sys_open);
+#endif	/* !CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK */
 
 struct shadow_hook *vendor_kernel_procfs_hooks[] = {
 	&vendor_kernel_proc_ns_dir_lookup_hook,
+#ifndef CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK
 	&vendor_kernel_openat2_hook,
 	&vendor_kernel_openat_hook,
 	&vendor_kernel_open_hook,
+#endif
 	NULL,
 };

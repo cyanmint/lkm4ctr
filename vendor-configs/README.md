@@ -30,6 +30,14 @@ using the exact `.config` here (captured via `zcat /proc/config.gz`).
   - `CONFIG_LOCALVERSION_AUTO=y` (overridden to `n` at build time, see
     `scripts/build-vendor-iqoo-neo9.sh`, so the `-gaacdc35637c4-dirty` suffix
     is supplied explicitly instead of regenerated from git)
+  - **Build switch `LKM4CTR_DISABLE_OPENAT_HOOK=y`** is passed by the build
+    script. The `LTO_CLANG_FULL` + `CFI_CLANG` combination makes the
+    `openat`/`open`/`openat2` hooks' `real_sys_openat(regs)` indirect call
+    (resolved via `shadow_hook_resolve()`) panic under dense openat traffic
+    (`find /`, container runtimes) at `vendor_kernel_hook_openat+0x24/0x44`.
+    This kernel also lacks `CONFIG_USER_NS`, so the hooks' idmap-fallback has
+    no value here. The switch drops those 3 hooks (34 -> 31) and is defaulted
+    `n` for stock GKI builds. See `docs/zh-hans/developer/IQOO_NEO9.md` §7.
 - `iqoo-neo9.device-symvers` — the REAL `Module.symvers` (symbol CRC table)
   captured from the device's RUNNING kernel, NOT from the public GPL source
   tree. This is mandatory: the vivo public GPL source produces CRCs that do

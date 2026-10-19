@@ -117,6 +117,11 @@ lsmod | grep lkm4ctr
 sudo rmmod lkm4ctr
 ```
 
+> **hook 数量提示**：vivo 构建因第 7 节原因禁用了 `openat`/`open`/`openat2`
+> 三个 hook，加载横幅应显示 `loaded (31 hook(s) installed)`，**不会**出现
+> `__arm64_sys_openat` / `__arm64_sys_open` / `__arm64_sys_openat2` 三行
+> `hooked ... at 0x...`。这是预期行为，不是安装失败。
+
 ## 6. 万一 CRC 仍对不上（迭代指引）
 
 理论上原厂内核 + 官方源码 + 设备 `.config` + 同款 clang 14.0.7 → CRC 一致。
@@ -133,7 +138,38 @@ sudo rmmod lkm4ctr
    的非导出内核函数符号不依赖 CRC（运行时 `shadow_hook_resolve()` 按名字经
    kallsyms 解析，本机 `CONFIG_KALLSYMS_ALL=y` 已保证可解析）。
 
-## 7. 相关文档
+## 7. openat hook 在 vivo LTO+CFI 内核上会触发 panic（已用构建开关禁用）
+
+实测：lkm4ctr 4.0.5 能在本机干净加载（34 个 hook 全装上），但加载后**任何
+密集文件系统遍历**（`find /`、`ls -R /`、`chroot info` 等）会在 ~2 分钟内
+panic 重启。崩溃栈固定落在：
+
+```
+vendor_kernel_hook_openat+0x24/0x44 [lkm4ctr]
+kretprobe_trampoline.cfi_jt+0x0/0x8
+```
+
+根因：vivo 内核 `CONFIG_LTO_CLANG_FULL=y + CONFIG_CFI_CLANG=y`。lkm4ctr 的
+`openat`/`open`/`openat2` hook 通过函数指针 `real_sys_openat(regs)` 间接
+调用原始 syscall（地址由 `shadow_hook_resolve()` 按名字经 kallsyms 解析），
+该间接调用在 vivo 的 LTO+CFI 下不可靠；`openat` 是全系统最高频 syscall，
+密集遍历下统计上很快命中坏跳转 → panic。本机又**无 `CONFIG_USER_NS`**，
+这三个 hook 的 `/proc/<pid>/{uid_map,gid_map,...}` ENOENT 兑底本就无意义。
+
+**处置**：用构建开关 `LKM4CTR_DISABLE_OPENAT_HOOK` 禁用这三个 hook，保留其余
+31 个（`proc_ns_dir_lookup`、IPC syscalls、`copy_namespaces`、cred、
+`getuid`/`setuid` 等）。开关默认 `n`（GKI 矩阵构建保留 openat hook，那些内核
+有 `CONFIG_USER_NS` 且无此 CFI 问题），仅 vivo 构建脚本
+`scripts/build-vendor-iqoo-neo9.sh` 传 `LKM4CTR_DISABLE_OPENAT_HOOK=y`。门控在
+`glue/vendor_kernel_procfs.c` 的 `#ifndef CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK`，
+开关定义见 `vendor/Makefile`。
+
+> 此改动**未解决** `# CONFIG_CGROUP_DEVICE is not set`（`mount -t cgroup -o
+> devices` 返回 `Invalid argument`，Termux `dockerd` 启动失败）。禁 openat
+> hook 只是让模块本身不再 panic；要让 Docker 跑起来还需另行处理 cgroup
+> devices（本项目 4.0.5 已移除 `shadow_cgdevices` 子模块，不补）。
+
+## 8. 相关文档
 
 - 厂商内核整体设计：[`architecture/GLUE.md`](../architecture/GLUE.md)、
   [`VENDOR_KERNEL.md`](./VENDOR_KERNEL.md)
