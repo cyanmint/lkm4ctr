@@ -364,6 +364,25 @@ ifeq ($(LKM4CTR_LOG_DMESG),y)
 ccflags-y += -DCONFIG_LKM4CTR_LOG_DMESG=1
 endif
 
+# LKM4CTR_DISABLE_OPENAT_HOOK - drop the openat/open/openat2 hooks.
+# On stock GKI kernels (CONFIG_USER_NS=y) those hooks install the
+# /proc/<pid>/{uid_map,gid_map,projid_map,setgroups} ENOENT fallback that
+# user namespaces rely on, and are safe. On certain vendor kernels built
+# with LTO_CLANG_FULL + CFI_CLANG (notably the vivo iQOO Neo9 SM8550
+# kernel, 5.15.178-gaacdc35637c4-dirty), the real_sys_openat(regs) indirect
+# call resolved through shadow_hook_resolve() is not CFI-safe: under dense
+# openat traffic (find /, container runtime mounting layers) it
+# statistically hits a bad jump and panics at
+# vendor_kernel_hook_openat+0x24/0x44. Those kernels also lack
+# CONFIG_USER_NS, so the idmap fallback has no functional value there.
+# Default n keeps the hooks for every GKI matrix build; set y for the vivo
+# vendor build (scripts/build-vendor-iqoo-neo9.sh passes it). See
+# glue/vendor_kernel_procfs.c's CONFIG_LKM4CTR_DISABLE_OPENAT_HOOK guard.
+LKM4CTR_DISABLE_OPENAT_HOOK ?= n
+ifeq ($(LKM4CTR_DISABLE_OPENAT_HOOK),y)
+ccflags-y += -DCONFIG_LKM4CTR_DISABLE_OPENAT_HOOK=1
+endif
+
 else
 
 KDIR ?= /lib/modules/$(shell uname -r)/build

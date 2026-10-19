@@ -1,0 +1,153 @@
+# Build lkm4ctr.ko for the vivo iQOO Neo9 vendor kernel.
+#
+# The iQOO Neo9 runs a vivo SM8550 vendor kernel (5.15.178-gaacdc35637c4-dirty)
+# that deliberately breaks the GKI KMI (CONFIG_VIVO_VMET_BREAK_KMI=y). A stock
+# GKI android13-5.15 build cannot load here. Crucially, the vivo public GPL
+# source tree produces symbol CRCs that do NOT match the closed-source kernel
+# actually running on the device (e.g. module_layout: 0x0222dd63 from GPL vs
+# 0x5ec51e3c on the running device), and vivo's own DLKMs bypass modversions,
+# so they load despite the mismatch while a third-party module fails with
+# "disagrees about version of symbol module_layout". This workflow therefore
+# builds against the vivo GPL source for toolchain/struct-layout/vermagic, then
+# OVERRIDES the CRC table with the real one captured from the running device
+# (vendor-configs/iqoo-neo9.device-symvers, see
+# scripts/extract-symvers-from-device.sh).
+#
+# NOTE: the running kernel DOES carry a `vivo` vermagic token
+# (`... modversions vivo aarch64`, verified on-device: a token-less module is
+# rejected with the version-magic error in errors.txt). vivo's own vendor
+# DLKMs carry no `vivo` token only because they bypass modversions/vermagic via
+# a CRC-bypass load path; a third-party module does not, so it must match.
+# But the public GPL source tree ships NO implementation of
+# CONFIG_VIVO_MODULE_VERMAGIC (no Kconfig definition, no vermagic.h change), and
+# `make olddefconfig` strips the undefined symbol, so a build from the GPL
+# source yields vermagic WITHOUT the token. The build script therefore applies
+# scripts/iqoo-neo9-vermagic-vivo.patch to add `#define MODULE_VERMAGIC_VIVO
+# "vivo "` to the source tree's vermagic.h, restoring the token so the
+# out-of-tree module matches byte-for-byte and plain insmod loads.
+#
+# The vivo GPL source tarball is NOT bundled; provide its URL via
+# `vivo_tarball_url` (obtain it from https://opensource.vivo.com/, project 139,
+# file android_15.0_kernel_SM8550.tar.gz). The build uses NDK r25c's clang
+# 14.0.7 to match the device toolchain (r450784e) for struct-layout/ABI
+# fidelity (symbol CRCs come from the device-real table, not genksyms).
+
+name: Build lkm4ctr for iQOO Neo9 (vendor kernel)
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      vivo_tarball_url:
+        description: 'HTTPS URL of android_15.0_kernel_SM8550.tar.gz from opensource.vivo.com (project 139)'
+        required: true
+        type: string
+      target_release:
+        description: 'UTS_RELEASE the running kernel reports (default: 5.15.178-gaacdc35637c4-dirty)'
+        required: false
+        type: string
+        default: '5.15.178-gaacdc35637c4-dirty'
+      target_localversion:
+        description: 'LOCALVERSION suffix appended to base 5.15.178 (default: -gaacdc35637c4-dirty)'
+        required: false
+        type: string
+        default: '-gaacdc35637c4-dirty'
+      jobs:
+        description: 'make -j (blank = nproc)'
+        required: false
+        type: string
+        default: ''
+      device_symvers:
+        description: 'Path to device-real Module.symvers (default: committed vendor-configs/iqoo-neo9.device-symvers; set to "none" to DISABLE override and use GPL vmlinux.symvers)'
+        required: false
+        type: string
+        default: 'vendor-configs/iqoo-neo9.device-symvers'
+  push:
+    branches:
+      - lkm4ctr
+    paths:
+      - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'scripts/iqoo-neo9-vermagic-vivo.patch'
+      - 'vendor-configs/iqoo-neo9.config'
+      - '.github/workflows/build-vendor-iqoo-neo9.yml'
+  pull_request:
+    branches:
+      - lkm4ctr
+    paths:
+      - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'scripts/iqoo-neo9-vermagic-vivo.patch'
+      - 'vendor-configs/iqoo-neo9.config'
+      - '.github/workflows/build-vendor-iqoo-neo9.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout lkm4ctr
+        uses: actions/checkout@v4
+
+      - name: Install kernel build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            cpio zip unzip wget curl python3 dwarves patch
+
+      # Full LTO + CFI linking vmlinux.o is the single biggest memory peak of
+      # the whole build (lld loads all bitcode modules at once for whole-program
+      # optimization). On a 16GB hosted runner this OOM-kills the runner agent —
+      # which manifests as "lost communication with the server" mid-link, not a
+      # make error. A 16G swap gives lld headroom to survive the link peak.
+      - name: Add 16G swap (survive LTO vmlinux.o link peak)
+        run: |
+          set -x
+          swapon --show
+          # The ubuntu-22.04 runner image ships an active /swapfile, so writing
+          # that path fails with ETXTBSY. Use a distinct path to ADD swap on
+          # top of the existing one instead of clobbering it.
+          SWAP=/swapfile-lto
+          sudo swapoff "$SWAP" 2>/dev/null || true
+          sudo rm -f "$SWAP"
+          sudo fallocate -l 16G "$SWAP" || sudo dd if=/dev/zero of="$SWAP" bs=1M count=16384
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP"
+          sudo swapon "$SWAP"
+          echo "swap active:"
+          swapon --show
+          free -h
+          df -h /
+
+      - name: Build lkm4ctr.ko against vivo source
+        env:
+          VIVO_KERNEL_TARBALL_URL: ${{ github.event.inputs.vivo_tarball_url || '' }}
+          TARGET_RELEASE: ${{ github.event.inputs.target_release || '5.15.178-gaacdc35637c4-dirty' }}
+          TARGET_LOCALVERSION: ${{ github.event.inputs.target_localversion || '-gaacdc35637c4-dirty' }}
+          JOBS: ${{ github.event.inputs.jobs }}
+          # 'none' (or 'gpl'/'-') disables the override (fall back to GPL
+          # vmlinux.symvers); any other value is treated as a path. Empty falls
+          # back to the script default (the committed device symvers).
+          DEVICE_SYMVERS: ${{ github.event.inputs.device_symvers }}
+        run: |
+          # On push/PR (no dispatch input) the vivo URL is empty; skip the actual
+          # build and only shell-check the script so the workflow stays green
+          # without the proprietary tarball.
+          if [ -z "$VIVO_KERNEL_TARBALL_URL" ]; then
+            echo "No vivo_tarball_url supplied — running shell syntax check only."
+            bash -n scripts/build-vendor-iqoo-neo9.sh && echo "script syntax OK"
+            exit 0
+          fi
+          ./scripts/build-vendor-iqoo-neo9.sh
+
+      - name: Upload lkm4ctr.ko + Module.symvers
+        if: ${{ github.event.inputs.vivo_tarball_url != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkm4ctr-iqoo-neo9-vendor-arm64
+          path: |
+            out/lkm4ctr-4.0.5-iqoo-neo9-vendor-arm64*.ko
+            out/Module.symvers.iqoo-neo9
+          if-no-files-found: error
+          retention-days: 30
