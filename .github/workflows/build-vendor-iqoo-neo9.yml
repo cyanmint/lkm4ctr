@@ -1,15 +1,27 @@
 # Build lkm4ctr.ko for the vivo iQOO Neo9 vendor kernel.
 #
 # The iQOO Neo9 runs a vivo SM8550 vendor kernel (5.15.178-gaacdc35637c4-dirty)
-# that deliberately breaks the GKI KMI (CONFIG_VIVO_VMET_BREAK_KMI=y) and adds a
-# `vivo` vermagic token (CONFIG_VIVO_MODULE_VERMAGIC=y). A stock GKI
-# android13-5.15 build cannot load here — it must be rebuilt against the vivo GPL
-# kernel source with the device's exact .config. This workflow does that.
+# that deliberately breaks the GKI KMI (CONFIG_VIVO_VMET_BREAK_KMI=y). A stock
+# GKI android13-5.15 build cannot load here. Crucially, the vivo public GPL
+# source tree produces symbol CRCs that do NOT match the closed-source kernel
+# actually running on the device (e.g. module_layout: 0x0222dd63 from GPL vs
+# 0x5ec51e3c on the running device), and vivo's own DLKMs bypass modversions,
+# so they load despite the mismatch while a third-party module fails with
+# "disagrees about version of symbol module_layout". This workflow therefore
+# builds against the vivo GPL source for toolchain/struct-layout/vermagic, then
+# OVERRIDES the CRC table with the real one captured from the running device
+# (vendor-configs/iqoo-neo9.device-symvers, see
+# scripts/extract-symvers-from-device.sh).
+#
+# NOTE: CONFIG_VIVO_MODULE_VERMAGIC=y was previously assumed to add a `vivo`
+# vermagic token, but that Kconfig has no implementation in the public GPL tree
+# and the device's own vendor DLKMs carry no `vivo` token — so vermagic is plain.
 #
 # The vivo GPL source tarball is NOT bundled; provide its URL via
 # `vivo_tarball_url` (obtain it from https://opensource.vivo.com/, project 139,
 # file android_15.0_kernel_SM8550.tar.gz). The build uses NDK r25c's clang
-# 14.0.7 to match the device toolchain (r450784e) for symbol-CRC fidelity.
+# 14.0.7 to match the device toolchain (r450784e) for struct-layout/ABI
+# fidelity (symbol CRCs come from the device-real table, not genksyms).
 
 name: Build lkm4ctr for iQOO Neo9 (vendor kernel)
 
@@ -38,6 +50,11 @@ on:
         required: false
         type: string
         default: ''
+      device_symvers:
+        description: 'Path to device-real Module.symvers (default: committed vendor-configs/iqoo-neo9.device-symvers; set to "none" to DISABLE override and use GPL vmlinux.symvers)'
+        required: false
+        type: string
+        default: 'vendor-configs/iqoo-neo9.device-symvers'
   push:
     branches:
       - lkm4ctr
@@ -98,6 +115,10 @@ jobs:
           TARGET_RELEASE: ${{ github.event.inputs.target_release || '5.15.178-gaacdc35637c4-dirty' }}
           TARGET_LOCALVERSION: ${{ github.event.inputs.target_localversion || '-gaacdc35637c4-dirty' }}
           JOBS: ${{ github.event.inputs.jobs }}
+          # 'none' (or 'gpl'/'-') disables the override (fall back to GPL
+          # vmlinux.symvers); any other value is treated as a path. Empty falls
+          # back to the script default (the committed device symvers).
+          DEVICE_SYMVERS: ${{ github.event.inputs.device_symvers }}
         run: |
           # On push/PR (no dispatch input) the vivo URL is empty; skip the actual
           # build and only shell-check the script so the workflow stays green

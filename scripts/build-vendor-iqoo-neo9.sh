@@ -23,6 +23,20 @@
 # Optional:
 #   NDK_DIR                   path to an extracted NDK r25c (clang 14.0.7)
 #   NDK_URL                   URL to download NDK from (default: r25c)
+#   DEVICE_SYMVERS             path to a REAL Module.symvers captured from the
+#                             device's RUNNING kernel (see
+#                             extract-symvers-from-device.sh). When set, this
+#                             OVERRIDES the vmlinux.symvers the build itself
+#                             produces, because the vivo public GPL source tree
+#                             yields CRCs that do NOT match the closed-source
+#                             kernel actually running on the device (vivo's own
+#                             DLKMs are loaded via a CRC-bypass path, so they
+#                             pass despite mismatched CRCs; a third-party module
+#                             is not, and fails with
+#                             "disagrees about version of symbol module_layout").
+#                             vmlinux is still built (for modules_prepare host
+#                             tools), only its CRC table is discarded.
+#                             STRONGLY RECOMMENDED for this device.
 #   DEVICE_CONFIG              path to the device .config
 #                             (default: <repo>/vendor-configs/iqoo-neo9.config)
 #   TARGET_RELEASE             vermagic release string to force
@@ -39,6 +53,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${LKM4CTR_REPO:="$(cd "$SCRIPT_DIR/.." && pwd)"}"
 : "${DEVICE_CONFIG:="$LKM4CTR_REPO/vendor-configs/iqoo-neo9.config"}"
+# DEVICE_SYMVERS default is resolved in step 5 (it needs the repo path and has
+# none|gpl|- disable semantics); no static default here.
 : "${TARGET_RELEASE:="5.15.178-gaacdc35637c4-dirty"}"
 # LOCALVERSION is appended to KERNELRELEASE (already "5.15.178" from the
 # source's VERSION/PATCHLEVEL/SUBLEVEL), so it must be ONLY the suffix that
@@ -55,9 +71,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Override with JOBS=<n> for beefier hosts.
 : "${NDK_URL:="https://dl.google.com/android/repository/android-ndk-r25c-linux.zip"}"
 
-# vermagic flags the running kernel expects (after the release token):
-#   SMP preempt mod_unload modversions vivo aarch64
-EXPECTED_VERMAGIC="$TARGET_RELEASE SMP preempt mod_unload modversions vivo aarch64"
+# vermagic flags the running kernel expects (after the release token).
+# NOTE: a `vivo` token was previously assumed here based on
+# CONFIG_VIVO_MODULE_VERMAGIC=y, but that Kconfig has NO implementation in the
+# public GPL source tree (no Kconfig definition, no vermagic.h change), and the
+# device's own vendor DLKMs carry the plain flags below with NO vivo token
+# (verified: strings /vendor_dlkm/lib/modules/5.15-gki/adsp_loader_dlkm.ko).
+# So the real expected vermagic has no `vivo` token.
+EXPECTED_VERMAGIC="$TARGET_RELEASE SMP preempt mod_unload modversions aarch64"
 
 log() { printf '\033[1;34m[build-vendor]\033[0m %s\n' "$*" >&2; }
 err() { printf '\033[1;31m[build-vendor]\033[0m %s\n' "$*" >&2; }
@@ -168,6 +189,45 @@ sym_count="$(wc -l < "$SRC/Module.symvers")"
 log "Module.symvers (from vmlinux.symvers): $sym_count entries"
 [ "$sym_count" -gt 100 ] || err "WARNING: Module.symvers has only $sym_count entries — CRCs may be incomplete"
 
+# Override with the device's REAL CRC table if provided. The public GPL source
+# tree produces CRCs that do NOT match the closed-source kernel actually
+# running on the device (e.g. module_layout is 0x0222dd63 from GPL vs
+# 0x5ec51e3c on the running device). vivo's own DLKMs bypass modversions, so
+# they load despite the mismatch; a third-party module does not, and fails with
+# "disagrees about version of symbol module_layout". The device-extracted
+# Module.symvers (from the running kernel's __kcrctab) carries the TRUE CRCs.
+# We still keep the vmlinux build above: modules_prepare needs its host tools
+# (scripts/module.lds etc.), only the CRC table is replaced here.
+#
+# DEVICE_SYMVERS semantics:
+#   unset/empty  -> use the committed default (vendor-configs/iqoo-neo9.device-symvers)
+#                  if present, else no override (fall back to GPL vmlinux.symvers)
+#   none|gpl|-   -> explicitly DISABLE the override (use GPL vmlinux.symvers)
+#   <path>       -> use that file
+DEVICE_SYMVERS="${DEVICE_SYMVERS:-}"
+DEVICE_SYMVERS="${DEVICE_SYMVERS%%[[:space:]]*}"  # trim trailing whitespace / detect ' '
+case "$DEVICE_SYMVERS" in
+  ""|none|gpl|-)
+    if [ -z "$DEVICE_SYMVERS" ] && [ -f "$LKM4CTR_REPO/vendor-configs/iqoo-neo9.device-symvers" ]; then
+      DEVICE_SYMVERS="$LKM4CTR_REPO/vendor-configs/iqoo-neo9.device-symvers"
+    else
+      DEVICE_SYMVERS=""
+      log "DEVICE_SYMVERS disabled — using GPL vmlinux.symvers (will NOT match running device)"
+    fi
+    ;;
+esac
+if [ -n "$DEVICE_SYMVERS" ]; then
+  [ -f "$DEVICE_SYMVERS" ] || die "DEVICE_SYMVERS set but file not found: $DEVICE_SYMVERS"
+  log "OVERRIDING Module.symvers with device-extracted real CRCs: $DEVICE_SYMVERS"
+  cp -f "$DEVICE_SYMVERS" "$SRC/Module.symvers"
+  dev_count="$(wc -l < "$SRC/Module.symvers")"
+  log "Module.symvers (device-real): $dev_count entries"
+  # Spot-check: the device-real module_layout CRC should differ from the GPL one.
+  dev_ml="$(grep -w module_layout "$SRC/Module.symvers" | awk '{print $1}')"
+  log "  device-real module_layout CRC = $dev_ml (GPL vmlinux.symvers would be 0x0222dd63)"
+  [ -n "$dev_ml" ] || err "WARNING: module_layout not found in device symvers — override may be wrong"
+fi
+
 # ─── 6. build lkm4ctr against the vendor tree ─────────────────────────────────
 # External module linking into .ko needs scripts/module.lds (the linker script
 # for modules) and other host tools that are only generated by `make
@@ -184,9 +244,11 @@ make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   || err "WARNING: scripts/module.lds still missing — external module link may fail"
 
 # Re-pass the same LOCALVERSION override so the external module build never
-# recomputes a different UTS_RELEASE. The `vivo` vermagic token and the
-# SMP/preempt/mod_unload/modversions flags come from the vivo source's vermagic.h
-# + the device .config, so the module inherits them automatically.
+# recomputes a different UTS_RELEASE. The SMP/preempt/mod_unload/modversions
+# flags come from the vivo source's vermagic.h + the device .config, so the
+# module inherits them automatically. The symbol CRCs baked into the .ko come
+# from $SRC/Module.symvers (the device-real table if DEVICE_SYMVERS was set,
+# else the GPL vmlinux.symvers — the latter will NOT match the running device).
 log "building lkm4ctr against vendor tree"
 make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   LOCALVERSION="$TARGET_LOCALVERSION" LOCALVERSION_AUTO=n \
@@ -196,7 +258,8 @@ log "lkm4ctr build finished"
 KO="$LKM4CTR_REPO/vendor/lkm4ctr.ko"
 [ -s "$KO" ] || die "lkm4ctr.ko was not produced; see $WORK/build.log"
 
-# ─── 7. verify vermagic ───────────────────────────────────────────────────────
+# ─── 7. verify vermagic + symbol CRCs ───────────────────────────────────────
+
 got_vermagic="$(strings "$KO" | grep -m1 '^vermagic=')"
 log "produced vermagic: ${got_vermagic#vermagic=}"
 if [ "$got_vermagic" != "vermagic=$EXPECTED_VERMAGIC" ]; then
@@ -205,6 +268,33 @@ if [ "$got_vermagic" != "vermagic=$EXPECTED_VERMAGIC" ]; then
   err "  got:      ${got_vermagic#vermagic=}"
   err "If only the release token differs, set TARGET_RELEASE correctly."
   err "If flags differ, the device config or vivo source's vermagic.h does not match."
+fi
+
+# Verify the baked-in symbol CRCs match what the device's running kernel
+# expects. On arm64 each __versions entry is 64 bytes: 8-byte CRC (unsigned
+# long) + 56-byte name. modpost (CONFIG_MODVERSIONS) bakes these from
+# Module.symvers; if DEVICE_SYMVERS was used they must equal the device table.
+ko_ml_crc="$(objdump -s -j __versions "$KO" 2>/dev/null \
+  | grep -m1 -A1 'module_l' | head -1 | awk '{print $2}')"
+# objdump prints CRC as 8 hex bytes little-endian across 2 words; rebuild u32.
+if [ -n "$ko_ml_crc" ]; then
+  # '63dd2202 00000000' -> take first word, byte-swap to big-endian u32 hex
+  w1="$(printf '%s' "$ko_ml_crc" | awk '{print $1}')"
+  ko_ml="0x$(echo "$w1" | sed 's/\(..\)/\1\n/g' | tac | tr -d '\n')"
+  log "baked module_layout CRC: $ko_ml"
+  if [ -n "${DEVICE_SYMVERS:-}" ]; then
+    dev_ml="$(grep -w module_layout "$DEVICE_SYMVERS" | awk '{print $1}')"
+    if [ -n "$dev_ml" ]; then
+      log "device  module_layout CRC: $dev_ml"
+      if [ "$ko_ml" = "$dev_ml" ]; then
+        log "OK: baked module_layout CRC matches device — modversions should pass"
+      else
+        err "WARNING: baked module_layout CRC ($ko_ml) != device ($dev_ml)"
+        err "  the .ko will fail to load with 'disagrees about version of symbol module_layout'"
+        err "  re-extract the device symvers (scripts/extract-symvers-from-device.sh) and rebuild"
+      fi
+    fi
+  fi
 fi
 
 # ─── 8. stage output ──────────────────────────────────────────────────────────
