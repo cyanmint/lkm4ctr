@@ -73,9 +73,11 @@
 #     the Redroid test runs alongside the per-KMI test matrix. It downloads
 #     the prebuilt Redroid rootfs Disk A from release 4.0.1 and boots it with
 #     an empty writable Disk B for test logs. The test injects that KMI's
-#     module/checker into the initramfs, which copies them onto Disk A before
-#     switch_root. Android's init service runs the tests after boot completion,
-#     logs to Disk B, unmounts it, and shuts down.
+#     module/checker into this QEMU initramfs. Android first-stage init mounts
+#     fresh /dev, /proc, /sys, and selinuxfs; an injected Redroid early-init
+#     action creates loop/device-mapper nodes before apexd-bootstrap. The test
+#     service runs when apexd-bootstrap reports ready, logs to Disk B, unmounts
+#     it, and shuts down.
 #   - .github/workflows/build-redroid-disk-a.yml builds Disk A independently
 #     and uploads it to the existing 4.0.1 release.
 #
@@ -566,8 +568,8 @@ jobs:
   # Runs in parallel with the ordinary KMI QEMU test matrix once the required
   # android14-6.1 module and checker artifacts are available. Disk A is a
   # prebuilt Redroid rootfs downloaded from the 4.0.1 release; the matching
-  # module/checker are injected into this QEMU initramfs and copied onto Disk A
-  # after mount, before switch_root.
+  # module/checker are injected into this QEMU initramfs and copied onto Disk A.
+  # Disk A staging adds the Android fstab and early-init device-node setup.
   redroid-test:
     needs: [prepare, build, build-checker]
     if: ${{ !cancelled() && contains(fromJson(needs.prepare.outputs.matrix), 'android14-6.1') && needs.build.result == 'success' && needs.build-checker.result == 'success' }}
@@ -644,16 +646,7 @@ jobs:
           }
           trap cleanup EXIT
           sudo mount -o loop,rw redroid-test-disk-a.ext4 "$rootfs_mount"
-          sudo install -D -o 0 -g 0 -m 0644 \
-            tests/redroid/lkm4ctr-test.rc \
-            "$rootfs_mount/system/etc/init/lkm4ctr-test.rc"
-          sudo install -D -o 0 -g 0 -m 0755 \
-            tests/redroid/lkm4ctr-test.sh \
-            "$rootfs_mount/system/bin/lkm4ctr-test.sh"
-          sudo install -D -o 0 -g 0 -m 0755 \
-            tests/redroid/lkm4ctr-device-nodes.sh \
-            "$rootfs_mount/system/bin/lkm4ctr-device-nodes.sh"
-          sudo bash tests/redroid/install-device-node-hook.sh "$rootfs_mount"
+          sudo bash tests/redroid/stage-disk-a.sh "$rootfs_mount"
           sudo umount "$rootfs_mount"
           mkdir -p redroid-output
           bash tests/redroid/run-qemu.sh \

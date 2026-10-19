@@ -18,19 +18,33 @@ checker=$7
 output_dir=$(cd "$output_dir" && pwd)
 ramdisk_dir=$(mktemp -d)
 mount_dir=$(mktemp -d)
+qemu_memory=${QEMU_MEMORY:-4G}
+qemu_cpus=${QEMU_CPUS:-4}
+qemu_accel_args=()
+qemu_accel=tcg
+if [[ -n ${QEMU_TB_SIZE:-} ]]; then
+	qemu_accel+=",tb-size=$QEMU_TB_SIZE"
+fi
+if [[ -n ${QEMU_TCG_THREAD:-} ]]; then
+	qemu_accel+=",thread=$QEMU_TCG_THREAD"
+fi
+if [[ $qemu_accel != tcg ]]; then
+	qemu_accel_args=(-accel "$qemu_accel")
+fi
 trap 'rm -rf "$ramdisk_dir"; sudo umount "$mount_dir" 2>/dev/null || true; rmdir "$mount_dir"' EXIT
 
 mkdir -p "$output_dir/disk-b-contents"
 mkdir -p "$ramdisk_dir/dev" "$ramdisk_dir/proc" "$ramdisk_dir/sys"
 install -m 0755 "$busybox" "$ramdisk_dir/busybox"
 install -m 0755 tests/redroid/init "$ramdisk_dir/init"
+install -m 0755 tests/redroid/lkm4ctr-early-devices.sh "$ramdisk_dir/lkm4ctr-early-devices.sh"
 install -m 0644 "$module" "$ramdisk_dir/lkm4ctr.ko"
 install -m 0755 "$checker" "$ramdisk_dir/lkm4ctr_checker"
 (cd "$ramdisk_dir" && find . | cpio -o -H newc > "$output_dir/redroid-initramfs.cpio")
 
 set +e
 timeout --signal=KILL 1200 qemu-system-aarch64 \
-	-M virt -cpu max -m 4G -smp 4 -nographic -no-reboot \
+	-M virt "${qemu_accel_args[@]}" -cpu max -m "$qemu_memory" -smp "$qemu_cpus" -nographic -no-reboot \
 	-kernel "$kernel" \
 	-initrd "$output_dir/redroid-initramfs.cpio" \
 	-device qemu-xhci,id=usb0 \
@@ -38,7 +52,7 @@ timeout --signal=KILL 1200 qemu-system-aarch64 \
 	-device usb-storage,bus=usb0.0,drive=disk_a,id=redroid-rootfs \
 	-drive file="$disk_b",if=none,format=raw,id=disk_b \
 	-device usb-storage,bus=usb0.0,drive=disk_b,id=test-results \
-	-append 'console=ttyAMA0 rdinit=/init earlycon panic=-1 androidboot.hardware=redroid androidboot.redroid_width=720 androidboot.redroid_height=1280 androidboot.redroid_dpi=240 androidboot.selinux=permissive' \
+	-append 'console=ttyAMA0 rdinit=/init earlycon panic=-1 androidboot.hardware=redroid androidboot.fstab_suffix=redroid androidboot.redroid_width=720 androidboot.redroid_height=1280 androidboot.redroid_dpi=240 androidboot.selinux=permissive' \
 	2>&1 | tee "$output_dir/redroid-qemu.log"
 qemu_status=${PIPESTATUS[0]}
 set -e
@@ -65,11 +79,20 @@ if [ "$qemu_status" -ne 0 ]; then
 	echo "REDROID_TEST_FAILED: QEMU exited with status $qemu_status" >&2
 	exit 1
 fi
-if ! grep -Fq 'REDROID_TEST_RESULT=PASS' "$test_log"; then
+if ! grep -Fq 'ANDROID_BOOT_COMPLETED=1' "$test_log" ||
+	! grep -Fq 'ANDROID_BOOT_COMPLETED=1' "$output_dir/redroid-qemu.log"; then
+	echo "REDROID_TEST_FAILED: Android did not reach sys.boot_completed=1" >&2
+	exit 1
+fi
+if ! grep -Fq 'REDROID_MODULE_TEST_RESULT=PASS' "$test_log"; then
+	echo "REDROID_TEST_FAILED: module/checker/removal stage did not report PASS" >&2
+	exit 1
+fi
+if ! grep -Fq 'REDROID_TEST_RESULT=PASS' "$output_dir/redroid-qemu.log"; then
 	echo "REDROID_TEST_FAILED: Android test service did not report PASS" >&2
 	exit 1
 fi
-if ! grep -Fq 'DISK_B_UMOUNT_STATUS=PASS' "$test_log"; then
+if ! grep -Fq 'DISK_B_UMOUNT_STATUS=PASS' "$output_dir/redroid-qemu.log"; then
 	echo "REDROID_TEST_FAILED: Android test service did not unmount Disk B" >&2
 	exit 1
 fi

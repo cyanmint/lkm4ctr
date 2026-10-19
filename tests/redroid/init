@@ -59,10 +59,34 @@ if ! /busybox cp /lkm4ctr.ko /newroot/system/bin/lkm4ctr.ko ||
 	exit 1
 fi
 
+if ! /busybox sh /lkm4ctr-early-devices.sh /newroot/dev /busybox --scsi; then
+	echo "REDROID_TEST_FAILED: could not prepare Disk A device nodes"
+	/busybox poweroff -f
+	exit 1
+fi
+
+fail() {
+	echo "REDROID_TEST_FAILED: $*"
+	/busybox poweroff -f
+	exit 1
+}
+
+detach_initramfs_mount() {
+	mountpoint=$1
+	echo "REDROID_TEST: detaching initramfs mount $mountpoint"
+	if /busybox grep -q " $mountpoint " /proc/mounts; then
+		if ! /busybox umount "$mountpoint"; then
+			fail "could not detach initramfs mount $mountpoint"
+		fi
+	fi
+	echo "REDROID_TEST: detached initramfs mount $mountpoint"
+}
+
+# Android first-stage init owns its /dev, /proc, and /sys setup.
+echo 1000 > /proc/sys/kernel/printk_ratelimit_burst 2>/dev/null || true
+detach_initramfs_mount /dev
+detach_initramfs_mount /sys
+detach_initramfs_mount /proc
+
 echo "REDROID_TEST: switching to the Redroid rootfs on Disk A"
-exec /busybox switch_root /newroot /init \
-	androidboot.hardware=redroid \
-	androidboot.redroid_width=720 \
-	androidboot.redroid_height=1280 \
-	androidboot.redroid_dpi=240 \
-	androidboot.selinux=permissive
+exec /busybox switch_root /newroot /init

@@ -1,0 +1,5 @@
+# Public Domain (AI-generated; no copyright subsists in this content).
+# Disk A is mounted as the root filesystem before Android init. This inert,
+# non-first-stage entry makes Android 14's default-fstab lookup succeed; there
+# are no partitions to mount during first-stage init.
+tmpfs /mnt/lkm4ctr-fstab tmpfs rw,nosuid,nodev defaults
