@@ -17,10 +17,18 @@ using the exact `.config` here (captured via `zcat /proc/config.gz`).
 - `iqoo-neo9.config` — vivo iQOO Neo9 (V2338A / PD2338, SM8550 / kalama),
   kernel `5.15.178-gaacdc35637c4-dirty`, Android 15. Captured from the running
   kernel's `/proc/config.gz`. Key options:
-  - `CONFIG_VIVO_MODULE_VERMAGIC=y` → assumed to add a `vivo` vermagic token,
-    BUT the public GPL source tree has NO implementation of this Kconfig (no
-    Kconfig definition, no `vermagic.h` change) and the device's own vendor
-    DLKMs carry no `vivo` token, so vermagic is plain `... modversions aarch64`.
+  - `CONFIG_VIVO_MODULE_VERMAGIC=y` → the RUNNING kernel appends a `vivo`
+    vermagic token (`... modversions vivo aarch64`, verified on-device: a
+    token-less module is rejected with the version-magic error in
+    `errors.txt`). vivo's own vendor DLKMs carry no `vivo` token only because
+    they bypass modversions/vermagic via a CRC-bypass load path; a third-party
+    module does not, so it must match. BUT the public GPL source tree ships NO
+    implementation of this Kconfig (no Kconfig definition, no `vermagic.h`
+    change), and `make olddefconfig` strips the undefined symbol, so a build
+    from the GPL source yields vermagic WITHOUT the `vivo` token. The build
+    script therefore applies `scripts/iqoo-neo9-vermagic-vivo.patch` to add
+    `#define MODULE_VERMAGIC_VIVO "vivo "` to the source tree's `vermagic.h`,
+    restoring the token so the out-of-tree module matches byte-for-byte.
   - `CONFIG_VIVO_VMET_BREAK_KMI=y` → vivo deliberately breaks the GKI KMI
   - `CONFIG_LTO_CLANG_FULL=y` + `CONFIG_CFI_CLANG=y` → full LTO + CFI
   - `CONFIG_CC_VERSION_TEXT="... clang version 14.0.7 ... r450784e"` →

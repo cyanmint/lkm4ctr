@@ -13,9 +13,18 @@
 # (vendor-configs/iqoo-neo9.device-symvers, see
 # scripts/extract-symvers-from-device.sh).
 #
-# NOTE: CONFIG_VIVO_MODULE_VERMAGIC=y was previously assumed to add a `vivo`
-# vermagic token, but that Kconfig has no implementation in the public GPL tree
-# and the device's own vendor DLKMs carry no `vivo` token — so vermagic is plain.
+# NOTE: the running kernel DOES carry a `vivo` vermagic token
+# (`... modversions vivo aarch64`, verified on-device: a token-less module is
+# rejected with the version-magic error in errors.txt). vivo's own vendor
+# DLKMs carry no `vivo` token only because they bypass modversions/vermagic via
+# a CRC-bypass load path; a third-party module does not, so it must match.
+# But the public GPL source tree ships NO implementation of
+# CONFIG_VIVO_MODULE_VERMAGIC (no Kconfig definition, no vermagic.h change), and
+# `make olddefconfig` strips the undefined symbol, so a build from the GPL
+# source yields vermagic WITHOUT the token. The build script therefore applies
+# scripts/iqoo-neo9-vermagic-vivo.patch to add `#define MODULE_VERMAGIC_VIVO
+# "vivo "` to the source tree's vermagic.h, restoring the token so the
+# out-of-tree module matches byte-for-byte and plain insmod loads.
 #
 # The vivo GPL source tarball is NOT bundled; provide its URL via
 # `vivo_tarball_url` (obtain it from https://opensource.vivo.com/, project 139,
@@ -60,6 +69,7 @@ on:
       - lkm4ctr
     paths:
       - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'scripts/iqoo-neo9-vermagic-vivo.patch'
       - 'vendor-configs/iqoo-neo9.config'
       - '.github/workflows/build-vendor-iqoo-neo9.yml'
   pull_request:
@@ -67,6 +77,7 @@ on:
       - lkm4ctr
     paths:
       - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'scripts/iqoo-neo9-vermagic-vivo.patch'
       - 'vendor-configs/iqoo-neo9.config'
       - '.github/workflows/build-vendor-iqoo-neo9.yml'
 
@@ -83,7 +94,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
-            cpio zip unzip wget curl python3 dwarves
+            cpio zip unzip wget curl python3 dwarves patch
 
       # Full LTO + CFI linking vmlinux.o is the single biggest memory peak of
       # the whole build (lld loads all bitcode modules at once for whole-program

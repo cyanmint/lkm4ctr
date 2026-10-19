@@ -72,13 +72,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${NDK_URL:="https://dl.google.com/android/repository/android-ndk-r25c-linux.zip"}"
 
 # vermagic flags the running kernel expects (after the release token).
-# NOTE: a `vivo` token was previously assumed here based on
-# CONFIG_VIVO_MODULE_VERMAGIC=y, but that Kconfig has NO implementation in the
-# public GPL source tree (no Kconfig definition, no vermagic.h change), and the
-# device's own vendor DLKMs carry the plain flags below with NO vivo token
-# (verified: strings /vendor_dlkm/lib/modules/5.15-gki/adsp_loader_dlkm.ko).
-# So the real expected vermagic has no `vivo` token.
-EXPECTED_VERMAGIC="$TARGET_RELEASE SMP preempt mod_unload modversions aarch64"
+# The running vivo kernel DOES carry a `vivo` token: on-device a token-less
+# module is rejected with `version magic '... modversions aarch64' should be
+# '... modversions vivo aarch64'` (see errors.txt). vivo's own vendor DLKMs
+# carry no `vivo` token only because they bypass modversions/vermagic via a
+# CRC-bypass load path; a third-party module does not, so it must match the
+# real kernel vermagic. The `vivo` token is injected by the patch applied in
+# step 3a (the GPL source's vermagic.h otherwise omits it). Order matches the
+# device: ...modversions<sp>vivo<sp>aarch64.
+EXPECTED_VERMAGIC="$TARGET_RELEASE SMP preempt mod_unload modversions vivo aarch64"
 
 log() { printf '\033[1;34m[build-vendor]\033[0m %s\n' "$*" >&2; }
 err() { printf '\033[1;31m[build-vendor]\033[0m %s\n' "$*" >&2; }
@@ -90,7 +92,7 @@ trap 'rm -rf "$WORK"' EXIT
 log "workspace: $WORK"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1 (install it on the build host)"; }
-for c in make gcc bc flex bison openssl cpio tar unzip wget curl python3; do need_cmd "$c"; done
+for c in make gcc bc flex bison openssl cpio tar unzip wget curl python3 patch; do need_cmd "$c"; done
 
 # ─── 1. toolchain: NDK r25c (clang 14.0.7, matches device r450784e) ──────────
 setup_ndk() {
@@ -152,6 +154,26 @@ setup_source
 [ -f "$DEVICE_CONFIG" ] || die "device config not found: $DEVICE_CONFIG"
 log "using device config: $DEVICE_CONFIG"
 cp -f "$DEVICE_CONFIG" "$SRC/.config"
+
+# ─── 3a. restore the `vivo` vermagic token ───────────────────────────────────
+# The running vivo kernel's vermagic carries an extra `vivo` flag token
+# (`... modversions vivo aarch64`; verified on-device: plain insmod of a
+# token-less module is rejected with the version-magic error). The vivo GPL
+# source ships CONFIG_VIVO_MODULE_VERMAGIC=y in the .config but ships NO
+# implementation of it (no Kconfig definition, no vermagic.h change), and
+# `make olddefconfig` strips the undefined symbol, so a build from the GPL
+# source yields vermagic WITHOUT the `vivo` token — which never matches the
+# running kernel. vivo's *internal* (closed) build tree has the patched
+# vermagic.h; the published GPL tree does not. We restore it here with a
+# committed patch so the out-of-tree module's vermagic matches the device
+# byte-for-byte and plain insmod loads without ksud's force/ignore-vermagic.
+VERMAGIC_PATCH="$LKM4CTR_REPO/scripts/iqoo-neo9-vermagic-vivo.patch"
+[ -f "$VERMAGIC_PATCH" ] || die "vermagic patch not found: $VERMAGIC_PATCH"
+log "applying vivo vermagic token patch: $VERMAGIC_PATCH"
+( cd "$SRC" && patch -p1 --forward < "$VERMAGIC_PATCH" ) \
+  || die "vermagic patch failed to apply (source tree mismatch?)"
+grep -q 'MODULE_VERMAGIC_VIVO' "$SRC/include/linux/vermagic.h" \
+  || die "vermagic patch applied but MODULE_VERMAGIC_VIVO missing"
 
 # ─── 4. normalize config (silent; device config already matches this source) ──
 log "make olddefconfig (ARCH=arm64 LLVM=1)"

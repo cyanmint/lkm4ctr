@@ -74,10 +74,16 @@ vivo 官方 GPL 源码发布在 <https://opensource.vivo.com/>（无检索栏，
    后缀 `-gaacdc35637c4-dirty`，最终 `UTS_RELEASE` =
    `5.15.178-gaacdc35637c4-dirty`，与设备完全相同；同时关掉
    `LOCALVERSION_AUTO` 避免源码树 git 状态再追加错误的 `-g<hash>`。
-4. **`vivo` token 与 flags 自动继承**：构建用的是 vivo 源码树，其
-   `vermagic.h` 已追加 `vivo` 标志；`SMP preempt mod_unload modversions`
-   由设备 `.config` 里 `CONFIG_SMP/PREEMPT/MODULE_UNLOAD/MODVERSIONS=y`
-   提供。模块编译时自动从该树继承，无需手动改。
+4. **`vivo` token 需手动补丁，flags 自动继承**：vivo 公开 GPL 源码的
+   `vermagic.h` **并未**实现 `CONFIG_VIVO_MODULE_VERMAGIC`（没有对应 Kconfig
+   定义，也没有 `vermagic.h` 改动），且 `make olddefconfig` 会把这个未定义
+   符号直接丢弃；而设备实际运行内核的 vermagic **带** `vivo` token
+   （`... modversions vivo aarch64`，见仓库 `errors.txt` 实测）。因此构建脚本
+   用补丁 `scripts/iqoo-neo9-vermagic-vivo.patch` 在源码树的 `vermagic.h`
+   里无条件追加 `#define MODULE_VERMAGIC_VIVO "vivo "`，使外挂模块 vermagic
+   与设备逐字一致、普通 `insmod` 即可加载。`SMP preempt mod_unload
+   modversions` 则由设备 `.config` 的 `CONFIG_SMP/PREEMPT/MODULE_UNLOAD/
+   MODVERSIONS=y` 提供，模块编译时自动继承。
 5. **`make ... -k vmlinux modules`**：先建 `vmlinux` 得到核心符号 CRC
    （写入 `Module.symvers`，这是 `lkm4ctr` 实际依赖的全部），`-k` 让个别
    厂商 DLKM 编译失败也不中断，核心 CRC 仍完整。
@@ -174,3 +180,26 @@ kretprobe_trampoline.cfi_jt+0x0/0x8
 - 厂商内核整体设计：[`architecture/GLUE.md`](../architecture/GLUE.md)、
   [`VENDOR_KERNEL.md`](./VENDOR_KERNEL.md)
 - 项目默认 GKI 构建方式（与本机不同）：仓库根 `README.md`、`AGENTS.md`
+
+## 9. 变更记录
+
+- **2025-10：修复 vermagic 缺 `vivo` token 导致普通 `insmod` 被拒**
+  - 现象：按 GPL 源码重建的模块 vermagic 为
+    `... modversions aarch64`，设备运行内核要
+    `... modversions vivo aarch64`，普通 `insmod` 报 `Exec format error`
+    （`version magic ... should be ... vivo ...`），只能用 ksud 强载。
+  - 根因：vivo 公开 GPL 源码**未实现** `CONFIG_VIVO_MODULE_VERMAGIC`（无 Kconfig
+    定义、`vermagic.h` 无 vivo 逻辑），`make olddefconfig` 会把该未定义符号丢弃，
+    所以 GPL 源码构建永不带 `vivo` token；而设备运行内核（vivo 内部闭源构建树）
+    **带**该 token。因 `CONFIG_MODVERSIONS=y`，内核 `same_magic()` 跳过版本 token、
+    只比较后续 flags，`vivo` 这个 flag token 必须逐字对上。
+  - 修复：新增 `scripts/iqoo-neo9-vermagic-vivo.patch`，在源码树
+    `include/linux/vermagic.h` 的 `VERMAGIC_STRING` 里（`MODULE_ARCH_VERMAGIC`
+    之前）插入 `MODULE_VERMAGIC_VIVO "vivo "`；构建脚本 step 3a 应用该补丁，
+    `EXPECTED_VERMAGIC` 同步带上 `vivo`。重建后模块 vermagic 与设备逐字一致，
+    **普通 `insmod` 即可加载，无需 ksud 强载**。
+  - 受影响文件：`scripts/iqoo-neo9-vermagic-vivo.patch`（新增）、
+    `scripts/build-vendor-iqoo-neo9.sh`、`.github/workflows/build-vendor-iqoo-neo9.yml`
+    （deps 加 `patch`）、本文件 §3.1.4、`vendor-configs/README.md`。
+  - 注：此项与 §7 的 openat panic 是两个独立问题；§7 的
+    `LKM4CTR_DISABLE_OPENAT_HOOK=y` 仍由构建脚本传入，重建产物为 31 个 hook。

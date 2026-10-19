@@ -1,0 +1,22 @@
+--- a/include/linux/vermagic.h
++++ b/include/linux/vermagic.h
+@@ -39,10 +39,19 @@
+ #define MODULE_RANDSTRUCT_PLUGIN
+ #endif
+ 
++/* vivo vendor kernel appends a "vivo" vermagic token. The public GPL
++ * source ships CONFIG_VIVO_MODULE_VERMAGIC=y in the .config but ships no
++ * Kconfig definition / vermagic.h implementation, and `make olddefconfig`
++ * strips the undefined symbol, so we add the token here unconditionally
++ * for this vivo-only build so out-of-tree modules match the running
++ * kernel's vermagic "... modversions vivo aarch64". */
++#define MODULE_VERMAGIC_VIVO "vivo "
++
+ #define VERMAGIC_STRING 						\
+ 	UTS_RELEASE " "							\
+ 	MODULE_VERMAGIC_SMP MODULE_VERMAGIC_PREEMPT 			\
+ 	MODULE_VERMAGIC_MODULE_UNLOAD MODULE_VERMAGIC_MODVERSIONS	\
++	MODULE_VERMAGIC_VIVO\
+ 	MODULE_ARCH_VERMAGIC						\
+ 	MODULE_RANDSTRUCT_PLUGIN
+ 
