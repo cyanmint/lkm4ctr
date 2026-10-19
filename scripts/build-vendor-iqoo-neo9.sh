@@ -131,17 +131,24 @@ log "make olddefconfig (ARCH=arm64 LLVM=1)"
 make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
   || die "olddefconfig failed"
 
-# ─── 5. build vmlinux + in-tree modules → real Module.symvers ─────────────────
+# ─── 5. build vmlinux → real Module.symvers (core symbol CRCs) ───────────────
 # LOCALVERSION=-gaacdc35637c4-dirty + LOCALVERSION_AUTO=n forces the exact
 # UTS_RELEASE the running kernel reports, without relying on the source tree's
 # git state. CONFIG_LOCALVERSION_AUTO=y in the device config is overridden here.
-# -k keeps going if some vendor DLKMs fail to build; Module.symvers still
-# receives every vmlinux-exported (core) symbol CRC, which is all lkm4ctr needs.
-log "building vmlinux + modules (LOCALVERSION=$TARGET_LOCALVERSION -> UTS_RELEASE=$TARGET_RELEASE, LTO+CFI per config)"
+#
+# We build ONLY vmlinux, not the in-tree `modules` target. Module.symvers is
+# produced by the vmlinux build and carries every vmlinux-exported (core)
+# symbol's CRC — which is all lkm4ctr needs: its non-exported kernel functions
+# are resolved at runtime by name via shadow_hook_resolve()/kallsyms, not via
+# CRC. Building vmlinux alone skips compiling vivo's large pile of DLKMs
+# (camera/audio/modem/etc.), cutting build time drastically while leaving the
+# CRC table complete for the symbols that actually matter.
+log "building vmlinux (LOCALVERSION=$TARGET_LOCALVERSION -> UTS_RELEASE=$TARGET_RELEASE, LTO+CFI per config)"
+# Live output (no tail buffering) so a long LTO+CFI link doesn't look stuck.
 make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   LOCALVERSION="$TARGET_LOCALVERSION" LOCALVERSION_AUTO=n \
-  -j"$JOBS" -k vmlinux modules 2>&1 | tee "$WORK/build.log" | tail -n 40
-log "vmlinux/modules build finished (non-fatal vendor-module errors ignored via -k)"
+  -j"$JOBS" vmlinux 2>&1 | tee "$WORK/build.log"
+log "vmlinux build finished"
 
 [ -s "$SRC/Module.symvers" ] || die "Module.symvers missing/empty — vmlinux build failed; see $WORK/build.log"
 sym_count="$(wc -l < "$SRC/Module.symvers")"
@@ -158,6 +165,7 @@ make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   LOCALVERSION="$TARGET_LOCALVERSION" LOCALVERSION_AUTO=n \
   M="$LKM4CTR_REPO/vendor" LKM4CTR_LOG_DMESG=y \
   -j"$JOBS" modules 2>&1 | tee -a "$WORK/build.log"
+log "lkm4ctr build finished"
 KO="$LKM4CTR_REPO/vendor/lkm4ctr.ko"
 [ -s "$KO" ] || die "lkm4ctr.ko was not produced; see $WORK/build.log"
 
