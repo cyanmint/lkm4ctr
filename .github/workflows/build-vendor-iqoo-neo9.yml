@@ -75,11 +75,20 @@ jobs:
       # make error. A 16G swap gives lld headroom to survive the link peak.
       - name: Add 16G swap (survive LTO vmlinux.o link peak)
         run: |
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          set -x
+          swapon --show
+          # The ubuntu-22.04 runner image ships an active /swapfile, so writing
+          # that path fails with ETXTBSY. Use a distinct path to ADD swap on
+          # top of the existing one instead of clobbering it.
+          SWAP=/swapfile-lto
+          sudo swapoff "$SWAP" 2>/dev/null || true
+          sudo rm -f "$SWAP"
+          sudo fallocate -l 16G "$SWAP" || sudo dd if=/dev/zero of="$SWAP" bs=1M count=16384
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP"
+          sudo swapon "$SWAP"
           echo "swap active:"
+          swapon --show
           free -h
           df -h /
 
