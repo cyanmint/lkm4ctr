@@ -1,0 +1,97 @@
+# Build lkm4ctr.ko for the vivo iQOO Neo9 vendor kernel.
+#
+# The iQOO Neo9 runs a vivo SM8550 vendor kernel (5.15.178-gaacdc35637c4-dirty)
+# that deliberately breaks the GKI KMI (CONFIG_VIVO_VMET_BREAK_KMI=y) and adds a
+# `vivo` vermagic token (CONFIG_VIVO_MODULE_VERMAGIC=y). A stock GKI
+# android13-5.15 build cannot load here — it must be rebuilt against the vivo GPL
+# kernel source with the device's exact .config. This workflow does that.
+#
+# The vivo GPL source tarball is NOT bundled; provide its URL via
+# `vivo_tarball_url` (obtain it from https://opensource.vivo.com/, project 139,
+# file android_15.0_kernel_SM8550.tar.gz). The build uses NDK r25c's clang
+# 14.0.7 to match the device toolchain (r450784e) for symbol-CRC fidelity.
+
+name: Build lkm4ctr for iQOO Neo9 (vendor kernel)
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      vivo_tarball_url:
+        description: 'HTTPS URL of android_15.0_kernel_SM8550.tar.gz from opensource.vivo.com (project 139)'
+        required: true
+        type: string
+      target_release:
+        description: 'UTS_RELEASE the running kernel reports (default: 5.15.178-gaacdc35637c4-dirty)'
+        required: false
+        type: string
+        default: '5.15.178-gaacdc35637c4-dirty'
+      target_localversion:
+        description: 'LOCALVERSION suffix appended to base 5.15.178 (default: -gaacdc35637c4-dirty)'
+        required: false
+        type: string
+        default: '-gaacdc35637c4-dirty'
+      jobs:
+        description: 'make -j (blank = nproc)'
+        required: false
+        type: string
+        default: ''
+  push:
+    branches:
+      - lkm4ctr
+    paths:
+      - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'vendor-configs/iqoo-neo9.config'
+      - '.github/workflows/build-vendor-iqoo-neo9.yml'
+  pull_request:
+    branches:
+      - lkm4ctr
+    paths:
+      - 'scripts/build-vendor-iqoo-neo9.sh'
+      - 'vendor-configs/iqoo-neo9.config'
+      - '.github/workflows/build-vendor-iqoo-neo9.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout lkm4ctr
+        uses: actions/checkout@v4
+
+      - name: Install kernel build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            cpio zip unzip wget curl python3 dwarves
+
+      - name: Build lkm4ctr.ko against vivo source
+        env:
+          VIVO_KERNEL_TARBALL_URL: ${{ github.event.inputs.vivo_tarball_url || '' }}
+          TARGET_RELEASE: ${{ github.event.inputs.target_release || '5.15.178-gaacdc35637c4-dirty' }}
+          TARGET_LOCALVERSION: ${{ github.event.inputs.target_localversion || '-gaacdc35637c4-dirty' }}
+          JOBS: ${{ github.event.inputs.jobs }}
+        run: |
+          # On push/PR (no dispatch input) the vivo URL is empty; skip the actual
+          # build and only shell-check the script so the workflow stays green
+          # without the proprietary tarball.
+          if [ -z "$VIVO_KERNEL_TARBALL_URL" ]; then
+            echo "No vivo_tarball_url supplied — running shell syntax check only."
+            bash -n scripts/build-vendor-iqoo-neo9.sh && echo "script syntax OK"
+            exit 0
+          fi
+          ./scripts/build-vendor-iqoo-neo9.sh
+
+      - name: Upload lkm4ctr.ko + Module.symvers
+        if: ${{ github.event.inputs.vivo_tarball_url != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkm4ctr-iqoo-neo9-vendor-arm64
+          path: |
+            out/lkm4ctr-4.0.5-iqoo-neo9-vendor-arm64*.ko
+            out/Module.symvers.iqoo-neo9
+          if-no-files-found: error
+          retention-days: 30

@@ -26,3 +26,6 @@ modules.order
 /modules-out/
 /ramdisk-root/
 /plans/
+
+# Vendor-kernel build output (scripts/build-vendor-iqoo-neo9.sh)
+/out/
