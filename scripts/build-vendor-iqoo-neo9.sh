@@ -137,16 +137,20 @@ log "make olddefconfig (ARCH=arm64 LLVM=1)"
 make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
   || die "olddefconfig failed"
 
-# ─── 5. build vmlinux → real Module.symvers (core symbol CRCs) ───────────────
+# ─── 5. build vmlinux → vmlinux.symvers (core symbol CRCs) ─────────────────────
 # LOCALVERSION=-gaacdc35637c4-dirty + LOCALVERSION_AUTO=n forces the exact
 # UTS_RELEASE the running kernel reports, without relying on the source tree's
 # git state. CONFIG_LOCALVERSION_AUTO=y in the device config is overridden here.
 #
-# We build ONLY vmlinux, not the in-tree `modules` target. Module.symvers is
-# produced by the vmlinux build and carries every vmlinux-exported (core)
-# symbol's CRC — which is all lkm4ctr needs: its non-exported kernel functions
-# are resolved at runtime by name via shadow_hook_resolve()/kallsyms, not via
-# CRC. Building vmlinux alone skips compiling vivo's large pile of DLKMs
+# We build ONLY vmlinux, not the in-tree `modules` target. Crucially, on 5.15
+# `make vmlinux` produces `vmlinux.symvers` (the CRC table of every symbol
+# exported by vmlinux proper), NOT `Module.symvers`. The final `Module.symvers`
+# is only assembled by `make modules`, which cats `vmlinux.symvers` +
+# `modules-only.symvers` (CRCs of symbols exported by in-tree DLKMs). Since
+# lkm4ctr hooks core kernel symbols and depends on no in-tree DLKM's exports,
+# vmlinux.symvers is exactly the CRC set it needs. We copy it to Module.symvers
+# so the external module build's modpost finds the table in the place it looks.
+# Building vmlinux alone skips compiling vivo's large pile of DLKMs
 # (camera/audio/modem/etc.), cutting build time drastically while leaving the
 # CRC table complete for the symbols that actually matter.
 log "building vmlinux (LOCALVERSION=$TARGET_LOCALVERSION -> UTS_RELEASE=$TARGET_RELEASE, LTO+CFI per config)"
@@ -156,9 +160,12 @@ make -C "$SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
   -j"$JOBS" vmlinux 2>&1 | tee "$WORK/build.log"
 log "vmlinux build finished"
 
-[ -s "$SRC/Module.symvers" ] || die "Module.symvers missing/empty — vmlinux build failed; see $WORK/build.log"
+# `make vmlinux` emits vmlinux.symvers, not Module.symvers (see comment above).
+# Mirror it to Module.symvers so step 6's `make M=... modules` modpost resolves.
+[ -s "$SRC/vmlinux.symvers" ] || die "vmlinux.symvers missing/empty — vmlinux build failed; see $WORK/build.log"
+cp -f "$SRC/vmlinux.symvers" "$SRC/Module.symvers"
 sym_count="$(wc -l < "$SRC/Module.symvers")"
-log "Module.symvers: $sym_count entries"
+log "Module.symvers (from vmlinux.symvers): $sym_count entries"
 [ "$sym_count" -gt 100 ] || err "WARNING: Module.symvers has only $sym_count entries — CRCs may be incomplete"
 
 # ─── 6. build lkm4ctr against the vendor tree ─────────────────────────────────
