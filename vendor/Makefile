@@ -19,6 +19,7 @@ obj-m += lkm4ctr.o
 endif
 
 lkm4ctr-objs := \
+	../glue/vendor_kernel_legacy_symbols.o \
 	../glue/lkm4ctr_main.o \
 	../glue/lkm4ctr_log.o \
 	../glue/lkm4ctr_diagfs.o \

@@ -6,6 +6,7 @@
 #include "lkm4ctr_log.h"
 #include "shadow_hook.h"
 
+int vns_legacy_symbols_init(void);
 int vendor_kernel_init(void);
 int vendor_kernel_module_exit(void);
 void vns_user_ns_exit(void);
@@ -26,6 +27,11 @@ void lkm4ctr_hotreload_exit(void);
 static int __init lkm4ctr_init(void)
 {
 	int ret;
+
+	/* Resolve required legacy helpers before any subsystem can use them. */
+	ret = vns_legacy_symbols_init();
+	if (ret)
+		return ret;
 
 	ret = shadow_hijack_init();
 	if (ret) {
